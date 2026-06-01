@@ -1,0 +1,50 @@
+# Go build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage and profiles
+*.coverprofile
+coverage.out
+*.prof
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# Node/Vite artifacts
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+*.tsbuildinfo
+
+# Environment/config secrets
+.env
+.env.*
+!.env.example
+
+# Editor/OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and runtime files
+*.log
+
+# Local generated data and spool files
+data/spool/*.jsonl
+data/spool/*.tmp
+
+# Optional generated chart exports
+output/

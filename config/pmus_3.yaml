@@ -1,0 +1,24 @@
+pmus:
+  - name: "PMU-SIM-1"
+    ip: "127.0.0.1"
+    port: 4712
+    idcode: 7734
+    protocol: "tcp"
+    timeout_sec: 30
+    reconnect_sec: 3
+
+  - name: "PMU-SIM-2"
+    ip: "127.0.0.1"
+    port: 4722
+    idcode: 7735
+    protocol: "tcp"
+    timeout_sec: 30
+    reconnect_sec: 3
+
+  - name: "PMU-SIM-3"
+    ip: "127.0.0.1"
+    port: 4732
+    idcode: 7736
+    protocol: "tcp"
+    timeout_sec: 30
+    reconnect_sec: 3
