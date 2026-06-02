@@ -104,27 +104,8 @@ type PMUPreset = {
   values: Partial<PMUFormState>
 }
 
-const registryStorageKey = 'pdc.dashboard.registry.v1'
-
-const sampleRecord: PMURecord = {
-  id: '7004',
-  displayName: 'Bhiwadi-PMU1 - Bhiwadi',
-  substation: 'Bhiwadi, Rajasthan',
-  region: 'NRLDC',
-  voltageClass: '765 kV',
-  vendorModel: 'ABB RES670 v2.0',
-  primaryIp: '10.45.15.12',
-  redundantIp: '10.45.115.12',
-  reportingRate: '50 fps',
-  commissioned: '2018-02-08',
-  status: 'Degraded',
-  dataAvailability: '89.2%',
-  latency: '81 ms',
-  jitter: '20.6 ms',
-  packetLoss: '6.57%',
-  signalChannels: 'Voltage phasors: V_R, V_Y, V_B, V_pos | Current phasors: I_R, I_Y, I_B, I_neg | Analog: MW, MVAR, MVA | Digital: 52A_brk, 79_reclose',
-  notes: 'Inspect STAT word, verify time sync, and review fiber path.',
-}
+const registryStorageKey = 'pdc.dashboard.registry.v3'
+const legacySeededDisplayNames = new Set(['Jaipur-PMU1 - Jaipur'])
 
 const emptyState: DashboardState = {
   nowUtc: new Date().toISOString(),
@@ -133,45 +114,35 @@ const emptyState: DashboardState = {
 }
 
 const defaultForm: PMUFormState = {
-  ...sampleRecord,
   id: '',
   displayName: '',
+  substation: '',
+  region: '',
+  voltageClass: '',
+  vendorModel: '',
+  primaryIp: '',
+  redundantIp: '',
+  reportingRate: '',
+  commissioned: '',
+  status: '',
+  dataAvailability: '',
+  latency: '',
+  jitter: '',
+  packetLoss: '',
+  signalChannels: '',
   notes: '',
 }
 
 const regionOrder = ['NRLDC', 'WRLDC', 'NR', 'SR', 'ER', 'NER', 'ALL']
 
 const pmuPresets: PMUPreset[] = [
-  {
-    id: 'pmu-1',
-    label: 'Simulator 1',
-    values: {
-      id: '7004',
-      displayName: 'Bhiwadi-PMU1 - Bhiwadi',
-      substation: 'Bhiwadi, Rajasthan',
-      region: 'NRLDC',
-      voltageClass: '765 kV',
-      vendorModel: 'ABB RES670 v2.0',
-      primaryIp: '10.45.15.12',
-      redundantIp: '10.45.115.12',
-      reportingRate: '50 fps',
-      commissioned: '2018-02-08',
-      status: 'Degraded',
-      dataAvailability: '89.2%',
-      latency: '81 ms',
-      jitter: '20.6 ms',
-      packetLoss: '6.57%',
-      signalChannels:
-        'Voltage phasors: V_R, V_Y, V_B, V_pos | Current phasors: I_R, I_Y, I_B, I_neg | Analog: MW, MVAR, MVA | Digital: 52A_brk, 79_reclose',
-      notes: 'Inspect STAT word, verify time sync, and review fiber path.',
-    },
-  },
+  
   {
     id: 'pmu-2',
     label: 'Simulator 2',
     values: {
       id: '7005',
-      displayName: 'Bhiwadi-PMU2 - Alwar',
+      displayName: 'Alwar-PMU2 - Alwar',
       substation: 'Alwar, Rajasthan',
       region: 'NRLDC',
       voltageClass: '220 kV',
@@ -195,7 +166,7 @@ const pmuPresets: PMUPreset[] = [
     label: 'Simulator 3',
     values: {
       id: '7006',
-      displayName: 'Bhiwadi-PMU3 - Neemrana',
+      displayName: 'Neemrana-PMU3 - Neemrana',
       substation: 'Neemrana, Rajasthan',
       region: 'NRLDC',
       voltageClass: '132 kV',
@@ -217,13 +188,13 @@ const pmuPresets: PMUPreset[] = [
 ]
 
 function safeParseRegistry(raw: string | null): PMURecord[] {
-  if (!raw) return [sampleRecord]
+  if (!raw) return []
   try {
     const parsed = JSON.parse(raw) as PMURecord[]
-    if (!Array.isArray(parsed) || parsed.length === 0) return [sampleRecord]
-    return parsed
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((record) => !legacySeededDisplayNames.has(record.displayName))
   } catch {
-    return [sampleRecord]
+    return []
   }
 }
 
@@ -259,9 +230,9 @@ function phasorToXY(vector: PhasorVector, radius: number) {
   }
 }
 
-function PhasorPlot({ snapshot }: { snapshot?: PhasorSnapshot }) {
-  const center = 100
-  const radius = 72
+function PhasorPlot({ snapshot, pmuName }: { snapshot?: PhasorSnapshot; pmuName?: string }) {
+  const center = 120
+  const radius = 82
 
   const vectors = [
     { label: 'VA', color: '#4de0ff', value: snapshot?.va },
@@ -270,28 +241,120 @@ function PhasorPlot({ snapshot }: { snapshot?: PhasorSnapshot }) {
     { label: 'IA', color: '#ff7b7b', value: snapshot?.ia },
   ]
 
+  const compassMarks = [
+    { label: '0°', x: center + radius + 13, y: center + 4 },
+    { label: '90°', x: center - 11, y: center - radius - 11 },
+    { label: '180°', x: center - radius - 38, y: center + 4 },
+    { label: '270°', x: center - 17, y: center + radius + 23 },
+  ]
+
   return (
     <div className="phasor-frame">
-      <svg viewBox="0 0 200 200" className="phasor-svg" aria-label="Phasor plot">
+      <div className="phasor-canvas">
+        <svg viewBox="0 0 240 240" className="phasor-svg" aria-label="Phasor plot">
         <defs>
-          <marker id="arrow-cyan" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill="#4de0ff" />
+          <radialGradient id="phasor-core" cx="50%" cy="45%" r="70%">
+            <stop offset="0%" stopColor="rgba(99, 210, 245, 0.22)" />
+            <stop offset="50%" stopColor="rgba(18, 35, 54, 0.45)" />
+            <stop offset="100%" stopColor="rgba(6, 11, 18, 0.95)" />
+          </radialGradient>
+          <filter id="phasor-glow" x="-45%" y="-45%" width="190%" height="190%">
+            <feDropShadow dx="0" dy="0" stdDeviation="1.6" floodColor="#7ed6ff" floodOpacity="0.35" />
+          </filter>
+          <marker
+            id="arrow-cyan"
+            markerWidth="11"
+            markerHeight="9"
+            refX="9.5"
+            refY="4"
+            orient="auto-start-reverse"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#4de0ff" />
           </marker>
-          <marker id="arrow-mint" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill="#7dff93" />
+          <marker
+            id="arrow-mint"
+            markerWidth="11"
+            markerHeight="9"
+            refX="9.5"
+            refY="4"
+            orient="auto-start-reverse"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#7dff93" />
           </marker>
-          <marker id="arrow-amber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill="#ffd166" />
+          <marker
+            id="arrow-amber"
+            markerWidth="11"
+            markerHeight="9"
+            refX="9.5"
+            refY="4"
+            orient="auto-start-reverse"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ffd166" />
           </marker>
-          <marker id="arrow-coral" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill="#ff7b7b" />
+          <marker
+            id="arrow-coral"
+            markerWidth="11"
+            markerHeight="9"
+            refX="9.5"
+            refY="4"
+            orient="auto-start-reverse"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ff7b7b" />
           </marker>
         </defs>
 
-        <circle cx={center} cy={center} r={radius} className="phasor-ring" />
-        <circle cx={center} cy={center} r={radius * 0.66} className="phasor-ring faint" />
+        <circle cx={center} cy={center} r={radius + 18} className="phasor-aura" />
+        <circle cx={center} cy={center} r={radius + 10} className="phasor-shell" />
+        <circle cx={center} cy={center} r={radius} fill="url(#phasor-core)" className="phasor-core" />
+
+        <circle cx={center} cy={center} r={radius} className="phasor-ring major" />
+        <circle cx={center} cy={center} r={radius * 0.75} className="phasor-ring faint" />
+        <circle cx={center} cy={center} r={radius * 0.5} className="phasor-ring faint" />
+        <circle cx={center} cy={center} r={radius * 0.25} className="phasor-ring faint" />
+
+        {Array.from({ length: 24 }).map((_, idx) => {
+          const a = (idx * Math.PI) / 12
+          const isMajor = idx % 3 === 0
+          const r1 = radius + (isMajor ? 3 : 1)
+          const r2 = radius - (isMajor ? 10 : 5)
+          return (
+            <line
+              key={`tick-${idx}`}
+              x1={center + Math.cos(a) * r1}
+              y1={center - Math.sin(a) * r1}
+              x2={center + Math.cos(a) * r2}
+              y2={center - Math.sin(a) * r2}
+              className={`phasor-tick ${isMajor ? 'major' : ''}`}
+            />
+          )
+        })}
+
+        {Array.from({ length: 12 }).map((_, idx) => {
+          const a = (idx * Math.PI) / 6
+          return (
+            <line
+              key={`grid-${idx}`}
+              x1={center}
+              y1={center}
+              x2={center + Math.cos(a) * radius}
+              y2={center - Math.sin(a) * radius}
+              className="phasor-spoke"
+            />
+          )
+        })}
+
         <line x1={center - radius} y1={center} x2={center + radius} y2={center} className="phasor-axis" />
         <line x1={center} y1={center - radius} x2={center} y2={center + radius} className="phasor-axis" />
+
+        {compassMarks.map((mark) => (
+          <text key={mark.label} x={mark.x} y={mark.y} className="phasor-mark">
+            {mark.label}
+          </text>
+        ))}
 
         {vectors.map((entry) => {
           const xy = entry.value ? phasorToXY(entry.value, radius) : { x: 0, y: 0 }
@@ -310,20 +373,32 @@ function PhasorPlot({ snapshot }: { snapshot?: PhasorSnapshot }) {
                 x2={center + xy.x}
                 y2={center + xy.y}
                 stroke={entry.color}
-                strokeWidth="3"
+                strokeWidth="2.6"
+                strokeLinecap="round"
                 markerEnd={markerMap[entry.color]}
+                filter="url(#phasor-glow)"
               />
-              <circle cx={center + xy.x} cy={center + xy.y} r="3.5" fill={entry.color} />
+              <circle cx={center + xy.x} cy={center + xy.y} r="4" className="phasor-tip-back" />
+              <circle cx={center + xy.x} cy={center + xy.y} r="2.8" fill={entry.color} />
+              <text x={center + xy.x + 7} y={center + xy.y - 6} className="phasor-vector-label" fill={entry.color}>
+                {entry.label}
+              </text>
             </g>
           )
         })}
-      </svg>
+        <circle cx={center} cy={center} r="5.2" className="phasor-origin-halo" />
+        <circle cx={center} cy={center} r="2.6" className="phasor-origin" />
+        </svg>
+      </div>
 
       <div className="phasor-legend">
-        {vectors.map((entry) => (
+        <div className="phasor-device-caption">Device: {pmuName ?? 'No PMU selected'}</div>
+        {vectors.map((entry) => {
+          const magPercent = entry.value ? Math.max(0, Math.min(100, (entry.value.magnitude / 120) * 100)) : 0
+          return (
           <div key={entry.label} className="phasor-item">
-            <span style={{ background: entry.color }} />
-            <div>
+            <span style={{ background: entry.color, color: entry.color }} />
+            <div className="phasor-copy">
               <strong>{entry.label}</strong>
               <p>
                 {entry.value
@@ -331,9 +406,15 @@ function PhasorPlot({ snapshot }: { snapshot?: PhasorSnapshot }) {
                   : 'No live value'}
               </p>
             </div>
+            <div className="phasor-meter">
+              <i style={{ width: `${magPercent}%`, background: entry.color }} />
+            </div>
           </div>
-        ))}
+          )
+        })}
       </div>
+
+      <p className="phasor-footnote">Updated: {snapshot ? formatTS(snapshot.ts) : '--'} · Polar reference in degrees</p>
     </div>
   )
 }
@@ -344,7 +425,9 @@ function App() {
   const [streamOnline, setStreamOnline] = useState(false)
   const [registry, setRegistry] = useState<PMURecord[]>(() => safeParseRegistry(localStorage.getItem(registryStorageKey)))
   const [selectedRegion, setSelectedRegion] = useState<string>('ALL')
-  const [selectedPMU, setSelectedPMU] = useState<string>(sampleRecord.displayName)
+  const [selectedPMU, setSelectedPMU] = useState<string>('')
+  const [selectedPMUs, setSelectedPMUs] = useState<string[]>([])
+  const [selectedPhasorPMU, setSelectedPhasorPMU] = useState<string>('')
   const [form, setForm] = useState<PMUFormState>(defaultForm)
   const [activeTab, setActiveTab] = useState<'dashboard' | 'register'>('dashboard')
 
@@ -460,17 +543,69 @@ function App() {
   }, [mergedRegistry, selectedRegion])
 
   useEffect(() => {
-    if (!filteredRegistry.length) return
-    if (!filteredRegistry.some((entry) => entry.record.displayName === selectedPMU)) {
-      setSelectedPMU(filteredRegistry[0].record.displayName)
+    if (!filteredRegistry.length) {
+      setSelectedPMU('')
+      setSelectedPMUs([])
+      setSelectedPhasorPMU('')
+      return
     }
-  }, [filteredRegistry, selectedPMU])
+
+    const visibleNames = new Set(filteredRegistry.map((entry) => entry.record.displayName))
+    const fallbackName = filteredRegistry[0].record.displayName
+
+    if (!visibleNames.has(selectedPMU)) {
+      setSelectedPMU(fallbackName)
+    }
+
+    if (!visibleNames.has(selectedPhasorPMU)) {
+      const nextPhasor = visibleNames.has(selectedPMU) ? selectedPMU : fallbackName
+      setSelectedPhasorPMU(nextPhasor)
+    }
+
+    setSelectedPMUs((current) => {
+      const visible = current.filter((name) => visibleNames.has(name))
+      if (visible.length > 0) return visible
+      return [visibleNames.has(selectedPMU) ? selectedPMU : fallbackName]
+    })
+  }, [filteredRegistry, selectedPMU, selectedPhasorPMU])
 
   const selected = useMemo(() => {
     return (
       filteredRegistry.find((entry) => entry.record.displayName === selectedPMU) ?? filteredRegistry[0] ?? null
     )
   }, [filteredRegistry, selectedPMU])
+
+  const selectedPhasor = useMemo(() => {
+    return filteredRegistry.find((entry) => entry.record.displayName === selectedPhasorPMU) ?? selected ?? null
+  }, [filteredRegistry, selected, selectedPhasorPMU])
+
+  const plotSelections = useMemo(() => {
+    const palette = ['#4de0ff', '#7dff93', '#ffd166', '#ff7b7b', '#8dd3ff', '#f78fb3', '#63e6be', '#ffa94d']
+    return filteredRegistry
+      .filter((entry) => selectedPMUs.includes(entry.record.displayName))
+      .map((entry, idx) => ({
+        ...entry,
+        plotKey: `pmu_${idx + 1}`,
+        color: palette[idx % palette.length],
+      }))
+  }, [filteredRegistry, selectedPMUs])
+
+  const mergedTrend = useMemo(() => {
+    const maxPoints = 240
+    const rows = new Map<number, Record<string, number>>()
+    for (const entry of plotSelections) {
+      const trendSlice = entry.trends.length > maxPoints ? entry.trends.slice(-maxPoints) : entry.trends
+      for (const point of trendSlice) {
+        const row = rows.get(point.ts) ?? { ts: point.ts }
+        row[`${entry.plotKey}__frequency`] = point.frequency
+        row[`${entry.plotKey}__mw`] = point.mw
+        row[`${entry.plotKey}__mvar`] = point.mvar
+        row[`${entry.plotKey}__rocof`] = point.rocof
+        rows.set(point.ts, row)
+      }
+    }
+    return Array.from(rows.values()).sort((a, b) => a.ts - b.ts)
+  }, [plotSelections])
 
   const selectedTrend = selected?.trends ?? []
   const latest = selected?.lastReading ?? selectedTrend.at(-1)
@@ -527,6 +662,24 @@ function App() {
       signalChannels: preset.values.signalChannels ?? current.signalChannels,
     }))
     setActiveTab('register')
+  }
+
+  function setPrimaryPMU(name: string) {
+    setSelectedPMU(name)
+    setSelectedPMUs((current) => (current.includes(name) ? current : [...current, name]))
+    if (!selectedPhasorPMU) {
+      setSelectedPhasorPMU(name)
+    }
+  }
+
+  function togglePMUForPlot(name: string) {
+    setSelectedPMUs((current) => {
+      if (current.includes(name)) {
+        if (current.length === 1) return current
+        return current.filter((item) => item !== name)
+      }
+      return [...current, name]
+    })
   }
 
   const statusCards = [
@@ -656,7 +809,7 @@ function App() {
                 <div className="panel-head">
                   <div>
                     <h3>PMU Status Table</h3>
-                    <p>Click a row to drive the charts below.</p>
+                    <p>Click a row for details and use Plot to compare multiple PMUs.</p>
                   </div>
                   <span className="table-caption">{filteredRegistry.length} PMUs</span>
                 </div>
@@ -667,6 +820,7 @@ function App() {
                       <tr>
                         <th>PMU</th>
                         <th>Region</th>
+                        <th>Plot</th>
                         <th>Status</th>
                         <th>Live</th>
                         <th>Frames</th>
@@ -680,13 +834,23 @@ function App() {
                           <tr
                             key={`${entry.record.id}-${entry.record.displayName}`}
                             className={active ? 'active' : ''}
-                            onClick={() => setSelectedPMU(entry.record.displayName)}
+                            onClick={() => setPrimaryPMU(entry.record.displayName)}
                           >
                             <td>
                               <strong>{entry.record.displayName}</strong>
                               <span>{entry.record.substation}</span>
                             </td>
                             <td>{entry.record.region}</td>
+                            <td>
+                              <label className="plot-toggle" onClick={(evt) => evt.stopPropagation()}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedPMUs.includes(entry.record.displayName)}
+                                  onChange={() => togglePMUForPlot(entry.record.displayName)}
+                                />
+                                <span>Plot</span>
+                              </label>
+                            </td>
                             <td>
                               <span className={`status-chip ${statusTone(entry.record.status)}`}>
                                 {entry.record.status}
@@ -771,31 +935,66 @@ function App() {
                   <p><strong>Notes:</strong> {selected?.record.notes ?? '--'}</p>
                 </div>
               </div>
-
-              <aside className="panel phasor-panel">
-                <div className="panel-head">
-                  <div>
-                    <h3>Phasors</h3>
-                    <p>VA, VB, VC, IA from the live stream.</p>
-                  </div>
-                </div>
-                <PhasorPlot snapshot={selected?.lastPhasor} />
-              </aside>
             </div>
           </section>
 
           <section className="charts-grid">
+            <article className="panel plot-select-panel">
+              <div className="panel-head">
+                <div>
+                  <h3>Plot Selection</h3>
+                  <p>Overlay trends from multiple PMUs to compare behavior in the same timeline.</p>
+                </div>
+                <span className="table-caption">{plotSelections.length} selected</span>
+              </div>
+              <div className="plot-selection-row">
+                <button
+                  type="button"
+                  className="plot-action"
+                  onClick={() => setSelectedPMUs(filteredRegistry.map((entry) => entry.record.displayName))}
+                >
+                  Select all visible
+                </button>
+                <button
+                  type="button"
+                  className="plot-action"
+                  onClick={() => {
+                    const keep = selected?.record.displayName ?? filteredRegistry[0]?.record.displayName
+                    setSelectedPMUs(keep ? [keep] : [])
+                  }}
+                >
+                  Reset to primary
+                </button>
+              </div>
+              <div className="plot-chip-grid">
+                {filteredRegistry.map((entry) => {
+                  const active = selectedPMUs.includes(entry.record.displayName)
+                  return (
+                    <button
+                      key={`${entry.record.id}-${entry.record.displayName}-chip`}
+                      type="button"
+                      className={`plot-chip ${active ? 'active' : ''}`}
+                      onClick={() => togglePMUForPlot(entry.record.displayName)}
+                    >
+                      <span className={`dot ${entry.connected ? 'live' : 'off'}`} />
+                      {entry.record.displayName}
+                    </button>
+                  )
+                })}
+              </div>
+            </article>
+
             {chartSeries.map((series) => (
               <article key={series.key} className="panel chart-panel">
                 <div className="panel-head">
                   <div>
-                    <h3>{selected?.record.displayName ?? 'PMU'} {series.label}</h3>
-                    <p>Last {selectedTrend.length} samples</p>
+                    <h3>{series.label} Comparison</h3>
+                    <p>Last {mergedTrend.length} timeline points across selected PMUs</p>
                   </div>
                 </div>
                 <div className="chart-wrap small">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={selectedTrend}>
+                    <LineChart data={mergedTrend}>
                       <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                       <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 12 }} />
                       <YAxis tick={{ fill: '#9eb0c5', fontSize: 12 }} />
@@ -808,13 +1007,56 @@ function App() {
                         }}
                       />
                       <Legend />
-                      <Line type="monotone" dataKey={series.key} stroke={series.color} dot={false} />
+                      {plotSelections.map((entry) => (
+                        <Line
+                          key={`${entry.plotKey}-${series.key}`}
+                          type="monotone"
+                          dataKey={`${entry.plotKey}__${series.key}`}
+                          name={entry.record.displayName}
+                          stroke={entry.color}
+                          strokeWidth={2}
+                          dot={false}
+                          connectNulls
+                          isAnimationActive={false}
+                        />
+                      ))}
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               </article>
             ))}
           </section>
+
+          <aside className="panel phasor-panel phasor-wide">
+            <div className="panel-head">
+              <div>
+                <h3>Phasor Diagram</h3>
+                <p>Choose a PMU and view its live phasor vectors in a dedicated polar scope.</p>
+              </div>
+            </div>
+
+            <div className="phasor-device-strip" role="tablist" aria-label="Phasor device selection">
+              {filteredRegistry.map((entry) => {
+                const active = entry.record.displayName === selectedPhasor?.record.displayName
+                return (
+                  <button
+                    key={`${entry.record.id}-${entry.record.displayName}-phasor`}
+                    type="button"
+                    className={`phasor-device-btn ${active ? 'active' : ''}`}
+                    onClick={() => setSelectedPhasorPMU(entry.record.displayName)}
+                  >
+                    <span className={`dot ${entry.connected ? 'live' : 'off'}`} />
+                    {entry.record.displayName}
+                  </button>
+                )
+              })}
+            </div>
+
+            <PhasorPlot
+              snapshot={selectedPhasor?.lastPhasor}
+              pmuName={selectedPhasor?.record.displayName}
+            />
+          </aside>
         </>
       ) : (
         <section className="panel register-panel">
