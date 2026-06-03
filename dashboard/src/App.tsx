@@ -136,7 +136,7 @@ const defaultForm: PMUFormState = {
 const regionOrder = ['NRLDC', 'WRLDC', 'NR', 'SR', 'ER', 'NER', 'ALL']
 
 const pmuPresets: PMUPreset[] = [
-  
+
   {
     id: 'pmu-2',
     label: 'Simulator 2',
@@ -221,6 +221,12 @@ function pmuKey(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
 
+function parseNumeric(raw: string) {
+  const cleaned = raw.replace(/[^0-9.+-]/g, '')
+  const value = Number(cleaned)
+  return Number.isFinite(value) ? value : null
+}
+
 function phasorToXY(vector: PhasorVector, radius: number) {
   const radians = (vector.angleDeg * Math.PI) / 180
   const magnitude = Math.max(0, Math.min(1, vector.magnitude / 100)) * radius
@@ -252,142 +258,142 @@ function PhasorPlot({ snapshot, pmuName }: { snapshot?: PhasorSnapshot; pmuName?
     <div className="phasor-frame">
       <div className="phasor-canvas">
         <svg viewBox="0 0 240 240" className="phasor-svg" aria-label="Phasor plot">
-        <defs>
-          <radialGradient id="phasor-core" cx="50%" cy="45%" r="70%">
-            <stop offset="0%" stopColor="rgba(99, 210, 245, 0.22)" />
-            <stop offset="50%" stopColor="rgba(18, 35, 54, 0.45)" />
-            <stop offset="100%" stopColor="rgba(6, 11, 18, 0.95)" />
-          </radialGradient>
-          <filter id="phasor-glow" x="-45%" y="-45%" width="190%" height="190%">
-            <feDropShadow dx="0" dy="0" stdDeviation="1.6" floodColor="#7ed6ff" floodOpacity="0.35" />
-          </filter>
-          <marker
-            id="arrow-cyan"
-            markerWidth="11"
-            markerHeight="9"
-            refX="9.5"
-            refY="4"
-            orient="auto-start-reverse"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#4de0ff" />
-          </marker>
-          <marker
-            id="arrow-mint"
-            markerWidth="11"
-            markerHeight="9"
-            refX="9.5"
-            refY="4"
-            orient="auto-start-reverse"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#7dff93" />
-          </marker>
-          <marker
-            id="arrow-amber"
-            markerWidth="11"
-            markerHeight="9"
-            refX="9.5"
-            refY="4"
-            orient="auto-start-reverse"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ffd166" />
-          </marker>
-          <marker
-            id="arrow-coral"
-            markerWidth="11"
-            markerHeight="9"
-            refX="9.5"
-            refY="4"
-            orient="auto-start-reverse"
-            markerUnits="strokeWidth"
-          >
-            <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ff7b7b" />
-          </marker>
-        </defs>
+          <defs>
+            <radialGradient id="phasor-core" cx="50%" cy="45%" r="70%">
+              <stop offset="0%" stopColor="rgba(99, 210, 245, 0.22)" />
+              <stop offset="50%" stopColor="rgba(18, 35, 54, 0.45)" />
+              <stop offset="100%" stopColor="rgba(6, 11, 18, 0.95)" />
+            </radialGradient>
+            <filter id="phasor-glow" x="-45%" y="-45%" width="190%" height="190%">
+              <feDropShadow dx="0" dy="0" stdDeviation="1.6" floodColor="#7ed6ff" floodOpacity="0.35" />
+            </filter>
+            <marker
+              id="arrow-cyan"
+              markerWidth="11"
+              markerHeight="9"
+              refX="9.5"
+              refY="4"
+              orient="auto-start-reverse"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#4de0ff" />
+            </marker>
+            <marker
+              id="arrow-mint"
+              markerWidth="11"
+              markerHeight="9"
+              refX="9.5"
+              refY="4"
+              orient="auto-start-reverse"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#7dff93" />
+            </marker>
+            <marker
+              id="arrow-amber"
+              markerWidth="11"
+              markerHeight="9"
+              refX="9.5"
+              refY="4"
+              orient="auto-start-reverse"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ffd166" />
+            </marker>
+            <marker
+              id="arrow-coral"
+              markerWidth="11"
+              markerHeight="9"
+              refX="9.5"
+              refY="4"
+              orient="auto-start-reverse"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ff7b7b" />
+            </marker>
+          </defs>
 
-        <circle cx={center} cy={center} r={radius + 18} className="phasor-aura" />
-        <circle cx={center} cy={center} r={radius + 10} className="phasor-shell" />
-        <circle cx={center} cy={center} r={radius} fill="url(#phasor-core)" className="phasor-core" />
+          <circle cx={center} cy={center} r={radius + 18} className="phasor-aura" />
+          <circle cx={center} cy={center} r={radius + 10} className="phasor-shell" />
+          <circle cx={center} cy={center} r={radius} fill="url(#phasor-core)" className="phasor-core" />
 
-        <circle cx={center} cy={center} r={radius} className="phasor-ring major" />
-        <circle cx={center} cy={center} r={radius * 0.75} className="phasor-ring faint" />
-        <circle cx={center} cy={center} r={radius * 0.5} className="phasor-ring faint" />
-        <circle cx={center} cy={center} r={radius * 0.25} className="phasor-ring faint" />
+          <circle cx={center} cy={center} r={radius} className="phasor-ring major" />
+          <circle cx={center} cy={center} r={radius * 0.75} className="phasor-ring faint" />
+          <circle cx={center} cy={center} r={radius * 0.5} className="phasor-ring faint" />
+          <circle cx={center} cy={center} r={radius * 0.25} className="phasor-ring faint" />
 
-        {Array.from({ length: 24 }).map((_, idx) => {
-          const a = (idx * Math.PI) / 12
-          const isMajor = idx % 3 === 0
-          const r1 = radius + (isMajor ? 3 : 1)
-          const r2 = radius - (isMajor ? 10 : 5)
-          return (
-            <line
-              key={`tick-${idx}`}
-              x1={center + Math.cos(a) * r1}
-              y1={center - Math.sin(a) * r1}
-              x2={center + Math.cos(a) * r2}
-              y2={center - Math.sin(a) * r2}
-              className={`phasor-tick ${isMajor ? 'major' : ''}`}
-            />
-          )
-        })}
-
-        {Array.from({ length: 12 }).map((_, idx) => {
-          const a = (idx * Math.PI) / 6
-          return (
-            <line
-              key={`grid-${idx}`}
-              x1={center}
-              y1={center}
-              x2={center + Math.cos(a) * radius}
-              y2={center - Math.sin(a) * radius}
-              className="phasor-spoke"
-            />
-          )
-        })}
-
-        <line x1={center - radius} y1={center} x2={center + radius} y2={center} className="phasor-axis" />
-        <line x1={center} y1={center - radius} x2={center} y2={center + radius} className="phasor-axis" />
-
-        {compassMarks.map((mark) => (
-          <text key={mark.label} x={mark.x} y={mark.y} className="phasor-mark">
-            {mark.label}
-          </text>
-        ))}
-
-        {vectors.map((entry) => {
-          const xy = entry.value ? phasorToXY(entry.value, radius) : { x: 0, y: 0 }
-          const markerMap: Record<string, string> = {
-            '#4de0ff': 'url(#arrow-cyan)',
-            '#7dff93': 'url(#arrow-mint)',
-            '#ffd166': 'url(#arrow-amber)',
-            '#ff7b7b': 'url(#arrow-coral)',
-          }
-
-          return (
-            <g key={entry.label}>
+          {Array.from({ length: 24 }).map((_, idx) => {
+            const a = (idx * Math.PI) / 12
+            const isMajor = idx % 3 === 0
+            const r1 = radius + (isMajor ? 3 : 1)
+            const r2 = radius - (isMajor ? 10 : 5)
+            return (
               <line
+                key={`tick-${idx}`}
+                x1={center + Math.cos(a) * r1}
+                y1={center - Math.sin(a) * r1}
+                x2={center + Math.cos(a) * r2}
+                y2={center - Math.sin(a) * r2}
+                className={`phasor-tick ${isMajor ? 'major' : ''}`}
+              />
+            )
+          })}
+
+          {Array.from({ length: 12 }).map((_, idx) => {
+            const a = (idx * Math.PI) / 6
+            return (
+              <line
+                key={`grid-${idx}`}
                 x1={center}
                 y1={center}
-                x2={center + xy.x}
-                y2={center + xy.y}
-                stroke={entry.color}
-                strokeWidth="2.6"
-                strokeLinecap="round"
-                markerEnd={markerMap[entry.color]}
-                filter="url(#phasor-glow)"
+                x2={center + Math.cos(a) * radius}
+                y2={center - Math.sin(a) * radius}
+                className="phasor-spoke"
               />
-              <circle cx={center + xy.x} cy={center + xy.y} r="4" className="phasor-tip-back" />
-              <circle cx={center + xy.x} cy={center + xy.y} r="2.8" fill={entry.color} />
-              <text x={center + xy.x + 7} y={center + xy.y - 6} className="phasor-vector-label" fill={entry.color}>
-                {entry.label}
-              </text>
-            </g>
-          )
-        })}
-        <circle cx={center} cy={center} r="5.2" className="phasor-origin-halo" />
-        <circle cx={center} cy={center} r="2.6" className="phasor-origin" />
+            )
+          })}
+
+          <line x1={center - radius} y1={center} x2={center + radius} y2={center} className="phasor-axis" />
+          <line x1={center} y1={center - radius} x2={center} y2={center + radius} className="phasor-axis" />
+
+          {compassMarks.map((mark) => (
+            <text key={mark.label} x={mark.x} y={mark.y} className="phasor-mark">
+              {mark.label}
+            </text>
+          ))}
+
+          {vectors.map((entry) => {
+            const xy = entry.value ? phasorToXY(entry.value, radius) : { x: 0, y: 0 }
+            const markerMap: Record<string, string> = {
+              '#4de0ff': 'url(#arrow-cyan)',
+              '#7dff93': 'url(#arrow-mint)',
+              '#ffd166': 'url(#arrow-amber)',
+              '#ff7b7b': 'url(#arrow-coral)',
+            }
+
+            return (
+              <g key={entry.label}>
+                <line
+                  x1={center}
+                  y1={center}
+                  x2={center + xy.x}
+                  y2={center + xy.y}
+                  stroke={entry.color}
+                  strokeWidth="2.6"
+                  strokeLinecap="round"
+                  markerEnd={markerMap[entry.color]}
+                  filter="url(#phasor-glow)"
+                />
+                <circle cx={center + xy.x} cy={center + xy.y} r="4" className="phasor-tip-back" />
+                <circle cx={center + xy.x} cy={center + xy.y} r="2.8" fill={entry.color} />
+                <text x={center + xy.x + 7} y={center + xy.y - 6} className="phasor-vector-label" fill={entry.color}>
+                  {entry.label}
+                </text>
+              </g>
+            )
+          })}
+          <circle cx={center} cy={center} r="5.2" className="phasor-origin-halo" />
+          <circle cx={center} cy={center} r="2.6" className="phasor-origin" />
         </svg>
       </div>
 
@@ -396,20 +402,20 @@ function PhasorPlot({ snapshot, pmuName }: { snapshot?: PhasorSnapshot; pmuName?
         {vectors.map((entry) => {
           const magPercent = entry.value ? Math.max(0, Math.min(100, (entry.value.magnitude / 120) * 100)) : 0
           return (
-          <div key={entry.label} className="phasor-item">
-            <span style={{ background: entry.color, color: entry.color }} />
-            <div className="phasor-copy">
-              <strong>{entry.label}</strong>
-              <p>
-                {entry.value
-                  ? `${round(entry.value.magnitude, 1)} pu · ${round(entry.value.angleDeg, 1)}°`
-                  : 'No live value'}
-              </p>
+            <div key={entry.label} className="phasor-item">
+              <span style={{ background: entry.color, color: entry.color }} />
+              <div className="phasor-copy">
+                <strong>{entry.label}</strong>
+                <p>
+                  {entry.value
+                    ? `${round(entry.value.magnitude, 1)} pu · ${round(entry.value.angleDeg, 1)}°`
+                    : 'No live value'}
+                </p>
+              </div>
+              <div className="phasor-meter">
+                <i style={{ width: `${magPercent}%`, background: entry.color }} />
+              </div>
             </div>
-            <div className="phasor-meter">
-              <i style={{ width: `${magPercent}%`, background: entry.color }} />
-            </div>
-          </div>
           )
         })}
       </div>
@@ -617,6 +623,62 @@ function App() {
     'ALL',
     ...Array.from(new Set(mergedRegistry.map((entry) => entry.record.region))).sort((a, b) => a.localeCompare(b)),
   ]
+
+  const detailRows = [
+    ['PMU ID', selected?.record.id ?? '--'],
+    ['Substation', selected?.record.substation ?? '--'],
+    ['Region (RLDC)', selected?.record.region ?? '--'],
+    ['Voltage class', selected?.record.voltageClass ?? '--'],
+    ['Vendor / Model', selected?.record.vendorModel ?? '--'],
+    ['Primary IP', selected?.record.primaryIp ?? '--'],
+    ['Redundant IP', selected?.record.redundantIp ?? '--'],
+    ['Reporting rate', selected?.record.reportingRate ?? '--'],
+    ['Commissioned', selected?.record.commissioned ?? '--'],
+    ['Status', selected?.record.status ?? '--'],
+  ]
+
+  const detailMetrics = [
+    { label: 'Data Availability', value: selected?.record.dataAvailability ?? '--', tone: 'ok' },
+    { label: 'Latency', value: selected?.record.latency ?? '--', tone: 'info' },
+    { label: 'Jitter', value: selected?.record.jitter ?? '--', tone: 'neutral' },
+    { label: 'Packet Loss', value: selected?.record.packetLoss ?? '--', tone: 'warn' },
+  ]
+
+  const signalChannels = (selected?.record.signalChannels ?? '--')
+    .split('|')
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  const packetLossValue = parseNumeric(selected?.record.packetLoss ?? '')
+  const availabilityValue = parseNumeric(selected?.record.dataAvailability ?? '')
+
+  const recommendedAction = useMemo(() => {
+    if (!selected) {
+      return {
+        title: 'No PMU selected',
+        message: 'Pick a PMU from the table to view diagnostics and operator recommendations.',
+      }
+    }
+
+    if ((availabilityValue !== null && availabilityValue < 95) || (packetLossValue !== null && packetLossValue > 3)) {
+      return {
+        title: 'Data quality degraded',
+        message: 'Inspect time sync (PTP/GPS), verify network path health, and review station link errors before raising escalation.',
+      }
+    }
+
+    if (statusTone(selected.record.status) === 'warn') {
+      return {
+        title: 'Monitor performance drift',
+        message: 'Track latency and jitter trend for 15 minutes and run diagnostics if variance continues to rise.',
+      }
+    }
+
+    return {
+      title: 'Operating normally',
+      message: 'Keep stream under watch and export baseline profile after stable operation period.',
+    }
+  }, [availabilityValue, packetLossValue, selected])
 
   function updateForm<K extends keyof PMUFormState>(key: K, value: PMUFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }))
@@ -902,37 +964,55 @@ function App() {
                 <div className="panel-head">
                   <div>
                     <h3>{selected?.record.displayName ?? 'Select a PMU'}</h3>
-                    <p>
-                      {selected?.record.region} region · {selected?.record.vendorModel}
-                    </p>
+                    <p>Live PMU profile and diagnostics</p>
                   </div>
                   <span className={`status-chip ${selected?.connected ? 'ok' : 'bad'}`}>
                     {selected?.connected ? 'Live' : 'Offline'}
                   </span>
                 </div>
 
-                <div className="detail-grid">
-                  <div className="detail-card">
-                    <p>PMU ID</p>
-                    <strong>{selected?.record.id ?? '--'}</strong>
-                  </div>
-                  <div className="detail-card">
-                    <p>Voltage Class</p>
-                    <strong>{selected?.record.voltageClass ?? '--'}</strong>
-                  </div>
-                  <div className="detail-card">
-                    <p>Availability</p>
-                    <strong>{selected?.record.dataAvailability ?? '--'}</strong>
-                  </div>
-                  <div className="detail-card">
-                    <p>Jitter</p>
-                    <strong>{selected?.record.jitter ?? '--'}</strong>
-                  </div>
+                <div className="detail-profile-grid">
+                  {detailRows.map(([label, value]) => (
+                    <div key={label} className="detail-profile-row">
+                      <span>{label}</span>
+                      <strong>{value}</strong>
+                    </div>
+                  ))}
                 </div>
 
-                <div className="detail-notes">
-                  <p><strong>Channels:</strong> {selected?.record.signalChannels ?? '--'}</p>
-                  <p><strong>Notes:</strong> {selected?.record.notes ?? '--'}</p>
+                <div className="detail-metrics-grid">
+                  {detailMetrics.map((metric) => (
+                    <article key={metric.label} className={`detail-metric ${metric.tone}`}>
+                      <p>{metric.label}</p>
+                      <strong>{metric.value}</strong>
+                    </article>
+                  ))}
+                </div>
+
+                <h4 className="detail-section-title">Signal Channels</h4>
+                <div className="detail-channel-list">
+                  {signalChannels.length ? (
+                    signalChannels.map((channel) => <p key={channel}>{channel}</p>)
+                  ) : (
+                    <p>No signal channels provided</p>
+                  )}
+                </div>
+
+                <h4 className="detail-section-title">Recommended Actions</h4>
+                <article className="detail-action-card">
+                  <div className="detail-action-icon">
+                    <AlertTriangle size={18} />
+                  </div>
+                  <div>
+                    <strong>{recommendedAction.title}</strong>
+                    <p>{recommendedAction.message}</p>
+                  </div>
+                </article>
+
+                <div className="detail-action-buttons">
+                  <button type="button" className="detail-btn ghost">Export C37.118</button>
+                  <button type="button" className="detail-btn ghost">Open Event Replay</button>
+                  <button type="button" className="detail-btn primary">Run Diagnostics</button>
                 </div>
               </div>
             </div>
