@@ -87,6 +87,28 @@ func newPipeline(ctx context.Context) *pipeline {
 		monitoring.RecordConversation("SYSTEM", "PDC", "SINK", "init", "warn", err.Error())
 	}
 
+	primeSpoolBacklog := func(name string, spool *output.ReadingSpool) {
+		if spool == nil {
+			return
+		}
+		counts, countErr := spool.CountsByPMU()
+		if countErr != nil {
+			log.Printf("[%s spool] count error: %v", name, countErr)
+			return
+		}
+		total := 0
+		for pmu, n := range counts {
+			total += n
+			monitoring.AddSpoolQueuedForPMU(pmu, int64(n))
+		}
+		if total > 0 {
+			log.Printf("[%s spool] restored pending backlog=%d", name, total)
+		}
+	}
+
+	primeSpoolBacklog("kafka", kafkaSpool)
+	primeSpoolBacklog("sink", sinkSpool)
+
 	return &pipeline{
 		checker:             checker,
 		publisher:           publisher,
@@ -165,16 +187,19 @@ func (p *pipeline) startReplayLoop(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				replayed, pending, err := spool.Replay(ctx, fn, maxBatch)
+				stats, err := spool.Replay(ctx, fn, maxBatch)
 				if err != nil {
 					log.Printf("[%s spool] replay error: %v", name, err)
 					monitoring.RecordConversation("SYSTEM", "PDC", strings.ToUpper(name), "spool-replay", "error", err.Error())
 					continue
 				}
 
-				if replayed > 0 {
-					monitoring.IncSpoolReplayed(replayed)
-					msg := fmt.Sprintf("replayed=%d pending=%d", replayed, pending)
+				if stats.Replayed > 0 {
+					monitoring.IncSpoolReplayed(stats.Replayed)
+					for pmu, n := range stats.ReplayedByPMU {
+						monitoring.DecSpoolQueuedForPMU(pmu, int64(n))
+					}
+					msg := fmt.Sprintf("replayed=%d pending=%d", stats.Replayed, stats.Pending)
 					log.Printf("[%s spool] %s", name, msg)
 					monitoring.RecordConversation("SYSTEM", "PDC", strings.ToUpper(name), "spool-replay", "ok", msg)
 				}

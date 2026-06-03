@@ -177,6 +177,31 @@ func IncSpoolQueuedForPMU(pmu string) {
 	st.lastEventTime = time.Now().UTC()
 }
 
+func AddSpoolQueuedForPMU(pmu string, n int64) {
+	if n <= 0 {
+		return
+	}
+	conversationBus.mu.Lock()
+	defer conversationBus.mu.Unlock()
+	st := getOrCreatePMU(pmu)
+	st.spoolQueued += n
+	st.lastEventTime = time.Now().UTC()
+}
+
+func DecSpoolQueuedForPMU(pmu string, n int64) {
+	if n <= 0 {
+		return
+	}
+	conversationBus.mu.Lock()
+	defer conversationBus.mu.Unlock()
+	st := getOrCreatePMU(pmu)
+	st.spoolQueued -= n
+	if st.spoolQueued < 0 {
+		st.spoolQueued = 0
+	}
+	st.lastEventTime = time.Now().UTC()
+}
+
 func RecordConversation(pmu, from, to, stage, status, message string) {
 	if strings.TrimSpace(pmu) == "" {
 		pmu = "SYSTEM"

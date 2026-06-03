@@ -9,6 +9,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"pdc/config"
@@ -311,11 +314,24 @@ type FrameHandler func(pmuName string, raw []byte)
 type Receiver struct {
 	cfg     config.PMUConfig
 	handler FrameHandler
+	sem     chan struct{}
+}
+
+func frameHandlerMaxInflight() int {
+	v := strings.TrimSpace(os.Getenv("FRAME_HANDLER_MAX_INFLIGHT"))
+	if v == "" {
+		return 128
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 128
+	}
+	return n
 }
 
 // New creates a Receiver for the given PMU configuration.
 func New(cfg config.PMUConfig, handler FrameHandler) *Receiver {
-	return &Receiver{cfg: cfg, handler: handler}
+	return &Receiver{cfg: cfg, handler: handler, sem: make(chan struct{}, frameHandlerMaxInflight())}
 }
 
 // Run connects to the PMU and streams data frames until ctx is cancelled.
@@ -419,7 +435,11 @@ func (r *Receiver) connect(ctx context.Context) error {
 				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "stream", "ok", fmt.Sprintf("received %d data frames", dataFrames))
 			}
 			payload := append([]byte(nil), raw...)
-			go r.handler(r.cfg.Name, payload)
+			r.sem <- struct{}{}
+			go func(name string, frame []byte) {
+				defer func() { <-r.sem }()
+				r.handler(name, frame)
+			}(r.cfg.Name, payload)
 		}
 	}
 }

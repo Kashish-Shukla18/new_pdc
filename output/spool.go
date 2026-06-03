@@ -22,6 +22,12 @@ type ReadingSpool struct {
 	mu   sync.Mutex
 }
 
+type ReplayStats struct {
+	Replayed      int
+	Pending       int
+	ReplayedByPMU map[string]int
+}
+
 func spoolFsyncEnabled() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPOOL_FSYNC")))
 	if v == "" {
@@ -137,14 +143,10 @@ func (s *ReadingSpool) Append(r parser.Reading) error {
 	return nil
 }
 
-// Replay attempts up to maxBatch pending records using fn.
-// It preserves order and keeps failed entries in the spool file.
-func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, parser.Reading) error, maxBatch int) (replayed int, pending int, err error) {
+func (s *ReadingSpool) CountsByPMU() (map[string]int, error) {
+	counts := make(map[string]int)
 	if s == nil {
-		return 0, 0, nil
-	}
-	if maxBatch <= 0 {
-		maxBatch = 1
+		return counts, nil
 	}
 
 	s.mu.Lock()
@@ -153,16 +155,68 @@ func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, pars
 	f, err := os.Open(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, 0, nil
+			return counts, nil
 		}
-		return 0, 0, fmt.Errorf("open spool for replay: %w", err)
+		return nil, fmt.Errorf("open spool for count: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*64)
+	scanner.Buffer(buf, 1024*1024*10)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var r parser.Reading
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			continue
+		}
+		pmu := strings.TrimSpace(r.PMUName)
+		if pmu == "" {
+			pmu = "SYSTEM"
+		}
+		counts[pmu]++
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan spool for count: %w", err)
+	}
+
+	return counts, nil
+}
+
+// Replay attempts up to maxBatch pending records using fn.
+// It preserves order and keeps failed entries in the spool file.
+func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, parser.Reading) error, maxBatch int) (stats ReplayStats, err error) {
+	if s == nil {
+		stats.ReplayedByPMU = make(map[string]int)
+		return stats, nil
+	}
+	if maxBatch <= 0 {
+		maxBatch = 1
+	}
+	stats.ReplayedByPMU = make(map[string]int)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f, err := os.Open(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return stats, nil
+		}
+		return stats, fmt.Errorf("open spool for replay: %w", err)
 	}
 
 	tmpPath := s.path + ".tmp"
 	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		_ = f.Close()
-		return 0, 0, fmt.Errorf("open tmp spool: %w", err)
+		return stats, fmt.Errorf("open tmp spool: %w", err)
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -175,70 +229,75 @@ func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, pars
 		if line != "" {
 			if processed >= maxBatch {
 				if _, err := tmp.WriteString(line + "\n"); err != nil {
-					return replayed, pending, fmt.Errorf("write tmp spool: %w", err)
+					return stats, fmt.Errorf("write tmp spool: %w", err)
 				}
-				pending++
+				stats.Pending++
 				continue
 			}
 
 			var r parser.Reading
 			if unmarshalErr := json.Unmarshal([]byte(line), &r); unmarshalErr != nil {
 				if _, err := tmp.WriteString(line + "\n"); err != nil {
-					return replayed, pending, fmt.Errorf("write tmp spool: %w", err)
+					return stats, fmt.Errorf("write tmp spool: %w", err)
 				}
-				pending++
+				stats.Pending++
 				continue
 			}
 
 			if replayErr := fn(ctx, r); replayErr != nil {
 				if _, err := tmp.WriteString(line + "\n"); err != nil {
-					return replayed, pending, fmt.Errorf("write tmp spool: %w", err)
+					return stats, fmt.Errorf("write tmp spool: %w", err)
 				}
-				pending++
+				stats.Pending++
 				processed++
 				continue
 			}
 
-			replayed++
+			stats.Replayed++
+			pmu := strings.TrimSpace(r.PMUName)
+			if pmu == "" {
+				pmu = "SYSTEM"
+			}
+			stats.ReplayedByPMU[pmu]++
 			processed++
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		_ = tmp.Close()
 		_ = f.Close()
-		return 0, 0, fmt.Errorf("scan spool: %w", scanErr)
+		return ReplayStats{}, fmt.Errorf("scan spool: %w", scanErr)
 	}
 
 	if err := f.Close(); err != nil {
 		_ = tmp.Close()
-		return replayed, pending, fmt.Errorf("close spool before replace: %w", err)
+		return stats, fmt.Errorf("close spool before replace: %w", err)
 	}
 
-	if replayed == 0 && pending == 0 {
+	if stats.Replayed == 0 && stats.Pending == 0 {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		_ = os.Remove(s.path)
-		return 0, 0, nil
+		return stats, nil
 	}
 
-	if pending == 0 {
+	if stats.Pending == 0 {
 		if err := tmp.Close(); err != nil {
-			return replayed, 0, fmt.Errorf("close tmp spool: %w", err)
+			return stats, fmt.Errorf("close tmp spool: %w", err)
 		}
 		_ = os.Remove(tmpPath)
 		if rmErr := os.Remove(s.path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			return replayed, 0, fmt.Errorf("remove empty spool: %w", rmErr)
+			return stats, fmt.Errorf("remove empty spool: %w", rmErr)
 		}
-		return replayed, 0, nil
+		return stats, nil
 	}
 
 	if err := tmp.Close(); err != nil {
-		return replayed, pending, fmt.Errorf("close tmp spool: %w", err)
+		return stats, fmt.Errorf("close tmp spool: %w", err)
 	}
 
 	if err := replaceFileWithRetry(s.path, tmpPath); err != nil {
-		return replayed, pending, fmt.Errorf("replace spool: %w", err)
+		return stats, fmt.Errorf("replace spool: %w", err)
 	}
 
-	return replayed, pending, nil
+	return stats, nil
 }
