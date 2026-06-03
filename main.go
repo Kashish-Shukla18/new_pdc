@@ -113,13 +113,13 @@ func (p *pipeline) nextTraceIndex(pmuName string) (int, bool) {
 
 func (p *pipeline) StartReplay(ctx context.Context) {
 	kafkaReplayEnabled := envBool("KAFKA_REPLAY_ENABLED", true)
-	kafkaReplayInterval := envDuration("KAFKA_REPLAY_INTERVAL", 2*time.Second)
-	kafkaReplayBatch := envInt("KAFKA_REPLAY_BATCH", 250)
+	kafkaReplayInterval := envDuration("KAFKA_REPLAY_INTERVAL", 1*time.Second)
+	kafkaReplayBatch := envInt("KAFKA_REPLAY_BATCH", 2000)
 
 	// Sink replay is intentionally conservative to avoid overloading Influx.
-	sinkReplayEnabled := envBool("SINK_REPLAY_ENABLED", false)
-	sinkReplayInterval := envDuration("SINK_REPLAY_INTERVAL", 10*time.Second)
-	sinkReplayBatch := envInt("SINK_REPLAY_BATCH", 25)
+	sinkReplayEnabled := envBool("SINK_REPLAY_ENABLED", true)
+	sinkReplayInterval := envDuration("SINK_REPLAY_INTERVAL", 2*time.Second)
+	sinkReplayBatch := envInt("SINK_REPLAY_BATCH", 200)
 
 	p.startReplayLoop(ctx, "kafka", p.kafkaSpool, kafkaReplayEnabled, kafkaReplayInterval, kafkaReplayBatch, func(replayCtx context.Context, r parser.Reading) error {
 		return p.publisher.Publish(replayCtx, r)

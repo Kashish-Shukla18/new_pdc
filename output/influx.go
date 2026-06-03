@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
@@ -26,6 +27,9 @@ type Sink struct {
 	influxWrite   api.WriteAPIBlocking
 	influxOrg     string
 	influxBucket  string
+	influxURL     string
+	influxToken   string
+	influxMu      sync.Mutex
 	redisTTL      time.Duration
 	redisKeyPrefx string
 }
@@ -89,9 +93,49 @@ func NewSinkFromEnv(ctx context.Context) (*Sink, error) {
 		influxWrite:   influxClient.WriteAPIBlocking(influxOrg, influxBucket),
 		influxOrg:     influxOrg,
 		influxBucket:  influxBucket,
+		influxURL:     influxURL,
+		influxToken:   influxToken,
 		redisTTL:      redisTTL,
 		redisKeyPrefx: keyPrefix,
 	}, nil
+}
+
+func shouldRetryInflux(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "dial tcp") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connectex") ||
+		strings.Contains(msg, "actively refused") ||
+		strings.Contains(msg, "timeout")
+}
+
+func (s *Sink) reconnectInflux(ctx context.Context) error {
+	s.influxMu.Lock()
+	defer s.influxMu.Unlock()
+
+	client := influxdb2.NewClient(s.influxURL, s.influxToken)
+	health, err := client.Health(ctx)
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("influx health failed (%s): %w", s.influxURL, err)
+	}
+	if health.Status != "pass" {
+		client.Close()
+		return fmt.Errorf("influx not healthy (%s): %s", s.influxURL, health.Status)
+	}
+
+	oldClient := s.influxClient
+	s.influxClient = client
+	s.influxWrite = client.WriteAPIBlocking(s.influxOrg, s.influxBucket)
+
+	if oldClient != nil {
+		oldClient.Close()
+	}
+
+	return nil
 }
 
 func (s *Sink) keyLatest(pmu string) string {
@@ -188,6 +232,18 @@ func (s *Sink) Store(ctx context.Context, r parser.Reading) error {
 	}
 
 	if err := s.influxWrite.WritePoint(ctx, s.toInfluxPoint(r)); err != nil {
+		if shouldRetryInflux(err) {
+			if reconnectErr := s.reconnectInflux(ctx); reconnectErr != nil {
+				return fmt.Errorf("influx write: %w; reconnect failed: %v", err, reconnectErr)
+			}
+
+			if retryErr := s.influxWrite.WritePoint(ctx, s.toInfluxPoint(r)); retryErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf("influx write retry: %w", retryErr)
+			}
+		}
+
 		return fmt.Errorf("influx write: %w", err)
 	}
 

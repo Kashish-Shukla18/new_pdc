@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
@@ -12,15 +19,21 @@ import {
 import {
   Activity,
   AlertTriangle,
+  BookOpen,
+  CircleHelp,
+  Clock3,
+  FileText,
   Gauge,
-  MapPin,
-  Plus,
+  LayoutDashboard,
   Radio,
   Signal,
   SlidersHorizontal,
   TimerReset,
   Wifi,
+  X,
 } from 'lucide-react'
+
+type TabId = 'overview' | 'devices' | 'dataframes' | 'connectivity' | 'analytics' | 'help' | 'docs'
 
 type TrendPoint = {
   ts: number
@@ -76,36 +89,18 @@ type ConversationEvent = {
   message: string
 }
 
-type PMURecord = {
-  id: string
-  displayName: string
+type PMUMeta = {
   substation: string
   region: string
-  voltageClass: string
-  vendorModel: string
+  state: string
+  voltage: string
+  vendor: string
   primaryIp: string
   redundantIp: string
-  reportingRate: string
-  commissioned: string
-  status: string
-  dataAvailability: string
-  latency: string
-  jitter: string
-  packetLoss: string
-  signalChannels: string
-  notes: string
+  targetFps: number
+  lat: number
+  lon: number
 }
-
-type PMUFormState = PMURecord
-
-type PMUPreset = {
-  id: string
-  label: string
-  values: Partial<PMUFormState>
-}
-
-const registryStorageKey = 'pdc.dashboard.registry.v3'
-const legacySeededDisplayNames = new Set(['Jaipur-PMU1 - Jaipur'])
 
 const emptyState: DashboardState = {
   nowUtc: new Date().toISOString(),
@@ -113,89 +108,8 @@ const emptyState: DashboardState = {
   eventCount: 0,
 }
 
-const defaultForm: PMUFormState = {
-  id: '',
-  displayName: '',
-  substation: '',
-  region: '',
-  voltageClass: '',
-  vendorModel: '',
-  primaryIp: '',
-  redundantIp: '',
-  reportingRate: '',
-  commissioned: '',
-  status: '',
-  dataAvailability: '',
-  latency: '',
-  jitter: '',
-  packetLoss: '',
-  signalChannels: '',
-  notes: '',
-}
-
-const regionOrder = ['NRLDC', 'WRLDC', 'NR', 'SR', 'ER', 'NER', 'ALL']
-
-const pmuPresets: PMUPreset[] = [
-
-  {
-    id: 'pmu-2',
-    label: 'Simulator 2',
-    values: {
-      id: '7005',
-      displayName: 'Alwar-PMU2 - Alwar',
-      substation: 'Alwar, Rajasthan',
-      region: 'NRLDC',
-      voltageClass: '220 kV',
-      vendorModel: 'SEL-421 PMU',
-      primaryIp: '10.45.16.12',
-      redundantIp: '10.45.116.12',
-      reportingRate: '50 fps',
-      commissioned: '2019-05-16',
-      status: 'Healthy',
-      dataAvailability: '98.7%',
-      latency: '34 ms',
-      jitter: '9.4 ms',
-      packetLoss: '0.45%',
-      signalChannels:
-        'Voltage phasors: V_R, V_Y, V_B, V_pos | Current phasors: I_R, I_Y, I_B, I_neg | Analog: MW, MVAR, MVA | Digital: 52A_brk, 79_reclose',
-      notes: 'Use this as a stable simulator lane for baseline comparison.',
-    },
-  },
-  {
-    id: 'pmu-3',
-    label: 'Simulator 3',
-    values: {
-      id: '7006',
-      displayName: 'Neemrana-PMU3 - Neemrana',
-      substation: 'Neemrana, Rajasthan',
-      region: 'NRLDC',
-      voltageClass: '132 kV',
-      vendorModel: 'GE D20 PMU',
-      primaryIp: '10.45.17.12',
-      redundantIp: '10.45.117.12',
-      reportingRate: '50 fps',
-      commissioned: '2020-11-03',
-      status: 'Warning',
-      dataAvailability: '94.1%',
-      latency: '57 ms',
-      jitter: '14.8 ms',
-      packetLoss: '1.62%',
-      signalChannels:
-        'Voltage phasors: V_R, V_Y, V_B, V_pos | Current phasors: I_R, I_Y, I_B, I_neg | Analog: MW, MVAR, MVA | Digital: 52A_brk, 79_reclose',
-      notes: 'Useful for a slightly noisy stream in the comparison view.',
-    },
-  },
-]
-
-function safeParseRegistry(raw: string | null): PMURecord[] {
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw) as PMURecord[]
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((record) => !legacySeededDisplayNames.has(record.displayName))
-  } catch {
-    return []
-  }
+function round(v: number, digits = 2) {
+  return Number(v.toFixed(digits))
 }
 
 function formatTS(ts: number) {
@@ -206,242 +120,156 @@ function formatTS(ts: number) {
   })
 }
 
-function round(v: number, digits = 2) {
-  return Number(v.toFixed(digits))
+function toneFromStatus(connected: boolean, loss: number) {
+  if (!connected) return 'bad'
+  if (loss > 1) return 'warn'
+  return 'ok'
 }
 
-function statusTone(status: string) {
-  const lowered = status.toLowerCase()
-  if (lowered.includes('healthy') || lowered.includes('online') || lowered.includes('ok')) return 'ok'
-  if (lowered.includes('degraded') || lowered.includes('warning') || lowered.includes('warn')) return 'warn'
-  return 'bad'
+function pmuKey(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
 }
 
-function pmuKey(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
-}
+function metaForPMU(name: string, idx: number): PMUMeta {
+  const lowered = name.toLowerCase()
+  const known = [
+    {
+      match: ['pmu1', 'jaipur'],
+      value: {
+        substation: 'Jaipur',
+        region: 'NRLDC',
+        state: 'Rajasthan',
+        voltage: '400 kV',
+        vendor: 'Siemens 7SS85',
+        primaryIp: '10.45.15.12',
+        redundantIp: '10.45.115.12',
+        targetFps: 50,
+        lat: 26.91,
+        lon: 75.79,
+      },
+    },
+    {
+      match: ['pmu2', 'alwar'],
+      value: {
+        substation: 'Alwar',
+        region: 'NRLDC',
+        state: 'Rajasthan',
+        voltage: '220 kV',
+        vendor: 'SEL-421 PMU',
+        primaryIp: '10.45.16.12',
+        redundantIp: '10.45.116.12',
+        targetFps: 50,
+        lat: 27.55,
+        lon: 76.63,
+      },
+    },
+    {
+      match: ['pmu3', 'neemrana'],
+      value: {
+        substation: 'Neemrana',
+        region: 'NRLDC',
+        state: 'Rajasthan',
+        voltage: '132 kV',
+        vendor: 'GE D20 PMU',
+        primaryIp: '10.45.17.12',
+        redundantIp: '10.45.117.12',
+        targetFps: 50,
+        lat: 27.99,
+        lon: 76.39,
+      },
+    },
+  ]
 
-function parseNumeric(raw: string) {
-  const cleaned = raw.replace(/[^0-9.+-]/g, '')
-  const value = Number(cleaned)
-  return Number.isFinite(value) ? value : null
-}
+  const found = known.find((item) => item.match.some((token) => lowered.includes(token)))
+  if (found) return found.value
 
-function phasorToXY(vector: PhasorVector, radius: number) {
-  const radians = (vector.angleDeg * Math.PI) / 180
-  const magnitude = Math.max(0, Math.min(1, vector.magnitude / 100)) * radius
   return {
-    x: Math.cos(radians) * magnitude,
-    y: -Math.sin(radians) * magnitude,
+    substation: `Simulator-${idx + 1}`,
+    region: 'NRLDC',
+    state: 'Rajasthan',
+    voltage: '220 kV',
+    vendor: `Simulator Model ${idx + 1}`,
+    primaryIp: `10.45.${18 + idx}.12`,
+    redundantIp: `10.45.${118 + idx}.12`,
+    targetFps: 50,
+    lat: 26.5 + idx * 0.8,
+    lon: 75.4 + idx * 0.9,
   }
 }
 
-function PhasorPlot({ snapshot, pmuName }: { snapshot?: PhasorSnapshot; pmuName?: string }) {
-  const center = 120
-  const radius = 82
+function availabilityOf(pmu: LivePMUState, targetFps: number) {
+  if (!pmu.connected) return 0
+  const fpsRatio = Math.min(1.05, pmu.approxFps / Math.max(1, targetFps))
+  const rejectPenalty = Math.min(8, pmu.qualityRejects * 0.03)
+  return Math.max(0, Math.min(100, fpsRatio * 100 - rejectPenalty))
+}
 
-  const vectors = [
-    { label: 'VA', color: '#4de0ff', value: snapshot?.va },
-    { label: 'VB', color: '#7dff93', value: snapshot?.vb },
-    { label: 'VC', color: '#ffd166', value: snapshot?.vc },
-    { label: 'IA', color: '#ff7b7b', value: snapshot?.ia },
-  ]
+function packetLossOf(pmu: LivePMUState) {
+  if (pmu.totalFrames <= 0) return 0
+  return (pmu.qualityRejects / pmu.totalFrames) * 100
+}
 
-  const compassMarks = [
-    { label: '0°', x: center + radius + 13, y: center + 4 },
-    { label: '90°', x: center - 11, y: center - radius - 11 },
-    { label: '180°', x: center - radius - 38, y: center + 4 },
-    { label: '270°', x: center - 17, y: center + radius + 23 },
-  ]
+function latencyOf(pmu: LivePMUState) {
+  if (!pmu.connected) return 999
+  const base = 1000 / Math.max(1, pmu.approxFps)
+  const rocofDrift = Math.abs(pmu.lastReading?.rocof ?? 0) * 350
+  return Math.max(8, base * 7 + rocofDrift)
+}
 
-  return (
-    <div className="phasor-frame">
-      <div className="phasor-canvas">
-        <svg viewBox="0 0 240 240" className="phasor-svg" aria-label="Phasor plot">
-          <defs>
-            <radialGradient id="phasor-core" cx="50%" cy="45%" r="70%">
-              <stop offset="0%" stopColor="rgba(99, 210, 245, 0.22)" />
-              <stop offset="50%" stopColor="rgba(18, 35, 54, 0.45)" />
-              <stop offset="100%" stopColor="rgba(6, 11, 18, 0.95)" />
-            </radialGradient>
-            <filter id="phasor-glow" x="-45%" y="-45%" width="190%" height="190%">
-              <feDropShadow dx="0" dy="0" stdDeviation="1.6" floodColor="#7ed6ff" floodOpacity="0.35" />
-            </filter>
-            <marker
-              id="arrow-cyan"
-              markerWidth="11"
-              markerHeight="9"
-              refX="9.5"
-              refY="4"
-              orient="auto-start-reverse"
-              markerUnits="strokeWidth"
-            >
-              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#4de0ff" />
-            </marker>
-            <marker
-              id="arrow-mint"
-              markerWidth="11"
-              markerHeight="9"
-              refX="9.5"
-              refY="4"
-              orient="auto-start-reverse"
-              markerUnits="strokeWidth"
-            >
-              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#7dff93" />
-            </marker>
-            <marker
-              id="arrow-amber"
-              markerWidth="11"
-              markerHeight="9"
-              refX="9.5"
-              refY="4"
-              orient="auto-start-reverse"
-              markerUnits="strokeWidth"
-            >
-              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ffd166" />
-            </marker>
-            <marker
-              id="arrow-coral"
-              markerWidth="11"
-              markerHeight="9"
-              refX="9.5"
-              refY="4"
-              orient="auto-start-reverse"
-              markerUnits="strokeWidth"
-            >
-              <path d="M0,0 L10,4.4 L0,8.8 L2,4.4 Z" fill="#ff7b7b" />
-            </marker>
-          </defs>
+function jitterOf(pmu: LivePMUState) {
+  if (!pmu.connected) return 99
+  const points = pmu.trends.slice(-30)
+  if (points.length < 3) return 2
+  const mean = points.reduce((sum, p) => sum + p.frequency, 0) / points.length
+  const variance = points.reduce((sum, p) => sum + (p.frequency - mean) ** 2, 0) / points.length
+  return Math.sqrt(variance) * 100
+}
 
-          <circle cx={center} cy={center} r={radius + 18} className="phasor-aura" />
-          <circle cx={center} cy={center} r={radius + 10} className="phasor-shell" />
-          <circle cx={center} cy={center} r={radius} fill="url(#phasor-core)" className="phasor-core" />
-
-          <circle cx={center} cy={center} r={radius} className="phasor-ring major" />
-          <circle cx={center} cy={center} r={radius * 0.75} className="phasor-ring faint" />
-          <circle cx={center} cy={center} r={radius * 0.5} className="phasor-ring faint" />
-          <circle cx={center} cy={center} r={radius * 0.25} className="phasor-ring faint" />
-
-          {Array.from({ length: 24 }).map((_, idx) => {
-            const a = (idx * Math.PI) / 12
-            const isMajor = idx % 3 === 0
-            const r1 = radius + (isMajor ? 3 : 1)
-            const r2 = radius - (isMajor ? 10 : 5)
-            return (
-              <line
-                key={`tick-${idx}`}
-                x1={center + Math.cos(a) * r1}
-                y1={center - Math.sin(a) * r1}
-                x2={center + Math.cos(a) * r2}
-                y2={center - Math.sin(a) * r2}
-                className={`phasor-tick ${isMajor ? 'major' : ''}`}
-              />
-            )
-          })}
-
-          {Array.from({ length: 12 }).map((_, idx) => {
-            const a = (idx * Math.PI) / 6
-            return (
-              <line
-                key={`grid-${idx}`}
-                x1={center}
-                y1={center}
-                x2={center + Math.cos(a) * radius}
-                y2={center - Math.sin(a) * radius}
-                className="phasor-spoke"
-              />
-            )
-          })}
-
-          <line x1={center - radius} y1={center} x2={center + radius} y2={center} className="phasor-axis" />
-          <line x1={center} y1={center - radius} x2={center} y2={center + radius} className="phasor-axis" />
-
-          {compassMarks.map((mark) => (
-            <text key={mark.label} x={mark.x} y={mark.y} className="phasor-mark">
-              {mark.label}
-            </text>
-          ))}
-
-          {vectors.map((entry) => {
-            const xy = entry.value ? phasorToXY(entry.value, radius) : { x: 0, y: 0 }
-            const markerMap: Record<string, string> = {
-              '#4de0ff': 'url(#arrow-cyan)',
-              '#7dff93': 'url(#arrow-mint)',
-              '#ffd166': 'url(#arrow-amber)',
-              '#ff7b7b': 'url(#arrow-coral)',
-            }
-
-            return (
-              <g key={entry.label}>
-                <line
-                  x1={center}
-                  y1={center}
-                  x2={center + xy.x}
-                  y2={center + xy.y}
-                  stroke={entry.color}
-                  strokeWidth="2.6"
-                  strokeLinecap="round"
-                  markerEnd={markerMap[entry.color]}
-                  filter="url(#phasor-glow)"
-                />
-                <circle cx={center + xy.x} cy={center + xy.y} r="4" className="phasor-tip-back" />
-                <circle cx={center + xy.x} cy={center + xy.y} r="2.8" fill={entry.color} />
-                <text x={center + xy.x + 7} y={center + xy.y - 6} className="phasor-vector-label" fill={entry.color}>
-                  {entry.label}
-                </text>
-              </g>
-            )
-          })}
-          <circle cx={center} cy={center} r="5.2" className="phasor-origin-halo" />
-          <circle cx={center} cy={center} r="2.6" className="phasor-origin" />
-        </svg>
-      </div>
-
-      <div className="phasor-legend">
-        <div className="phasor-device-caption">Device: {pmuName ?? 'No PMU selected'}</div>
-        {vectors.map((entry) => {
-          const magPercent = entry.value ? Math.max(0, Math.min(100, (entry.value.magnitude / 120) * 100)) : 0
-          return (
-            <div key={entry.label} className="phasor-item">
-              <span style={{ background: entry.color, color: entry.color }} />
-              <div className="phasor-copy">
-                <strong>{entry.label}</strong>
-                <p>
-                  {entry.value
-                    ? `${round(entry.value.magnitude, 1)} pu · ${round(entry.value.angleDeg, 1)}°`
-                    : 'No live value'}
-                </p>
-              </div>
-              <div className="phasor-meter">
-                <i style={{ width: `${magPercent}%`, background: entry.color }} />
-              </div>
-            </div>
-          )
-        })}
-      </div>
-
-      <p className="phasor-footnote">Updated: {snapshot ? formatTS(snapshot.ts) : '--'} · Polar reference in degrees</p>
-    </div>
-  )
+function ageText(iso: string) {
+  if (!iso) return '--'
+  const deltaMs = Date.now() - new Date(iso).getTime()
+  if (deltaMs < 2000) return `${Math.max(1, Math.round(deltaMs))} ms ago`
+  if (deltaMs < 60000) return `${round(deltaMs / 1000, 1)} s ago`
+  return `${Math.floor(deltaMs / 60000)} min ago`
 }
 
 function App() {
   const [dashboard, setDashboard] = useState<DashboardState>(emptyState)
-  const [eventFeed, setEventFeed] = useState<ConversationEvent[]>([])
+  const [events, setEvents] = useState<ConversationEvent[]>([])
   const [streamOnline, setStreamOnline] = useState(false)
-  const [registry, setRegistry] = useState<PMURecord[]>(() => safeParseRegistry(localStorage.getItem(registryStorageKey)))
-  const [selectedRegion, setSelectedRegion] = useState<string>('ALL')
-  const [selectedPMU, setSelectedPMU] = useState<string>('')
-  const [selectedPMUs, setSelectedPMUs] = useState<string[]>([])
-  const [selectedPhasorPMU, setSelectedPhasorPMU] = useState<string>('')
-  const [form, setForm] = useState<PMUFormState>(defaultForm)
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'register'>('dashboard')
+  const [isPaused, setIsPaused] = useState(false)
+  const [clockLabel, setClockLabel] = useState('')
+  const [activeTab, setActiveTab] = useState<TabId>('overview')
+  const [selectedPMUName, setSelectedPMUName] = useState('')
+  const [selectedFramePMUName, setSelectedFramePMUName] = useState('')
+  const [drawerPMUName, setDrawerPMUName] = useState('')
+  const [deviceSearch, setDeviceSearch] = useState('')
+  const [regionFilter, setRegionFilter] = useState('ALL')
+  const [statusFilter, setStatusFilter] = useState('ALL')
+  const [mapFilter, setMapFilter] = useState<'all' | 'issues'>('all')
+  const [helpQuery, setHelpQuery] = useState('')
+  const [frameLines, setFrameLines] = useState<string[]>([])
+  const [openFaq, setOpenFaq] = useState<number | null>(null)
 
   useEffect(() => {
-    localStorage.setItem(registryStorageKey, JSON.stringify(registry))
-  }, [registry])
+    const tickClock = () => {
+      setClockLabel(
+        new Date().toLocaleTimeString('en-IN', {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+      )
+    }
+    tickClock()
+    const timer = window.setInterval(tickClock, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
+    if (isPaused) return
+
     const refresh = async () => {
       try {
         const res = await fetch('/conversation/state')
@@ -449,431 +277,575 @@ function App() {
         const data = (await res.json()) as DashboardState
         setDashboard(data)
       } catch {
-        // Keep the last good snapshot visible.
+        // Keep last good snapshot visible.
       }
     }
 
     void refresh()
     const timer = window.setInterval(refresh, 1000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [isPaused])
 
   useEffect(() => {
-    const es = new EventSource('/conversation/events')
+    if (isPaused) {
+      setStreamOnline(false)
+      return
+    }
 
+    const es = new EventSource('/conversation/events')
     es.onopen = () => setStreamOnline(true)
     es.onerror = () => setStreamOnline(false)
     es.onmessage = (evt) => {
       try {
         const parsed = JSON.parse(evt.data) as ConversationEvent
-        setEventFeed((prev) => [parsed, ...prev].slice(0, 30))
+        setEvents((current) => [parsed, ...current].slice(0, 120))
       } catch {
-        // Ignore malformed events.
+        // Ignore malformed messages.
       }
     }
-
     return () => es.close()
-  }, [])
+  }, [isPaused])
 
-  const liveByName = useMemo(() => {
-    return new Map(dashboard.pmus.map((item) => [pmuKey(item.name), item]))
+  const pmus = useMemo(() => {
+    return dashboard.pmus.slice(0, 3).map((pmu, idx) => ({
+      ...pmu,
+      meta: metaForPMU(pmu.name, idx),
+    }))
   }, [dashboard.pmus])
 
-  const mergedRegistry = useMemo(() => {
-    const matchedLiveKeys = new Set<string>()
-
-    const registeredEntries = registry.map((record) => {
-      const live = liveByName.get(pmuKey(record.displayName)) ?? liveByName.get(pmuKey(record.id))
-      if (live) {
-        matchedLiveKeys.add(pmuKey(live.name))
-      }
-      return {
-        record,
-        live,
-        connected: live?.connected ?? false,
-        connectionText: live?.connectionText ?? 'awaiting telemetry',
-        fps: live?.approxFps ?? 0,
-        frames: live?.totalFrames ?? 0,
-        rejects: live?.qualityRejects ?? 0,
-        kafkaErrors: live?.kafkaErrors ?? 0,
-        sinkErrors: live?.sinkErrors ?? 0,
-        spoolQueued: live?.spoolQueued ?? 0,
-        lastReading: live?.lastReading,
-        lastPhasor: live?.lastPhasor,
-        trends: live?.trends ?? [],
-      }
-    })
-
-    const autoDiscoveredEntries = dashboard.pmus
-      .filter((live) => !matchedLiveKeys.has(pmuKey(live.name)))
-      .map((live) => ({
-        record: {
-          id: live.name,
-          displayName: live.name,
-          substation: 'Auto-discovered stream',
-          region: 'LIVE',
-          voltageClass: '--',
-          vendorModel: 'stream source',
-          primaryIp: '127.0.0.1',
-          redundantIp: '127.0.0.1',
-          reportingRate: `${round(live.approxFps)} fps`,
-          commissioned: '--',
-          status: live.connected ? 'Healthy' : 'Offline',
-          dataAvailability: '--',
-          latency: '--',
-          jitter: '--',
-          packetLoss: '--',
-          signalChannels: 'Live telemetry from PDC /conversation/state',
-          notes: 'Auto-created from live stream because no matching registry entry was found.',
-        },
-        live,
-        connected: live.connected,
-        connectionText: live.connectionText,
-        fps: live.approxFps,
-        frames: live.totalFrames,
-        rejects: live.qualityRejects,
-        kafkaErrors: live.kafkaErrors,
-        sinkErrors: live.sinkErrors,
-        spoolQueued: live.spoolQueued,
-        lastReading: live.lastReading,
-        lastPhasor: live.lastPhasor,
-        trends: live.trends ?? [],
-      }))
-
-    return [...registeredEntries, ...autoDiscoveredEntries]
-  }, [liveByName, registry])
-
-  const filteredRegistry = useMemo(() => {
-    if (selectedRegion === 'ALL') return mergedRegistry
-    return mergedRegistry.filter((entry) => entry.record.region === selectedRegion)
-  }, [mergedRegistry, selectedRegion])
-
   useEffect(() => {
-    if (!filteredRegistry.length) {
-      setSelectedPMU('')
-      setSelectedPMUs([])
-      setSelectedPhasorPMU('')
+    if (!pmus.length) {
+      setSelectedPMUName('')
+      setSelectedFramePMUName('')
       return
     }
 
-    const visibleNames = new Set(filteredRegistry.map((entry) => entry.record.displayName))
-    const fallbackName = filteredRegistry[0].record.displayName
-
-    if (!visibleNames.has(selectedPMU)) {
-      setSelectedPMU(fallbackName)
+    if (!pmus.some((pmu) => pmu.name === selectedPMUName)) {
+      setSelectedPMUName(pmus[0].name)
     }
-
-    if (!visibleNames.has(selectedPhasorPMU)) {
-      const nextPhasor = visibleNames.has(selectedPMU) ? selectedPMU : fallbackName
-      setSelectedPhasorPMU(nextPhasor)
+    if (!pmus.some((pmu) => pmu.name === selectedFramePMUName)) {
+      setSelectedFramePMUName(pmus[0].name)
     }
+  }, [pmus, selectedPMUName, selectedFramePMUName])
 
-    setSelectedPMUs((current) => {
-      const visible = current.filter((name) => visibleNames.has(name))
-      if (visible.length > 0) return visible
-      return [visibleNames.has(selectedPMU) ? selectedPMU : fallbackName]
-    })
-  }, [filteredRegistry, selectedPMU, selectedPhasorPMU])
+  const selectedPMU = pmus.find((pmu) => pmu.name === selectedPMUName) ?? pmus[0]
+  const selectedFramePMU = pmus.find((pmu) => pmu.name === selectedFramePMUName) ?? pmus[0]
+  const drawerPMU = pmus.find((pmu) => pmu.name === drawerPMUName)
 
-  const selected = useMemo(() => {
-    return (
-      filteredRegistry.find((entry) => entry.record.displayName === selectedPMU) ?? filteredRegistry[0] ?? null
-    )
-  }, [filteredRegistry, selectedPMU])
-
-  const selectedPhasor = useMemo(() => {
-    return filteredRegistry.find((entry) => entry.record.displayName === selectedPhasorPMU) ?? selected ?? null
-  }, [filteredRegistry, selected, selectedPhasorPMU])
-
-  const plotSelections = useMemo(() => {
-    const palette = ['#4de0ff', '#7dff93', '#ffd166', '#ff7b7b', '#8dd3ff', '#f78fb3', '#63e6be', '#ffa94d']
-    return filteredRegistry
-      .filter((entry) => selectedPMUs.includes(entry.record.displayName))
-      .map((entry, idx) => ({
-        ...entry,
-        plotKey: `pmu_${idx + 1}`,
-        color: palette[idx % palette.length],
-      }))
-  }, [filteredRegistry, selectedPMUs])
+  const regionSummary = useMemo(() => {
+    const map = new Map<string, { total: number; connected: number; availability: number }>()
+    for (const pmu of pmus) {
+      const current = map.get(pmu.meta.region) ?? { total: 0, connected: 0, availability: 0 }
+      current.total += 1
+      if (pmu.connected) current.connected += 1
+      current.availability += availabilityOf(pmu, pmu.meta.targetFps)
+      map.set(pmu.meta.region, current)
+    }
+    return Array.from(map.entries()).map(([region, value]) => ({
+      region,
+      total: value.total,
+      connected: value.connected,
+      availability: value.total ? value.availability / value.total : 0,
+    }))
+  }, [pmus])
 
   const mergedTrend = useMemo(() => {
-    const maxPoints = 240
     const rows = new Map<number, Record<string, number>>()
-    for (const entry of plotSelections) {
-      const trendSlice = entry.trends.length > maxPoints ? entry.trends.slice(-maxPoints) : entry.trends
-      for (const point of trendSlice) {
+    for (const pmu of pmus) {
+      const key = pmuKey(pmu.name)
+      const trend = pmu.trends.slice(-120)
+      for (const point of trend) {
         const row = rows.get(point.ts) ?? { ts: point.ts }
-        row[`${entry.plotKey}__frequency`] = point.frequency
-        row[`${entry.plotKey}__mw`] = point.mw
-        row[`${entry.plotKey}__mvar`] = point.mvar
-        row[`${entry.plotKey}__rocof`] = point.rocof
+        row[`${key}__frequency`] = point.frequency
+        row[`${key}__mw`] = point.mw
+        row[`${key}__mvar`] = point.mvar
+        row[`${key}__rocof`] = point.rocof
         rows.set(point.ts, row)
       }
     }
     return Array.from(rows.values()).sort((a, b) => a.ts - b.ts)
-  }, [plotSelections])
+  }, [pmus])
 
-  const selectedTrend = selected?.trends ?? []
-  const latest = selected?.lastReading ?? selectedTrend.at(-1)
-  const totalErrors = filteredRegistry.reduce((sum, entry) => sum + entry.kafkaErrors + entry.sinkErrors, 0)
-  const connectedCount = filteredRegistry.filter((entry) => entry.connected).length
-  const totalSpool = filteredRegistry.reduce((sum, entry) => sum + entry.spoolQueued, 0)
-  const totalFrames = filteredRegistry.reduce((sum, entry) => sum + entry.frames, 0)
-  const regions = [
-    'ALL',
-    ...Array.from(new Set(mergedRegistry.map((entry) => entry.record.region))).sort((a, b) => a.localeCompare(b)),
-  ]
+  const systemCounts = useMemo(() => {
+    const connected = pmus.filter((pmu) => pmu.connected).length
+    const disconnected = pmus.length - connected
+    const totalErrors = pmus.reduce((sum, pmu) => sum + pmu.kafkaErrors + pmu.sinkErrors, 0)
+    const spool = pmus.reduce((sum, pmu) => sum + pmu.spoolQueued, 0)
+    return { connected, disconnected, totalErrors, spool }
+  }, [pmus])
 
-  const detailRows = [
-    ['PMU ID', selected?.record.id ?? '--'],
-    ['Substation', selected?.record.substation ?? '--'],
-    ['Region (RLDC)', selected?.record.region ?? '--'],
-    ['Voltage class', selected?.record.voltageClass ?? '--'],
-    ['Vendor / Model', selected?.record.vendorModel ?? '--'],
-    ['Primary IP', selected?.record.primaryIp ?? '--'],
-    ['Redundant IP', selected?.record.redundantIp ?? '--'],
-    ['Reporting rate', selected?.record.reportingRate ?? '--'],
-    ['Commissioned', selected?.record.commissioned ?? '--'],
-    ['Status', selected?.record.status ?? '--'],
-  ]
-
-  const detailMetrics = [
-    { label: 'Data Availability', value: selected?.record.dataAvailability ?? '--', tone: 'ok' },
-    { label: 'Latency', value: selected?.record.latency ?? '--', tone: 'info' },
-    { label: 'Jitter', value: selected?.record.jitter ?? '--', tone: 'neutral' },
-    { label: 'Packet Loss', value: selected?.record.packetLoss ?? '--', tone: 'warn' },
-  ]
-
-  const signalChannels = (selected?.record.signalChannels ?? '--')
-    .split('|')
-    .map((part) => part.trim())
-    .filter(Boolean)
-
-  const packetLossValue = parseNumeric(selected?.record.packetLoss ?? '')
-  const availabilityValue = parseNumeric(selected?.record.dataAvailability ?? '')
-
-  const recommendedAction = useMemo(() => {
-    if (!selected) {
-      return {
-        title: 'No PMU selected',
-        message: 'Pick a PMU from the table to view diagnostics and operator recommendations.',
-      }
-    }
-
-    if ((availabilityValue !== null && availabilityValue < 95) || (packetLossValue !== null && packetLossValue > 3)) {
-      return {
-        title: 'Data quality degraded',
-        message: 'Inspect time sync (PTP/GPS), verify network path health, and review station link errors before raising escalation.',
-      }
-    }
-
-    if (statusTone(selected.record.status) === 'warn') {
-      return {
-        title: 'Monitor performance drift',
-        message: 'Track latency and jitter trend for 15 minutes and run diagnostics if variance continues to rise.',
-      }
-    }
-
-    return {
-      title: 'Operating normally',
-      message: 'Keep stream under watch and export baseline profile after stable operation period.',
-    }
-  }, [availabilityValue, packetLossValue, selected])
-
-  function updateForm<K extends keyof PMUFormState>(key: K, value: PMUFormState[K]) {
-    setForm((current) => ({ ...current, [key]: value }))
-  }
-
-  function registerPMU() {
-    if (!form.id.trim() || !form.displayName.trim()) return
-
-    const nextRecord: PMURecord = {
-      ...form,
-      id: form.id.trim(),
-      displayName: form.displayName.trim(),
-      substation: form.substation.trim(),
-      region: form.region.trim(),
-      voltageClass: form.voltageClass.trim(),
-      vendorModel: form.vendorModel.trim(),
-      primaryIp: form.primaryIp.trim(),
-      redundantIp: form.redundantIp.trim(),
-      reportingRate: form.reportingRate.trim(),
-      commissioned: form.commissioned.trim(),
-      status: form.status.trim(),
-      dataAvailability: form.dataAvailability.trim(),
-      latency: form.latency.trim(),
-      jitter: form.jitter.trim(),
-      packetLoss: form.packetLoss.trim(),
-      signalChannels: form.signalChannels.trim(),
-      notes: form.notes.trim(),
-    }
-
-    setRegistry((current) => {
-      const filtered = current.filter((item) => item.id !== nextRecord.id && item.displayName !== nextRecord.displayName)
-      return [nextRecord, ...filtered]
-    })
-    setSelectedRegion(nextRecord.region)
-    setSelectedPMU(nextRecord.displayName)
-  }
-
-  function applyPreset(preset: PMUPreset) {
-    setForm((current) => ({
-      ...current,
-      ...preset.values,
-      notes: preset.values.notes ?? current.notes,
-      signalChannels: preset.values.signalChannels ?? current.signalChannels,
-    }))
-    setActiveTab('register')
-  }
-
-  function setPrimaryPMU(name: string) {
-    setSelectedPMU(name)
-    setSelectedPMUs((current) => (current.includes(name) ? current : [...current, name]))
-    if (!selectedPhasorPMU) {
-      setSelectedPhasorPMU(name)
-    }
-  }
-
-  function togglePMUForPlot(name: string) {
-    setSelectedPMUs((current) => {
-      if (current.includes(name)) {
-        if (current.length === 1) return current
-        return current.filter((item) => item !== name)
-      }
-      return [...current, name]
-    })
-  }
+  const frameRate = selectedPMU?.approxFps ?? 0
+  const systemTone = systemCounts.disconnected >= 2 ? 'bad' : systemCounts.disconnected > 0 ? 'warn' : 'ok'
+  const systemMessage =
+    systemCounts.disconnected >= 2
+      ? `${systemCounts.disconnected} streams offline - operator action required`
+      : systemCounts.disconnected > 0
+        ? `${systemCounts.disconnected} streams need attention`
+        : 'All systems nominal'
 
   const statusCards = [
     {
       label: 'Connected PMUs',
-      value: `${connectedCount}/${filteredRegistry.length || 0}`,
+      value: `${systemCounts.connected}/${pmus.length || 0}`,
       tone: 'ok',
       icon: <Wifi size={18} />,
     },
     {
       label: 'Frequency',
-      value: latest ? `${round(latest.frequency, 3)} Hz` : '--',
+      value: selectedPMU ? `${round(selectedPMU.lastReading?.frequency ?? 0, 3)} Hz` : '--',
       tone: 'neutral',
       icon: <Gauge size={18} />,
     },
     {
       label: 'Total Frames',
-      value: `${totalFrames}`,
+      value: `${pmus.reduce((sum, pmu) => sum + pmu.totalFrames, 0)}`,
       tone: 'neutral',
       icon: <Signal size={18} />,
     },
     {
       label: 'Pipeline Errors',
-      value: `${totalErrors}`,
-      tone: 'warn',
+      value: `${systemCounts.totalErrors}`,
+      tone: systemCounts.totalErrors > 0 ? 'warn' : 'neutral',
       icon: <AlertTriangle size={18} />,
     },
     {
       label: 'Spool Queue',
-      value: `${totalSpool}`,
+      value: `${systemCounts.spool}`,
       tone: 'neutral',
       icon: <Activity size={18} />,
     },
   ]
 
-  const chartSeries = [
-    { key: 'frequency', label: 'Frequency', color: '#4de0ff', unit: 'Hz' },
-    { key: 'mw', label: 'MW', color: '#7dff93', unit: 'MW' },
-    { key: 'mvar', label: 'MVAR', color: '#ffd166', unit: 'MVAR' },
-    { key: 'rocof', label: 'ROCOF', color: '#ff7b7b', unit: 'Hz/s' },
-  ] as const
+  const liveAlerts = useMemo(() => {
+    const fromEvents = events.slice(0, 18).map((evt) => {
+      const lowered = `${evt.status} ${evt.message}`.toLowerCase()
+      const sev = lowered.includes('error')
+        ? 'bad'
+        : lowered.includes('warn') || lowered.includes('reject')
+          ? 'warn'
+          : 'info'
+      return {
+        sev,
+        title: evt.stage,
+        msg: `${evt.pmu} - ${evt.message}`,
+        time: new Date(evt.time).toLocaleTimeString(),
+      }
+    })
 
-  const dashboardTabs = [
-    { id: 'dashboard' as const, label: 'Dashboard' },
-    { id: 'register' as const, label: 'Register PMU' },
+    const fromState = pmus
+      .filter((pmu) => !pmu.connected || packetLossOf(pmu) > 1)
+      .map((pmu) => ({
+        sev: pmu.connected ? 'warn' : 'bad',
+        title: pmu.connected ? 'Elevated packet loss' : 'PMU offline',
+        msg: `${pmu.name} - ${pmu.connected ? `${round(packetLossOf(pmu), 2)}% loss` : 'stream disconnected'}`,
+        time: ageText(pmu.lastEventTime),
+      }))
+
+    return [...fromState, ...fromEvents].slice(0, 24)
+  }, [events, pmus])
+
+  const filteredDevices = useMemo(() => {
+    return pmus.filter((pmu) => {
+      const matchesSearch = `${pmu.name} ${pmu.meta.substation} ${pmu.meta.vendor} ${pmu.meta.primaryIp}`
+        .toLowerCase()
+        .includes(deviceSearch.toLowerCase())
+      const tone = toneFromStatus(pmu.connected, packetLossOf(pmu))
+      const matchesStatus = statusFilter === 'ALL' ? true : statusFilter === tone.toUpperCase()
+      const matchesRegion = regionFilter === 'ALL' ? true : pmu.meta.region === regionFilter
+      return matchesSearch && matchesStatus && matchesRegion
+    })
+  }, [pmus, deviceSearch, statusFilter, regionFilter])
+
+  useEffect(() => {
+    if (!selectedFramePMU) return
+    if (isPaused) return
+
+    const timer = window.setInterval(() => {
+      setFrameLines((current) => {
+        const selected = pmus.find((pmu) => pmu.name === selectedFramePMUName)
+        if (!selected) return current
+        const now = Date.now()
+        const soc = Math.floor(now / 1000)
+        const frac = String(Math.floor((now % 1000) * 1000)).padStart(6, '0')
+        const line = `SOC ${soc}  FRACSEC ${frac}  F ${(selected.lastReading?.frequency ?? 0).toFixed(4)}  ROCOF ${(selected.lastReading?.rocof ?? 0).toFixed(4)}  STAT ${selected.connected ? '0x0000' : '0x2000'}`
+        return [line, ...current].slice(0, 45)
+      })
+    }, 1000)
+
+    return () => window.clearInterval(timer)
+  }, [isPaused, pmus, selectedFramePMU, selectedFramePMUName])
+
+  const connectivityRows = useMemo(() => {
+    return pmus
+      .map((pmu) => {
+        const loss = packetLossOf(pmu)
+        const latency = latencyOf(pmu)
+        const jitter = jitterOf(pmu)
+        const avail = availabilityOf(pmu, pmu.meta.targetFps)
+        let recommendation = 'Healthy'
+        if (!pmu.connected) recommendation = 'Restart stream and verify source link'
+        else if (loss > 2) recommendation = 'Inspect quality gate and packet path'
+        else if (latency > 120) recommendation = 'Review network route and queueing'
+        return {
+          ...pmu,
+          loss,
+          latency,
+          jitter,
+          avail,
+          recommendation,
+          tone: toneFromStatus(pmu.connected, loss),
+        }
+      })
+      .sort((a, b) => {
+        if (a.connected !== b.connected) return a.connected ? 1 : -1
+        return b.loss - a.loss
+      })
+  }, [pmus])
+
+  const anglePairs = useMemo(() => {
+    if (pmus.length < 2) return [] as Array<{ name: string; value: number }>
+    const pairs: Array<{ name: string; value: number }> = []
+    for (let i = 0; i < pmus.length; i++) {
+      for (let j = i + 1; j < pmus.length; j++) {
+        const a = pmus[i]
+        const b = pmus[j]
+        const diff =
+          Math.abs((a.lastPhasor?.va?.angleDeg ?? 0) - (b.lastPhasor?.va?.angleDeg ?? 0)) +
+          Math.abs((a.lastReading?.frequency ?? 50) - (b.lastReading?.frequency ?? 50)) * 800
+        pairs.push({ name: `${a.name} ↔ ${b.name}`, value: diff })
+      }
+    }
+    return pairs
+  }, [pmus])
+
+  const analyticsRecs = useMemo(() => {
+    const recs: Array<{ sev: 'bad' | 'warn' | 'info'; title: string; desc: string }> = []
+    const worstAngle = [...anglePairs].sort((a, b) => b.value - a.value)[0]
+    if (worstAngle && worstAngle.value > 25) {
+      recs.push({
+        sev: 'bad',
+        title: `Reduce corridor stress on ${worstAngle.name}`,
+        desc: `Angle separation ${round(worstAngle.value, 1)}° exceeds advisory margin.`,
+      })
+    }
+
+    connectivityRows.forEach((row) => {
+      if (!row.connected) {
+        recs.push({
+          sev: 'warn',
+          title: `Recover ${row.name}`,
+          desc: 'Stream disconnected. Restart simulator stream and check receiver path.',
+        })
+      }
+    })
+
+    if (!recs.length) {
+      recs.push({
+        sev: 'info',
+        title: 'All simulator lanes stable',
+        desc: 'Continue monitoring frequency, MW, MVAR and ROCOF drift windows.',
+      })
+    }
+    return recs.slice(0, 5)
+  }, [anglePairs, connectivityRows])
+
+  const helpSections = [
+    {
+      title: 'Getting Started',
+      content: 'This dashboard now uses the three simulator streams from /conversation/state in every tab.',
+    },
+    {
+      title: 'Data Frames',
+      content: 'Use Data Frames tab to inspect per-simulator SOC/FRACSEC and phasor values in near real-time.',
+    },
+    {
+      title: 'Connectivity',
+      content: 'Connectivity metrics are computed from live simulator frame rates, rejects, and trend variance.',
+    },
+  ]
+
+  const filteredHelp = helpSections.filter((item) => {
+    if (!helpQuery.trim()) return true
+    return `${item.title} ${item.content}`.toLowerCase().includes(helpQuery.toLowerCase())
+  })
+
+  const phasorItems: Array<{ label: string; value: PhasorVector | undefined }> = [
+    { label: 'VA', value: selectedFramePMU?.lastPhasor?.va },
+    { label: 'VB', value: selectedFramePMU?.lastPhasor?.vb },
+    { label: 'VC', value: selectedFramePMU?.lastPhasor?.vc },
+    { label: 'IA', value: selectedFramePMU?.lastPhasor?.ia },
+  ]
+
+  const navItems: Array<{ id: TabId; label: string; section: 'Monitoring' | 'Resources'; badge?: string; bad?: boolean }> = [
+    { id: 'overview', label: 'Overview', section: 'Monitoring' },
+    { id: 'devices', label: 'Device Inventory', section: 'Monitoring', badge: `${pmus.length}` },
+    { id: 'dataframes', label: 'Data Frames', section: 'Monitoring' },
+    {
+      id: 'connectivity',
+      label: 'Connectivity',
+      section: 'Monitoring',
+      badge: `${connectivityRows.filter((row) => row.tone !== 'ok').length}`,
+      bad: connectivityRows.some((row) => row.tone !== 'ok'),
+    },
+    { id: 'analytics', label: 'Analytics', section: 'Monitoring' },
+    { id: 'help', label: 'Help & Support', section: 'Resources' },
+    { id: 'docs', label: 'Documentation', section: 'Resources' },
   ]
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Synchrophasor Operations Console</p>
-          <h1>Wide-Area PMU Monitoring Dashboard</h1>
-          <p className="subtitle">
-            Register devices, supervise regional health, and analyze live synchrophasor trends from one operational view.
-          </p>
+    <div className="console-root">
+      <header className="app-header">
+        <div className="brand">
+          <div className="logo">PDC</div>
+          <div className="brand-text">
+            <h1>National PMU Monitoring Console</h1>
+            <p>3-simulator live streams mapped across all React dashboard tabs</p>
+          </div>
         </div>
 
-        <div className="status-pills">
-          <span className={`pill ${streamOnline ? 'ok' : 'warn'}`}>
-            <Radio size={14} /> Stream {streamOnline ? 'online' : 'reconnecting'}
+        <div className="header-meta">
+          <div className="system-state">
+            <span className={`dot ${systemTone === 'bad' ? 'bad' : systemTone === 'warn' ? 'warn' : ''}`} />
+            <span>{systemMessage}</span>
+          </div>
+          <span className="utc-badge">{round(frameRate)} fps</span>
+          <span className="clock">
+            <Clock3 size={14} /> {clockLabel} IST
           </span>
-          <span className="pill neutral">
-            <TimerReset size={14} /> Snapshot {new Date(dashboard.nowUtc).toLocaleTimeString()}
-          </span>
-          <span className="pill neutral">
-            <MapPin size={14} /> {dashboard.eventCount} total events
-          </span>
+          <button type="button" className="btn ghost" onClick={() => setIsPaused((current) => !current)}>
+            {isPaused ? 'Resume' : 'Pause'}
+          </button>
         </div>
       </header>
 
-      <nav className="tabbar" aria-label="Dashboard sections">
-        {dashboardTabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`tab-button ${activeTab === tab.id ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
-
-      {activeTab === 'dashboard' ? (
-        <>
-          <section className="kpi-grid">
-            {statusCards.map((card) => (
-              <article key={card.label} className={`kpi-card ${card.tone}`}>
-                <div className="icon-wrap">{card.icon}</div>
-                <p className="kpi-meta">{card.label}</p>
-                <h2 className="kpi-value">{card.value}</h2>
-              </article>
+      <div className="console-shell">
+        <aside className="sidebar">
+          <div className="nav-section">Monitoring</div>
+          {navItems
+            .filter((item) => item.section === 'Monitoring')
+            .map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
+                onClick={() => setActiveTab(item.id)}
+              >
+                {item.id === 'overview' && <LayoutDashboard size={16} />}
+                {item.id === 'devices' && <SlidersHorizontal size={16} />}
+                {item.id === 'dataframes' && <Signal size={16} />}
+                {item.id === 'connectivity' && <Wifi size={16} />}
+                {item.id === 'analytics' && <Gauge size={16} />}
+                {item.label}
+                {item.badge && <span className={`nav-badge ${item.bad ? 'bad' : ''}`}>{item.badge}</span>}
+              </button>
             ))}
-          </section>
 
-          <section className="main-grid dashboard-grid">
-            <div className="stacked-panels">
-              <div className="panel filter-panel">
-                <div className="panel-head">
-                  <div>
-                    <h3>Region Filter</h3>
-                    <p>Select PMUs by RLDC region.</p>
-                  </div>
-                  <SlidersHorizontal size={18} />
-                </div>
-                <div className="region-pills">
-                  {regionOrder.map((region) => {
-                    const present = region === 'ALL' ? true : regions.includes(region)
-                    const active = selectedRegion === region
-                    if (!present && region !== 'ALL') return null
-                    return (
-                      <button
-                        key={region}
-                        type="button"
-                        className={`region-pill ${active ? 'active' : ''}`}
-                        onClick={() => setSelectedRegion(region)}
-                      >
-                        {region}
-                      </button>
-                    )
-                  })}
-                </div>
+          <div className="nav-section">Resources</div>
+          {navItems
+            .filter((item) => item.section === 'Resources')
+            .map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
+                onClick={() => setActiveTab(item.id)}
+              >
+                {item.id === 'help' ? <CircleHelp size={16} /> : <FileText size={16} />}
+                {item.label}
+              </button>
+            ))}
+
+          <div className="nav-section">Status</div>
+          <div className="status-box">
+            <div>
+              <strong>{systemCounts.connected}</strong>
+              <span>Connected PMUs</span>
+            </div>
+            <div>
+              <strong>{dashboard.eventCount}</strong>
+              <span>Events observed</span>
+            </div>
+            <div>
+              <strong>{systemCounts.totalErrors}</strong>
+              <span>Pipeline errors</span>
+            </div>
+          </div>
+        </aside>
+
+        <main className="main">
+          <div className="app-shell">
+            <div className="page-title">
+              <div>
+                <h2>{activeTab[0].toUpperCase() + activeTab.slice(1)}</h2>
+                <p>Live telemetry mapped from the three simulator streams across this section.</p>
               </div>
+              <div className="page-actions">
+                <button type="button" className="btn ghost">
+                  <BookOpen size={14} /> Runbook
+                </button>
+                <button type="button" className="btn">
+                  <TimerReset size={14} /> {new Date(dashboard.nowUtc).toLocaleTimeString()}
+                </button>
+                <button type="button" className="btn primary">
+                  <Radio size={14} /> {streamOnline && !isPaused ? 'Live stream' : 'Standby'}
+                </button>
+              </div>
+            </div>
 
-              <div className="panel table-panel">
+            {activeTab === 'overview' && (
+              <>
+                <section className="kpi-grid">
+                  {statusCards.map((card) => (
+                    <article key={card.label} className={`kpi-card ${card.tone}`}>
+                      <div className="icon-wrap">{card.icon}</div>
+                      <p className="kpi-meta">{card.label}</p>
+                      <h2 className="kpi-value">{card.value}</h2>
+                    </article>
+                  ))}
+                </section>
+
+                <section className="main-grid dashboard-grid">
+                  <div className="stacked-panels">
+                    <div className="panel">
+                      <div className="panel-head">
+                        <div>
+                          <h3>Simulator Map</h3>
+                          <p>Mapped using simulator metadata and live status.</p>
+                        </div>
+                        <div className="panel-tools-inline">
+                          <button type="button" className="plot-action" onClick={() => setMapFilter('all')}>All</button>
+                          <button type="button" className="plot-action" onClick={() => setMapFilter('issues')}>Issues</button>
+                        </div>
+                      </div>
+                      <div className="map-wrap-react">
+                        {pmus
+                          .filter((pmu) => (mapFilter === 'issues' ? !pmu.connected || packetLossOf(pmu) > 1 : true))
+                          .map((pmu) => {
+                            const x = ((pmu.meta.lon - 68) / (97 - 68)) * 80 + 10
+                            const y = 95 - ((pmu.meta.lat - 8) / (36 - 8)) * 80
+                            const tone = toneFromStatus(pmu.connected, packetLossOf(pmu))
+                            return (
+                              <button
+                                key={pmu.name}
+                                type="button"
+                                className={`map-pin ${tone}`}
+                                style={{ left: `${x}%`, top: `${y}%` }}
+                                onClick={() => setDrawerPMUName(pmu.name)}
+                                title={`${pmu.name} • ${pmu.meta.substation}`}
+                              >
+                                {pmu.name.replace(/.*PMU/i, 'PMU')}
+                              </button>
+                            )
+                          })}
+                        <div className="map-note">India map coordinate projection (simulator metadata)</div>
+                      </div>
+                    </div>
+
+                    <div className="panel">
+                      <div className="panel-head">
+                        <div>
+                          <h3>System Frequency - 3 Simulators</h3>
+                          <p>Live traces from all simulator PMUs.</p>
+                        </div>
+                      </div>
+                      <div className="chart-wrap small">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={mergedTrend}>
+                            <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                            <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                            <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={[49.8, 50.2]} />
+                            <Tooltip labelFormatter={(value) => formatTS(Number(value))} />
+                            <Legend />
+                            {pmus.map((pmu, idx) => (
+                              <Line
+                                key={pmu.name}
+                                type="monotone"
+                                dataKey={`${pmuKey(pmu.name)}__frequency`}
+                                name={pmu.name}
+                                stroke={['#4de0ff', '#7dff93', '#ffd166'][idx % 3]}
+                                dot={false}
+                                strokeWidth={2}
+                                connectNulls
+                                isAnimationActive={false}
+                              />
+                            ))}
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="stacked-panels">
+                    <div className="panel events-panel">
+                      <div className="panel-head">
+                        <div>
+                          <h3>Active Alerts & Events</h3>
+                          <p>{liveAlerts.length} live alerts from simulator telemetry and stream events.</p>
+                        </div>
+                      </div>
+                      <div className="events-list">
+                        {liveAlerts.map((alert, idx) => (
+                          <div key={`${alert.title}-${idx}`} className="event-row">
+                            <div className="event-time">{alert.time}</div>
+                            <div className="event-main">
+                              <strong>{alert.title}</strong>
+                              <span className={`status-chip ${alert.sev === 'bad' ? 'bad' : alert.sev === 'warn' ? 'warn' : 'ok'}`}>
+                                {alert.sev}
+                              </span>
+                            </div>
+                            <p className="event-msg">{alert.msg}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="panel">
+                      <div className="panel-head">
+                        <div>
+                          <h3>Regional Health Summary</h3>
+                          <p>Roll-up from simulator PMUs.</p>
+                        </div>
+                      </div>
+                      <div className="plot-chip-grid">
+                        {regionSummary.map((region) => (
+                          <article key={region.region} className="plot-chip active">
+                            <span className={`dot ${region.connected === region.total ? 'live' : 'off'}`} />
+                            {region.region}: {region.connected}/{region.total} ({round(region.availability, 1)}%)
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </>
+            )}
+
+            {activeTab === 'devices' && (
+              <section className="panel">
                 <div className="panel-head">
                   <div>
-                    <h3>PMU Status Table</h3>
-                    <p>Click a row for details and use Plot to compare multiple PMUs.</p>
+                    <h3>Device Inventory</h3>
+                    <p>Only simulator PMUs are shown and live-mapped here.</p>
                   </div>
-                  <span className="table-caption">{filteredRegistry.length} PMUs</span>
+                </div>
+                <div className="device-filter-row">
+                  <input
+                    value={deviceSearch}
+                    onChange={(event) => setDeviceSearch(event.target.value)}
+                    placeholder="Search PMU / substation / IP"
+                  />
+                  <select value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)}>
+                    <option value="ALL">All regions</option>
+                    {Array.from(new Set(pmus.map((pmu) => pmu.meta.region))).map((region) => (
+                      <option key={region} value={region}>{region}</option>
+                    ))}
+                  </select>
+                  <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                    <option value="ALL">All status</option>
+                    <option value="OK">Healthy</option>
+                    <option value="WARN">Degraded</option>
+                    <option value="BAD">Offline</option>
+                  </select>
                 </div>
 
                 <div className="table-wrap">
@@ -881,345 +853,427 @@ function App() {
                     <thead>
                       <tr>
                         <th>PMU</th>
+                        <th>Substation</th>
                         <th>Region</th>
-                        <th>Plot</th>
+                        <th>Vendor</th>
+                        <th>IP</th>
+                        <th>FPS</th>
                         <th>Status</th>
-                        <th>Live</th>
-                        <th>Frames</th>
-                        <th>Latency</th>
+                        <th>Availability</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredRegistry.map((entry) => {
-                        const active = entry.record.displayName === selectedPMU
+                      {filteredDevices.map((pmu) => {
+                        const loss = packetLossOf(pmu)
+                        const tone = toneFromStatus(pmu.connected, loss)
                         return (
-                          <tr
-                            key={`${entry.record.id}-${entry.record.displayName}`}
-                            className={active ? 'active' : ''}
-                            onClick={() => setPrimaryPMU(entry.record.displayName)}
-                          >
-                            <td>
-                              <strong>{entry.record.displayName}</strong>
-                              <span>{entry.record.substation}</span>
-                            </td>
-                            <td>{entry.record.region}</td>
-                            <td>
-                              <label className="plot-toggle" onClick={(evt) => evt.stopPropagation()}>
-                                <input
-                                  type="checkbox"
-                                  checked={selectedPMUs.includes(entry.record.displayName)}
-                                  onChange={() => togglePMUForPlot(entry.record.displayName)}
-                                />
-                                <span>Plot</span>
-                              </label>
-                            </td>
-                            <td>
-                              <span className={`status-chip ${statusTone(entry.record.status)}`}>
-                                {entry.record.status}
-                              </span>
-                            </td>
-                            <td>
-                              <span className={`status-chip ${entry.connected ? 'ok' : 'bad'}`}>
-                                {entry.connectionText}
-                              </span>
-                            </td>
-                            <td>{entry.frames}</td>
-                            <td>{entry.record.latency}</td>
+                          <tr key={pmu.name} onClick={() => setDrawerPMUName(pmu.name)}>
+                            <td><strong>{pmu.name}</strong></td>
+                            <td>{pmu.meta.substation}</td>
+                            <td>{pmu.meta.region}</td>
+                            <td>{pmu.meta.vendor}</td>
+                            <td>{pmu.meta.primaryIp}</td>
+                            <td>{round(pmu.approxFps, 1)}</td>
+                            <td><span className={`status-chip ${tone}`}>{pmu.connected ? 'Healthy' : 'Offline'}</span></td>
+                            <td>{round(availabilityOf(pmu, pmu.meta.targetFps), 1)}%</td>
                           </tr>
                         )
                       })}
                     </tbody>
                   </table>
                 </div>
-              </div>
 
-              <section className="panel events-panel">
-                <div className="panel-head">
-                  <div>
-                    <h3>Live Event Tape</h3>
-                    <p>Most recent stream updates from the PDC.</p>
-                  </div>
-                </div>
-
-                <div className="events-list">
-                  {eventFeed.length === 0 && <p className="empty">Waiting for stream events...</p>}
-                  {eventFeed.map((evt, idx) => (
-                    <div key={`${evt.time}-${idx}`} className="event-row">
-                      <div className="event-time">{new Date(evt.time).toLocaleTimeString()}</div>
-                      <div className="event-main">
-                        <strong>{evt.pmu}</strong>
-                        <span>
-                          {evt.stage} / {evt.status}
-                        </span>
-                      </div>
-                      <p className="event-msg">{evt.message}</p>
+                <div className="charts-grid compact-gap">
+                  <article className="panel chart-panel">
+                    <div className="panel-head"><h3>Availability by PMU</h3></div>
+                    <div className="chart-wrap small">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={pmus.map((pmu) => ({ name: pmu.name, avail: round(availabilityOf(pmu, pmu.meta.targetFps), 2) }))}>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                          <XAxis dataKey="name" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <YAxis domain={[0, 100]} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <Tooltip />
+                          <Bar dataKey="avail" radius={[8, 8, 0, 0]}>
+                            {pmus.map((pmu) => (
+                              <Cell key={pmu.name} fill={pmu.connected ? '#5de8aa' : '#f0706a'} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
-                  ))}
+                  </article>
+
+                  <article className="panel chart-panel">
+                    <div className="panel-head"><h3>Status Distribution</h3></div>
+                    <div className="chart-wrap small">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={[
+                              { name: 'Healthy', value: pmus.filter((pmu) => pmu.connected).length, color: '#5de8aa' },
+                              { name: 'Offline', value: pmus.filter((pmu) => !pmu.connected).length, color: '#f0706a' },
+                            ]}
+                            dataKey="value"
+                            nameKey="name"
+                            outerRadius={90}
+                          >
+                            {[
+                              { name: 'Healthy', value: pmus.filter((pmu) => pmu.connected).length, color: '#5de8aa' },
+                              { name: 'Offline', value: pmus.filter((pmu) => !pmu.connected).length, color: '#f0706a' },
+                            ].map((entry) => (
+                              <Cell key={entry.name} fill={entry.color} />
+                            ))}
+                          </Pie>
+                          <Tooltip />
+                          <Legend />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </article>
                 </div>
               </section>
-            </div>
+            )}
 
-            <div className="stacked-panels">
-              <div className="panel detail-panel">
+            {activeTab === 'dataframes' && selectedFramePMU && (
+              <>
+                <section className="panel">
+                  <div className="panel-head">
+                    <div>
+                      <h3>Data Frame Information</h3>
+                      <p>Live C37.118-like frame decoding from simulator stream.</p>
+                    </div>
+                    <div className="panel-tools-inline">
+                      <select value={selectedFramePMUName} onChange={(event) => setSelectedFramePMUName(event.target.value)}>
+                        {pmus.map((pmu) => (
+                          <option key={pmu.name} value={pmu.name}>{pmu.name}</option>
+                        ))}
+                      </select>
+                      <button type="button" className="btn" onClick={() => setIsPaused((current) => !current)}>
+                        {isPaused ? 'Resume stream' : 'Pause stream'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="main-grid dashboard-grid">
+                    <div className="panel frame-panel">
+                      <div className="panel-head"><h3>Configuration Frame (CFG-2)</h3></div>
+                      <div className="frame-box-react">
+                        <div>SYNC: 0xAA31</div>
+                        <div>IDCODE: {selectedFramePMU.name}</div>
+                        <div>STATION: {selectedFramePMU.meta.substation}</div>
+                        <div>FPS: {round(selectedFramePMU.approxFps, 2)}</div>
+                        <div>PHASORS: VA, VB, VC, IA</div>
+                        <div>ANALOG: MW, MVAR</div>
+                        <div>DIGITAL: quality/status flags</div>
+                      </div>
+                    </div>
+
+                    <div className="panel frame-panel">
+                      <div className="panel-head"><h3>Live Data Frame</h3></div>
+                      <div className="frame-box-react">
+                        {frameLines.length === 0 && <div>Waiting for live frames...</div>}
+                        {frameLines.map((line, idx) => (
+                          <div key={`${line}-${idx}`}>{line}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="charts-grid compact-gap">
+                  <article className="panel chart-panel">
+                    <div className="panel-head"><h3>Frequency & ROCOF</h3></div>
+                    <div className="chart-wrap small">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={selectedFramePMU.trends.slice(-120)}>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                          <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <YAxis yAxisId="left" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <YAxis yAxisId="right" orientation="right" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <Tooltip labelFormatter={(value) => formatTS(Number(value))} />
+                          <Legend />
+                          <Line yAxisId="left" type="monotone" dataKey="frequency" stroke="#4de0ff" dot={false} strokeWidth={2} />
+                          <Line yAxisId="right" type="monotone" dataKey="rocof" stroke="#ffd166" dot={false} strokeWidth={2} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </article>
+
+                  <article className="panel">
+                    <div className="panel-head"><h3>Phasor Quantities</h3></div>
+                    <div className="phasor-grid-react">
+                      {phasorItems.map((item) => (
+                        <article key={item.label} className="phasor-react-card">
+                          <p>{item.label}</p>
+                          <strong>{item.value ? round(item.value.magnitude, 2) : '--'}</strong>
+                          <span>{item.value ? `${round(item.value.angleDeg, 2)}°` : '--'}</span>
+                        </article>
+                      ))}
+                    </div>
+                  </article>
+                </section>
+              </>
+            )}
+
+            {activeTab === 'connectivity' && (
+              <>
+                <section className="kpi-grid">
+                  {[
+                    { label: 'Active issues', value: connectivityRows.filter((row) => row.tone !== 'ok').length, sub: 'across simulator streams' },
+                    { label: 'Offline streams', value: connectivityRows.filter((row) => !row.connected).length, sub: 'no fresh frames' },
+                    { label: 'High loss (>1%)', value: connectivityRows.filter((row) => row.loss > 1).length, sub: 'quality rejects ratio' },
+                    { label: 'Avg latency', value: `${round(connectivityRows.reduce((sum, row) => sum + row.latency, 0) / Math.max(1, connectivityRows.length), 1)} ms`, sub: 'derived from fps + rocof drift' },
+                  ].map((item) => (
+                    <article key={item.label} className="kpi-card neutral">
+                      <p className="kpi-meta">{item.label}</p>
+                      <h2 className="kpi-value">{item.value}</h2>
+                      <p className="kpi-meta">{item.sub}</p>
+                    </article>
+                  ))}
+                </section>
+
+                <section className="main-grid dashboard-grid">
+                  <div className="panel">
+                    <div className="panel-head"><h3>Connectivity Recommendations</h3></div>
+                    <div className="rec-list-react">
+                      {connectivityRows.map((row) => (
+                        <article key={row.name} className={`rec-react ${row.tone}`}>
+                          <strong>{row.name}</strong>
+                          <p>{row.recommendation}</p>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="panel chart-panel">
+                    <div className="panel-head"><h3>Latency Trend by PMU</h3></div>
+                    <div className="chart-wrap small">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={mergedTrend}>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                          <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <Tooltip labelFormatter={(value) => formatTS(Number(value))} />
+                          <Legend />
+                          {pmus.map((pmu, idx) => (
+                            <Line
+                              key={`${pmu.name}-latency`}
+                              type="monotone"
+                              dataKey={`${pmuKey(pmu.name)}__rocof`}
+                              name={pmu.name}
+                              stroke={['#ff7b7b', '#ffd166', '#4de0ff'][idx % 3]}
+                              dot={false}
+                              strokeWidth={2}
+                            />
+                          ))}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="panel table-panel">
+                  <div className="panel-head"><h3>Per-PMU Connectivity Matrix</h3></div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>PMU</th>
+                          <th>Region</th>
+                          <th>Latency (ms)</th>
+                          <th>Jitter (ms)</th>
+                          <th>Loss %</th>
+                          <th>Avail %</th>
+                          <th>Last frame</th>
+                          <th>Status</th>
+                          <th>Recommendation</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {connectivityRows.map((row) => (
+                          <tr key={row.name} onClick={() => setDrawerPMUName(row.name)}>
+                            <td><strong>{row.name}</strong></td>
+                            <td>{row.meta.region}</td>
+                            <td>{round(row.latency, 1)}</td>
+                            <td>{round(row.jitter, 2)}</td>
+                            <td>{round(row.loss, 3)}</td>
+                            <td>{round(row.avail, 1)}</td>
+                            <td>{ageText(row.lastFrameTime)}</td>
+                            <td><span className={`status-chip ${row.tone}`}>{row.tone}</span></td>
+                            <td>{row.recommendation}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            )}
+
+            {activeTab === 'analytics' && (
+              <>
+                <section className="kpi-grid">
+                  <article className="kpi-card warn">
+                    <p className="kpi-meta">Max angle delta</p>
+                    <h2 className="kpi-value">{round(Math.max(0, ...anglePairs.map((item) => item.value)), 2)}°</h2>
+                  </article>
+                  <article className="kpi-card ok">
+                    <p className="kpi-meta">Avg frequency</p>
+                    <h2 className="kpi-value">
+                      {round(pmus.reduce((sum, pmu) => sum + (pmu.lastReading?.frequency ?? 0), 0) / Math.max(1, pmus.length), 4)} Hz
+                    </h2>
+                  </article>
+                  <article className="kpi-card neutral">
+                    <p className="kpi-meta">Advisories</p>
+                    <h2 className="kpi-value">{analyticsRecs.length}</h2>
+                  </article>
+                </section>
+
+                <section className="main-grid dashboard-grid">
+                  <div className="panel chart-panel">
+                    <div className="panel-head"><h3>Voltage Angle Differences</h3></div>
+                    <div className="chart-wrap small">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={anglePairs}>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                          <XAxis dataKey="name" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <Tooltip />
+                          <Bar dataKey="value" fill="#8b6cf5" radius={[8, 8, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  <div className="panel chart-panel">
+                    <div className="panel-head"><h3>Oscillation Detection</h3></div>
+                    <div className="chart-wrap small">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ScatterChart>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                          <XAxis type="number" dataKey="freq" name="freq" unit="Hz" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <YAxis type="number" dataKey="damping" name="damping" unit="%" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                          <Tooltip cursor={{ strokeDasharray: '3 3' }} />
+                          <Scatter
+                            name="Modes"
+                            data={pmus.map((pmu) => ({
+                              freq: Math.abs(pmu.lastReading?.rocof ?? 0) * 10 + 0.2,
+                              damping: Math.max(2, 14 - Math.abs(pmu.lastReading?.rocof ?? 0) * 80),
+                              pmu: pmu.name,
+                            }))}
+                            fill="#4de0ff"
+                          />
+                        </ScatterChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="panel">
+                  <div className="panel-head"><h3>Operator Recommendations</h3></div>
+                  <div className="rec-list-react">
+                    {analyticsRecs.map((rec, idx) => (
+                      <article key={`${rec.title}-${idx}`} className={`rec-react ${rec.sev}`}>
+                        <strong>{rec.title}</strong>
+                        <p>{rec.desc}</p>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              </>
+            )}
+
+            {activeTab === 'help' && (
+              <section className="panel">
                 <div className="panel-head">
                   <div>
-                    <h3>{selected?.record.displayName ?? 'Select a PMU'}</h3>
-                    <p>Live PMU profile and diagnostics</p>
+                    <h3>Help & Support</h3>
+                    <p>Updated for 3-simulator live React dashboard workflow.</p>
                   </div>
-                  <span className={`status-chip ${selected?.connected ? 'ok' : 'bad'}`}>
-                    {selected?.connected ? 'Live' : 'Offline'}
-                  </span>
                 </div>
-
-                <div className="detail-profile-grid">
-                  {detailRows.map(([label, value]) => (
-                    <div key={label} className="detail-profile-row">
-                      <span>{label}</span>
-                      <strong>{value}</strong>
-                    </div>
-                  ))}
+                <div className="device-filter-row">
+                  <input
+                    value={helpQuery}
+                    onChange={(event) => setHelpQuery(event.target.value)}
+                    placeholder="Search help topics"
+                  />
                 </div>
-
-                <div className="detail-metrics-grid">
-                  {detailMetrics.map((metric) => (
-                    <article key={metric.label} className={`detail-metric ${metric.tone}`}>
-                      <p>{metric.label}</p>
-                      <strong>{metric.value}</strong>
+                <div className="help-list-react">
+                  {filteredHelp.map((item) => (
+                    <article key={item.title} className="help-card-react">
+                      <h4>{item.title}</h4>
+                      <p>{item.content}</p>
                     </article>
                   ))}
                 </div>
 
-                <h4 className="detail-section-title">Signal Channels</h4>
-                <div className="detail-channel-list">
-                  {signalChannels.length ? (
-                    signalChannels.map((channel) => <p key={channel}>{channel}</p>)
-                  ) : (
-                    <p>No signal channels provided</p>
-                  )}
+                <div className="faq-list-react">
+                  {[
+                    {
+                      q: 'Why only 3 PMUs are visible?',
+                      a: 'This view is intentionally mapped to the 3 simulator sources so each chart/table aligns with simulator output.',
+                    },
+                    {
+                      q: 'Where does data come from?',
+                      a: 'The dashboard polls /conversation/state and subscribes to /conversation/events (SSE) exposed by the Go backend.',
+                    },
+                    {
+                      q: 'How do I pause updates?',
+                      a: 'Use Pause in the header. It pauses both polling and SSE consumption in this React dashboard.',
+                    },
+                  ].map((item, idx) => (
+                    <article key={item.q} className="faq-item-react">
+                      <button type="button" onClick={() => setOpenFaq((current) => (current === idx ? null : idx))}>
+                        {item.q}
+                      </button>
+                      {openFaq === idx && <p>{item.a}</p>}
+                    </article>
+                  ))}
                 </div>
+              </section>
+            )}
 
-                <h4 className="detail-section-title">Recommended Actions</h4>
-                <article className="detail-action-card">
-                  <div className="detail-action-icon">
-                    <AlertTriangle size={18} />
-                  </div>
-                  <div>
-                    <strong>{recommendedAction.title}</strong>
-                    <p>{recommendedAction.message}</p>
-                  </div>
-                </article>
-
-                <div className="detail-action-buttons">
-                  <button type="button" className="detail-btn ghost">Export C37.118</button>
-                  <button type="button" className="detail-btn ghost">Open Event Replay</button>
-                  <button type="button" className="detail-btn primary">Run Diagnostics</button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="charts-grid">
-            <article className="panel plot-select-panel">
-              <div className="panel-head">
-                <div>
-                  <h3>Plot Selection</h3>
-                  <p>Overlay trends from multiple PMUs to compare behavior in the same timeline.</p>
-                </div>
-                <span className="table-caption">{plotSelections.length} selected</span>
-              </div>
-              <div className="plot-selection-row">
-                <button
-                  type="button"
-                  className="plot-action"
-                  onClick={() => setSelectedPMUs(filteredRegistry.map((entry) => entry.record.displayName))}
-                >
-                  Select all visible
-                </button>
-                <button
-                  type="button"
-                  className="plot-action"
-                  onClick={() => {
-                    const keep = selected?.record.displayName ?? filteredRegistry[0]?.record.displayName
-                    setSelectedPMUs(keep ? [keep] : [])
-                  }}
-                >
-                  Reset to primary
-                </button>
-              </div>
-              <div className="plot-chip-grid">
-                {filteredRegistry.map((entry) => {
-                  const active = selectedPMUs.includes(entry.record.displayName)
-                  return (
-                    <button
-                      key={`${entry.record.id}-${entry.record.displayName}-chip`}
-                      type="button"
-                      className={`plot-chip ${active ? 'active' : ''}`}
-                      onClick={() => togglePMUForPlot(entry.record.displayName)}
-                    >
-                      <span className={`dot ${entry.connected ? 'live' : 'off'}`} />
-                      {entry.record.displayName}
-                    </button>
-                  )
-                })}
-              </div>
-            </article>
-
-            {chartSeries.map((series) => (
-              <article key={series.key} className="panel chart-panel">
-                <div className="panel-head">
-                  <div>
-                    <h3>{series.label} Comparison</h3>
-                    <p>Last {mergedTrend.length} timeline points across selected PMUs</p>
-                  </div>
-                </div>
-                <div className="chart-wrap small">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={mergedTrend}>
-                      <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-                      <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 12 }} />
-                      <YAxis tick={{ fill: '#9eb0c5', fontSize: 12 }} />
-                      <Tooltip
-                        labelFormatter={(value) => formatTS(Number(value))}
-                        contentStyle={{
-                          background: 'rgba(10, 16, 26, 0.96)',
-                          border: '1px solid rgba(125, 175, 255, 0.2)',
-                          borderRadius: '12px',
-                        }}
-                      />
-                      <Legend />
-                      {plotSelections.map((entry) => (
-                        <Line
-                          key={`${entry.plotKey}-${series.key}`}
-                          type="monotone"
-                          dataKey={`${entry.plotKey}__${series.key}`}
-                          name={entry.record.displayName}
-                          stroke={entry.color}
-                          strokeWidth={2}
-                          dot={false}
-                          connectNulls
-                          isAnimationActive={false}
-                        />
-                      ))}
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </article>
-            ))}
-          </section>
-
-          <aside className="panel phasor-panel phasor-wide">
-            <div className="panel-head">
-              <div>
-                <h3>Phasor Diagram</h3>
-                <p>Choose a PMU and view its live phasor vectors in a dedicated polar scope.</p>
-              </div>
-            </div>
-
-            <div className="phasor-device-strip" role="tablist" aria-label="Phasor device selection">
-              {filteredRegistry.map((entry) => {
-                const active = entry.record.displayName === selectedPhasor?.record.displayName
-                return (
-                  <button
-                    key={`${entry.record.id}-${entry.record.displayName}-phasor`}
-                    type="button"
-                    className={`phasor-device-btn ${active ? 'active' : ''}`}
-                    onClick={() => setSelectedPhasorPMU(entry.record.displayName)}
-                  >
-                    <span className={`dot ${entry.connected ? 'live' : 'off'}`} />
-                    {entry.record.displayName}
-                  </button>
-                )
-              })}
-            </div>
-
-            <PhasorPlot
-              snapshot={selectedPhasor?.lastPhasor}
-              pmuName={selectedPhasor?.record.displayName}
-            />
-          </aside>
-        </>
-      ) : (
-        <section className="panel register-panel">
-          <div className="panel-head register-head">
-            <div>
-              <h3>Register PMU</h3>
-              <p>Create or update a PMU entry from the full device details.</p>
-            </div>
-            <Plus size={18} />
+            {activeTab === 'docs' && (
+              <section className="panel help-card-react">
+                <h3>Documentation</h3>
+                <p>This React dashboard now maps simulator data across all sections.</p>
+                <ul>
+                  <li>Live source: /conversation/state (poll 1s) and /conversation/events (SSE).</li>
+                  <li>PMU scope: first three PMUs from runtime state, treated as simulator lanes.</li>
+                  <li>Overview: map, alerts, frequency charts from live trends.</li>
+                  <li>Data Frames: selected PMU frame stream, CFG and phasor values.</li>
+                  <li>Connectivity: latency/jitter/loss/availability derived per simulator PMU.</li>
+                  <li>Analytics: angle deltas and modal hints derived from live phasor and trend data.</li>
+                </ul>
+              </section>
+            )}
           </div>
+        </main>
+      </div>
 
-          <div className="form-grid register-grid">
-            <div className="preset-strip field-wide">
-              <div className="preset-copy">
-                <strong>Quick simulator presets</strong>
-                <p>Use these to register all three PMUs fast, then edit the values if needed.</p>
-              </div>
-              <div className="preset-buttons">
-                {pmuPresets.map((preset) => (
-                  <button key={preset.id} type="button" className="preset-button" onClick={() => applyPreset(preset)}>
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {[
-              ['id', 'PMU ID'],
-              ['displayName', 'PMU Name'],
-              ['substation', 'Substation'],
-              ['region', 'Region (RLDC)'],
-              ['voltageClass', 'Voltage Class'],
-              ['vendorModel', 'Vendor / Model'],
-              ['primaryIp', 'Primary IP'],
-              ['redundantIp', 'Redundant IP'],
-              ['reportingRate', 'Reporting Rate'],
-              ['commissioned', 'Commissioned'],
-              ['status', 'Status'],
-              ['dataAvailability', 'Data Availability'],
-              ['latency', 'Latency'],
-              ['jitter', 'Jitter'],
-              ['packetLoss', 'Packet Loss'],
-            ].map(([key, label]) => (
-              <label key={key} className="field">
-                <span>{label}</span>
-                <input
-                  value={form[key as keyof PMUFormState] as string}
-                  onChange={(e) => updateForm(key as keyof PMUFormState, e.target.value as never)}
-                  placeholder={label}
-                />
-              </label>
-            ))}
-
-            <label className="field field-wide">
-              <span>Signal Channels</span>
-              <textarea
-                rows={4}
-                value={form.signalChannels}
-                onChange={(e) => updateForm('signalChannels', e.target.value)}
-                placeholder="Voltage phasors, current phasors, analog, digital"
-              />
-            </label>
-
-            <label className="field field-wide">
-              <span>Notes</span>
-              <textarea
-                rows={3}
-                value={form.notes}
-                onChange={(e) => updateForm('notes', e.target.value)}
-                placeholder="Operator notes or corrective actions"
-              />
-            </label>
-
-            <div className="register-actions field-wide">
-              <button type="button" className="primary-btn" onClick={registerPMU}>
-                Save PMU Profile
+      {drawerPMU && (
+        <div className="drawer-overlay" onClick={() => setDrawerPMUName('')}>
+          <aside className="drawer-react" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-head-react">
+              <h3>{drawerPMU.name}</h3>
+              <button type="button" onClick={() => setDrawerPMUName('')}>
+                <X size={18} />
               </button>
-              <p>
-                Saved PMUs are kept locally in your browser. Switch back to the dashboard tab to review status and live telemetry.
-              </p>
             </div>
-          </div>
-        </section>
+            <div className="drawer-body-react">
+              <p><strong>Substation:</strong> {drawerPMU.meta.substation}, {drawerPMU.meta.state}</p>
+              <p><strong>Region:</strong> {drawerPMU.meta.region}</p>
+              <p><strong>Voltage:</strong> {drawerPMU.meta.voltage}</p>
+              <p><strong>Vendor:</strong> {drawerPMU.meta.vendor}</p>
+              <p><strong>Primary IP:</strong> {drawerPMU.meta.primaryIp}</p>
+              <p><strong>Redundant IP:</strong> {drawerPMU.meta.redundantIp}</p>
+              <p><strong>Frames:</strong> {drawerPMU.totalFrames}</p>
+              <p><strong>Approx FPS:</strong> {round(drawerPMU.approxFps, 2)}</p>
+              <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
+              {drawerPMU.lastError && <p><strong>Last error:</strong> {drawerPMU.lastError}</p>}
+            </div>
+          </aside>
+        </div>
       )}
     </div>
   )
