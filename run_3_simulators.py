@@ -11,9 +11,61 @@ from pathlib import Path
 
 
 SIMS = [
-    {"name": "PMU-SIM-1", "tcp": 4712, "udp": 4713, "idcode": 7734, "fnom": 50, "rate": 50, "freq_bias": 0.0, "phase_shift_deg": 0.0, "mw_bias": 0.0, "mvar_bias": 0.0, "oscillation_scale": 1.00},
-    {"name": "PMU-SIM-2", "tcp": 4722, "udp": 4723, "idcode": 7735, "fnom": 50, "rate": 50, "freq_bias": 0.015, "phase_shift_deg": 4.0, "mw_bias": 6.0, "mvar_bias": -3.0, "oscillation_scale": 0.92},
-    {"name": "PMU-SIM-3", "tcp": 4732, "udp": 4733, "idcode": 7736, "fnom": 50, "rate": 50, "freq_bias": -0.012, "phase_shift_deg": -6.0, "mw_bias": -5.0, "mvar_bias": 4.0, "oscillation_scale": 1.10},
+    {
+        "name": "PMU-SIM-1",
+        "tcp": 4712, "udp": 4713,
+        "idcode": 7734,
+        "fnom": 50, "rate": 50,
+        "freq_bias": 0.0,
+        "phase_shift_deg": 0.0,
+        "mw_bias": 0.0,
+        "mvar_bias": 0.0,
+        "oscillation_scale": 1.00
+    },
+    {
+        "name": "PMU-SIM-2",
+        "tcp": 4722, "udp": 4723,
+        "idcode": 7735,
+        "fnom": 50, "rate": 50,
+        "freq_bias": 0.015,
+        "phase_shift_deg": 4.0,
+        "mw_bias": 6.0,
+        "mvar_bias": -3.0,
+        "oscillation_scale": 0.92
+    },
+    {
+        "name": "PMU-SIM-3",
+        "tcp": 4732, "udp": 4733,
+        "idcode": 7736,
+        "fnom": 50, "rate": 50,
+        "freq_bias": -0.012,
+        "phase_shift_deg": -6.0,
+        "mw_bias": -5.0,
+        "mvar_bias": 4.0,
+        "oscillation_scale": 1.10
+    },
+    {
+        "name": "PMU-SIM-4",
+        "tcp": 4742, "udp": 4743,
+        "idcode": 7737,
+        "fnom": 50, "rate": 50,
+        "freq_bias": 0.008,
+        "phase_shift_deg": 2.5,
+        "mw_bias": 3.5,
+        "mvar_bias": -2.0,
+        "oscillation_scale": 0.97
+    },
+    {
+        "name": "PMU-SIM-5",
+        "tcp": 4752, "udp": 4753,
+        "idcode": 7738,
+        "fnom": 50, "rate": 50,
+        "freq_bias": -0.018,
+        "phase_shift_deg": -3.5,
+        "mw_bias": -4.0,
+        "mvar_bias": 5.0,
+        "oscillation_scale": 1.05
+    },
 ]
 
 
