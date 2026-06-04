@@ -102,6 +102,15 @@ type PMUMeta = {
   lon: number
 }
 
+type PMUConfig = {
+  name: string
+  ip: string
+  port: number
+  idcode: number
+  region: string
+  protocol: string
+}
+
 const emptyState: DashboardState = {
   nowUtc: new Date().toISOString(),
   pmus: [],
@@ -130,70 +139,18 @@ function pmuKey(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
 }
 
-function metaForPMU(name: string, idx: number): PMUMeta {
-  const lowered = name.toLowerCase()
-  const known = [
-    {
-      match: ['pmu1', 'jaipur'],
-      value: {
-        substation: 'Jaipur',
-        region: 'NRLDC',
-        state: 'Rajasthan',
-        voltage: '400 kV',
-        vendor: 'Siemens 7SS85',
-        primaryIp: '10.45.15.12',
-        redundantIp: '10.45.115.12',
-        targetFps: 50,
-        lat: 26.91,
-        lon: 75.79,
-      },
-    },
-    {
-      match: ['pmu2', 'alwar'],
-      value: {
-        substation: 'Alwar',
-        region: 'NRLDC',
-        state: 'Rajasthan',
-        voltage: '220 kV',
-        vendor: 'SEL-421 PMU',
-        primaryIp: '10.45.16.12',
-        redundantIp: '10.45.116.12',
-        targetFps: 50,
-        lat: 27.55,
-        lon: 76.63,
-      },
-    },
-    {
-      match: ['pmu3', 'neemrana'],
-      value: {
-        substation: 'Neemrana',
-        region: 'NRLDC',
-        state: 'Rajasthan',
-        voltage: '132 kV',
-        vendor: 'GE D20 PMU',
-        primaryIp: '10.45.17.12',
-        redundantIp: '10.45.117.12',
-        targetFps: 50,
-        lat: 27.99,
-        lon: 76.39,
-      },
-    },
-  ]
-
-  const found = known.find((item) => item.match.some((token) => lowered.includes(token)))
-  if (found) return found.value
-
+function metaForDB(name: string, config?: PMUConfig): PMUMeta {
   return {
-    substation: `Simulator-${idx + 1}`,
-    region: 'NRLDC',
-    state: 'Rajasthan',
-    voltage: '220 kV',
-    vendor: `Simulator Model ${idx + 1}`,
-    primaryIp: `10.45.${18 + idx}.12`,
-    redundantIp: `10.45.${118 + idx}.12`,
+    substation: config?.name || name,
+    region: config?.region || 'Unknown',
+    state: '-',
+    voltage: '-',
+    vendor: 'Generic PMU',
+    primaryIp: config?.ip || '0.0.0.0',
+    redundantIp: '-',
     targetFps: 50,
-    lat: 26.5 + idx * 0.8,
-    lon: 75.4 + idx * 0.9,
+    lat: 20,
+    lon: 70,
   }
 }
 
@@ -235,6 +192,7 @@ function ageText(iso: string) {
 
 function App() {
   const [dashboard, setDashboard] = useState<DashboardState>(emptyState)
+  const [dbConfigs, setDbConfigs] = useState<PMUConfig[]>([])
   const [events, setEvents] = useState<ConversationEvent[]>([])
   const [streamOnline, setStreamOnline] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
@@ -250,6 +208,43 @@ function App() {
   const [helpQuery, setHelpQuery] = useState('')
   const [frameLines, setFrameLines] = useState<string[]>([])
   const [openFaq, setOpenFaq] = useState<number | null>(null)
+  const [showAddPMU, setShowAddPMU] = useState(false)
+  const [newPMU, setNewPMU] = useState({ name: '', ip: '', port: 4712, idcode: 1, region: 'NRLDC', protocol: 'tcp' })
+
+  const handleAddPMU = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      const res = await fetch('/api/pmus', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newPMU),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        alert('Failed to connect PMU: ' + text)
+        return
+      }
+      setShowAddPMU(false)
+    } catch (err: any) {
+      alert('Error connecting PMU: ' + err.message)
+      console.error(err)
+    }
+  }
+
+  const handleDeletePMU = async (name: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!confirm(`Disconnect and delete PMU ${name}?`)) return
+    try {
+      const res = await fetch(`/api/pmus/${name}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const text = await res.text()
+        alert('Failed to delete PMU: ' + text)
+      }
+    } catch (err: any) {
+      alert('Error deleting PMU: ' + err.message)
+      console.error(err)
+    }
+  }
 
   useEffect(() => {
     const tickClock = () => {
@@ -272,10 +267,19 @@ function App() {
 
     const refresh = async () => {
       try {
-        const res = await fetch('/conversation/state')
-        if (!res.ok) return
-        const data = (await res.json()) as DashboardState
-        setDashboard(data)
+        const [stateRes, configRes] = await Promise.all([
+          fetch('/conversation/state'),
+          fetch('/api/pmus')
+        ])
+        
+        if (stateRes.ok) {
+          const data = (await stateRes.json()) as DashboardState
+          setDashboard(data)
+        }
+        if (configRes.ok) {
+          const configs = (await configRes.json()) as PMUConfig[]
+          setDbConfigs(configs)
+        }
       } catch {
         // Keep last good snapshot visible.
       }
@@ -307,11 +311,41 @@ function App() {
   }, [isPaused])
 
   const pmus = useMemo(() => {
-    return dashboard.pmus.slice(0, 3).map((pmu, idx) => ({
-      ...pmu,
-      meta: metaForPMU(pmu.name, idx),
-    }))
-  }, [dashboard.pmus])
+    // We map all PMUs from DB configs and overlay active state if present
+    return dbConfigs.map((cfg) => {
+      const activeState = dashboard.pmus.find(p => p.name === cfg.name)
+      if (activeState) {
+        return {
+          ...activeState,
+          meta: metaForDB(cfg.name, cfg),
+        }
+      }
+      
+      // If PMU is configured but not active/no events yet, create a dummy offline state
+      const dummyState: LivePMUState = {
+        name: cfg.name,
+        connected: false,
+        connectionText: 'disconnected',
+        lastEventTime: '',
+        lastFrameTime: '',
+        lastHandshake: '',
+        lastError: 'waiting for connection',
+        totalFrames: 0,
+        approxFps: 0,
+        qualityRejects: 0,
+        kafkaErrors: 0,
+        sinkErrors: 0,
+        spoolQueued: 0,
+        lastReading: { ts: 0, frequency: 0, mw: 0, mvar: 0, rocof: 0 },
+        lastPhasor: { va: { magnitude: 0, angleDeg: 0 }, vb: { magnitude: 0, angleDeg: 0 }, vc: { magnitude: 0, angleDeg: 0 }, ia: { magnitude: 0, angleDeg: 0 }, ts: 0 },
+        trends: []
+      }
+      return {
+        ...dummyState,
+        meta: metaForDB(cfg.name, cfg),
+      }
+    })
+  }, [dashboard.pmus, dbConfigs])
 
   useEffect(() => {
     if (!pmus.length) {
@@ -825,7 +859,12 @@ function App() {
                 <div className="panel-head">
                   <div>
                     <h3>Device Inventory</h3>
-                    <p>Only simulator PMUs are shown and live-mapped here.</p>
+                    <p>Manage and monitor PMU connections.</p>
+                  </div>
+                  <div className="panel-tools-inline">
+                    <button type="button" className="btn primary" onClick={() => setShowAddPMU(true)}>
+                      + Add PMU
+                    </button>
                   </div>
                 </div>
                 <div className="device-filter-row">
@@ -860,6 +899,7 @@ function App() {
                         <th>FPS</th>
                         <th>Status</th>
                         <th>Availability</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -876,6 +916,11 @@ function App() {
                             <td>{round(pmu.approxFps, 1)}</td>
                             <td><span className={`status-chip ${tone}`}>{pmu.connected ? 'Healthy' : 'Offline'}</span></td>
                             <td>{round(availabilityOf(pmu, pmu.meta.targetFps), 1)}%</td>
+                            <td>
+                              <button type="button" className="btn ghost" style={{color: 'var(--err)', padding: '2px 6px'}} onClick={(e) => handleDeletePMU(pmu.name, e)}>
+                                Disconnect
+                              </button>
+                            </td>
                           </tr>
                         )
                       })}
@@ -1188,7 +1233,7 @@ function App() {
                 <div className="panel-head">
                   <div>
                     <h3>Help & Support</h3>
-                    <p>Updated for 3-simulator live React dashboard workflow.</p>
+                    <p>Updated for dynamic live React dashboard workflow.</p>
                   </div>
                 </div>
                 <div className="device-filter-row">
@@ -1210,8 +1255,8 @@ function App() {
                 <div className="faq-list-react">
                   {[
                     {
-                      q: 'Why only 3 PMUs are visible?',
-                      a: 'This view is intentionally mapped to the 3 simulator sources so each chart/table aligns with simulator output.',
+                      q: 'Why are some PMUs offline?',
+                      a: 'This means they are configured in the database, but no live data is currently streaming.',
                     },
                     {
                       q: 'Where does data come from?',
@@ -1236,10 +1281,10 @@ function App() {
             {activeTab === 'docs' && (
               <section className="panel help-card-react">
                 <h3>Documentation</h3>
-                <p>This React dashboard now maps simulator data across all sections.</p>
+                <p>This React dashboard now maps fully dynamic data from InfluxDB across all sections.</p>
                 <ul>
                   <li>Live source: /conversation/state (poll 1s) and /conversation/events (SSE).</li>
-                  <li>PMU scope: first three PMUs from runtime state, treated as simulator lanes.</li>
+                  <li>Config source: /api/pmus mapped from InfluxDB.</li>
                   <li>Overview: map, alerts, frequency charts from live trends.</li>
                   <li>Data Frames: selected PMU frame stream, CFG and phasor values.</li>
                   <li>Connectivity: latency/jitter/loss/availability derived per simulator PMU.</li>
@@ -1271,6 +1316,51 @@ function App() {
               <p><strong>Approx FPS:</strong> {round(drawerPMU.approxFps, 2)}</p>
               <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
               {drawerPMU.lastError && <p><strong>Last error:</strong> {drawerPMU.lastError}</p>}
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {showAddPMU && (
+        <div className="drawer-overlay" onClick={() => setShowAddPMU(false)}>
+          <aside className="drawer-react" onClick={(event) => event.stopPropagation()} style={{ width: '400px' }}>
+            <div className="drawer-head-react">
+              <h3>Add PMU Connection</h3>
+              <button type="button" onClick={() => setShowAddPMU(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="drawer-body-react">
+              <form onSubmit={handleAddPMU} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>Name</label>
+                  <input required value={newPMU.name} onChange={e => setNewPMU({...newPMU, name: e.target.value})} style={{width:'100%', padding:'8px'}} placeholder="PMU-1" />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>IP Address</label>
+                  <input required value={newPMU.ip} onChange={e => setNewPMU({...newPMU, ip: e.target.value})} style={{width:'100%', padding:'8px'}} placeholder="127.0.0.1" />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>Port</label>
+                  <input type="number" required value={newPMU.port} onChange={e => setNewPMU({...newPMU, port: parseInt(e.target.value)})} style={{width:'100%', padding:'8px'}} />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>ID Code</label>
+                  <input type="number" required value={newPMU.idcode} onChange={e => setNewPMU({...newPMU, idcode: parseInt(e.target.value)})} style={{width:'100%', padding:'8px'}} />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>Region</label>
+                  <input value={newPMU.region} onChange={e => setNewPMU({...newPMU, region: e.target.value})} style={{width:'100%', padding:'8px'}} />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>Protocol</label>
+                  <select value={newPMU.protocol} onChange={e => setNewPMU({...newPMU, protocol: e.target.value})} style={{width:'100%', padding:'8px'}}>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </div>
+                <button type="submit" className="btn primary" style={{marginTop: '10px'}}>Connect PMU</button>
+              </form>
             </div>
           </aside>
         </div>

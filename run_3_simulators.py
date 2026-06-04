@@ -27,7 +27,7 @@ def start_simulators() -> list[subprocess.Popen]:
             sys.executable,
             str(stimulator),
             "--host",
-            "127.0.0.1",
+            "0.0.0.0",
             "--tcp-port",
             str(sim["tcp"]),
             "--udp-port",

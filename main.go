@@ -14,11 +14,12 @@ import (
 	"time"
 
 	"pdc/aligner"
-	"pdc/config"
+	"pdc/api"
+	"pdc/manager"
 	"pdc/monitoring"
 	"pdc/output"
 	"pdc/parser"
-	"pdc/receiver"
+	"pdc/store"
 )
 
 type pipeline struct {
@@ -362,14 +363,15 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 }
 
 func main() {
-	cfgPath := flag.String("config", "config/pmus.yaml", "path to PMU configuration file")
 	metricsAddr := flag.String("metrics-addr", ":2112", "prometheus metrics listen address")
+	apiAddr := flag.String("api-addr", ":8080", "REST API listen address")
 	flag.Parse()
 
-	cfg, err := config.Load(*cfgPath)
+	dbStore, err := store.NewStore()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		log.Fatalf("failed to initialize influx db store: %v", err)
 	}
+	defer dbStore.Close()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -383,18 +385,25 @@ func main() {
 
 	monitoring.RecordConversation("SYSTEM", "PDC", "SYSTEM", "startup", "ok", "pipeline started")
 
-	var wg sync.WaitGroup
-	for _, pmu := range cfg.PMUs {
-		wg.Add(1)
-		go func(p config.PMUConfig) {
-			defer wg.Done()
-			r := receiver.New(p, func(pmuName string, raw []byte) {
-				pl.HandleFrame(ctx, pmuName, raw)
-			})
-			r.Run(ctx)
-		}(pmu)
+	pmuManager := manager.NewPMUManager(func(pmuName string, raw []byte) {
+		pl.HandleFrame(ctx, pmuName, raw)
+	})
+
+	api.StartServer(*apiAddr, dbStore, pmuManager)
+	log.Printf("REST API listening on %s", *apiAddr)
+
+	pmus, err := dbStore.GetAllPMUs(ctx)
+	if err != nil {
+		log.Printf("failed to load PMUs from DB: %v", err)
+	} else {
+		for _, pmu := range pmus {
+			if err := pmuManager.StartPMU(ctx, pmu); err != nil {
+				log.Printf("failed to start PMU %s: %v", pmu.Name, err)
+			}
+		}
 	}
 
-	wg.Wait()
+	<-ctx.Done()
+	pmuManager.StopAll()
 	log.Println("PDC shut down cleanly")
 }

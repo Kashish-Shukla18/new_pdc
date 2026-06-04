@@ -10,13 +10,14 @@ import (
 
 // PMUConfig holds the connection parameters for a single PMU.
 type PMUConfig struct {
-	Name         string `yaml:"name"`
-	IP           string `yaml:"ip"`
-	Port         int    `yaml:"port"`
-	IDCode       uint16 `yaml:"idcode"`
-	Protocol     string `yaml:"protocol"`      // "tcp" (default) or "udp"
-	TimeoutSec   int    `yaml:"timeout_sec"`   // dial / read timeout
-	ReconnectSec int    `yaml:"reconnect_sec"` // reconnect back-off
+	Name         string `yaml:"name" json:"name"`
+	IP           string `yaml:"ip" json:"ip"`
+	Port         int    `yaml:"port" json:"port"`
+	IDCode       uint16 `yaml:"idcode" json:"idcode"`
+	Protocol     string `yaml:"protocol" json:"protocol"`           // "tcp" (default) or "udp"
+	TimeoutSec   int    `yaml:"timeout_sec" json:"timeout_sec"`     // dial / read timeout
+	ReconnectSec int    `yaml:"reconnect_sec" json:"reconnect_sec"` // reconnect back-off
+	Region       string `yaml:"region" json:"region"`               // geographical region
 }
 
 // Addr returns the "host:port" string used for dialing.
