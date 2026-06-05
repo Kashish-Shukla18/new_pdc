@@ -108,6 +108,24 @@ func replaceFileWithRetry(dst, src string) error {
 	return nil
 }
 
+func removeFileWithRetry(path string) error {
+	const attempts = 12
+	const delay = 150 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		err := os.Remove(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		time.Sleep(delay)
+	}
+	// Final attempt, return the error if it still fails
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 func (s *ReadingSpool) Append(r parser.Reading) error {
 	if s == nil {
 		return nil
@@ -275,8 +293,8 @@ func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, pars
 
 	if stats.Replayed == 0 && stats.Pending == 0 {
 		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		_ = os.Remove(s.path)
+		_ = removeFileWithRetry(tmpPath)
+		_ = removeFileWithRetry(s.path)
 		return stats, nil
 	}
 
@@ -284,8 +302,8 @@ func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, pars
 		if err := tmp.Close(); err != nil {
 			return stats, fmt.Errorf("close tmp spool: %w", err)
 		}
-		_ = os.Remove(tmpPath)
-		if rmErr := os.Remove(s.path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		_ = removeFileWithRetry(tmpPath)
+		if rmErr := removeFileWithRetry(s.path); rmErr != nil {
 			return stats, fmt.Errorf("remove empty spool: %w", rmErr)
 		}
 		return stats, nil

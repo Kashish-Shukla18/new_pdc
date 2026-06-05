@@ -15,9 +15,11 @@ type PMUConfig struct {
 	Port         int    `yaml:"port" json:"port"`
 	IDCode       uint16 `yaml:"idcode" json:"idcode"`
 	Protocol     string `yaml:"protocol" json:"protocol"`           // "tcp" (default) or "udp"
-	TimeoutSec   int    `yaml:"timeout_sec" json:"timeout_sec"`     // dial / read timeout
-	ReconnectSec int    `yaml:"reconnect_sec" json:"reconnect_sec"` // reconnect back-off
-	Region       string `yaml:"region" json:"region"`               // geographical region
+	TimeoutSec   int     `yaml:"timeout_sec" json:"timeout_sec"`     // dial / read timeout
+	ReconnectSec int     `yaml:"reconnect_sec" json:"reconnect_sec"` // reconnect back-off
+	Region       string  `yaml:"region" json:"region"`               // geographical region
+	Lat          float64 `yaml:"lat" json:"lat"`                     // latitude
+	Lon          float64 `yaml:"lon" json:"lon"`                     // longitude
 }
 
 // Addr returns the "host:port" string used for dialing.
