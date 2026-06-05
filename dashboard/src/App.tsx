@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
   Cell,
   Legend,
-  Line,
-  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -109,6 +109,8 @@ type PMUConfig = {
   idcode: number
   region: string
   protocol: string
+  lat: number
+  lon: number
 }
 
 const emptyState: DashboardState = {
@@ -149,8 +151,8 @@ function metaForDB(name: string, config?: PMUConfig): PMUMeta {
     primaryIp: config?.ip || '0.0.0.0',
     redundantIp: '-',
     targetFps: 50,
-    lat: 20,
-    lon: 70,
+    lat: config?.lat || 20,
+    lon: config?.lon || 70,
   }
 }
 
@@ -209,7 +211,7 @@ function App() {
   const [frameLines, setFrameLines] = useState<string[]>([])
   const [openFaq, setOpenFaq] = useState<number | null>(null)
   const [showAddPMU, setShowAddPMU] = useState(false)
-  const [newPMU, setNewPMU] = useState({ name: '', ip: '', port: 4712, idcode: 1, region: 'NRLDC', protocol: 'tcp' })
+  const [newPMU, setNewPMU] = useState({ name: '', ip: '', port: 4712, idcode: 1, region: 'NRLDC', protocol: 'tcp', lat: 20.0, lon: 70.0 })
 
   const handleAddPMU = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -417,36 +419,56 @@ function App() {
         ? `${systemCounts.disconnected} streams need attention`
         : 'All systems nominal'
 
+  const healthyCount = pmus.filter(p => p.connected && packetLossOf(p) <= 1).length;
+  const degradedCount = pmus.filter(p => p.connected && packetLossOf(p) > 1).length;
+  const offlineCount = systemCounts.disconnected;
+  const avgAvailability = pmus.length ? round(pmus.reduce((sum, p) => sum + availabilityOf(p, p.meta.targetFps), 0) / pmus.length, 1) : 0;
+  const totalFps = Math.round(pmus.reduce((sum, p) => sum + p.approxFps, 0));
+  const uniqueSubstations = new Set(pmus.map(p => p.meta.substation)).size;
+
   const statusCards = [
     {
-      label: 'Connected PMUs',
-      value: `${systemCounts.connected}/${pmus.length || 0}`,
+      label: 'Total PMUs',
+      value: `${pmus.length}`,
+      subtext: `${uniqueSubstations} substations`,
+      trend: '▲ stable',
+      tone: 'neutral',
+      icon: <Radio size={18} />,
+    },
+    {
+      label: 'Healthy',
+      value: `${healthyCount}`,
+      subtext: `${Math.round((healthyCount / (pmus.length || 1)) * 100)}% reporting`,
       tone: 'ok',
       icon: <Wifi size={18} />,
     },
     {
-      label: 'Frequency',
-      value: selectedPMU ? `${round(selectedPMU.lastReading?.frequency ?? 0, 3)} Hz` : '--',
-      tone: 'neutral',
-      icon: <Gauge size={18} />,
-    },
-    {
-      label: 'Total Frames',
-      value: `${pmus.reduce((sum, pmu) => sum + pmu.totalFrames, 0)}`,
-      tone: 'neutral',
-      icon: <Signal size={18} />,
-    },
-    {
-      label: 'Pipeline Errors',
-      value: `${systemCounts.totalErrors}`,
-      tone: systemCounts.totalErrors > 0 ? 'warn' : 'neutral',
+      label: 'Degraded',
+      value: `${degradedCount}`,
+      subtext: 'quality flag set / partial loss',
+      tone: degradedCount > 0 ? 'warn' : 'neutral',
       icon: <AlertTriangle size={18} />,
     },
     {
-      label: 'Spool Queue',
-      value: `${systemCounts.spool}`,
-      tone: 'neutral',
+      label: 'Offline',
+      value: `${offlineCount}`,
+      subtext: 'no frames in 30 s',
+      tone: offlineCount > 0 ? 'bad' : 'neutral',
+      icon: <X size={18} />,
+    },
+    {
+      label: 'Avg Data Availability',
+      value: `${avgAvailability}%`,
+      subtext: 'last 60 minutes',
+      tone: avgAvailability < 95 ? 'warn' : 'ok',
       icon: <Activity size={18} />,
+    },
+    {
+      label: 'Frames / sec ingested',
+      value: `${totalFps.toLocaleString()}`,
+      subtext: 'aggregate across all streams',
+      tone: 'neutral',
+      icon: <Signal size={18} />,
     },
   ]
 
@@ -734,6 +756,8 @@ function App() {
                       <div className="icon-wrap">{card.icon}</div>
                       <p className="kpi-meta">{card.label}</p>
                       <h2 className="kpi-value">{card.value}</h2>
+                      {card.subtext && <p className="kpi-subtext" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{card.subtext}</p>}
+                      {card.trend && <p className="kpi-trend" style={{ fontSize: '0.8rem', color: 'var(--ok-color)', marginTop: '4px' }}>{card.trend}</p>}
                     </article>
                   ))}
                 </section>
@@ -778,32 +802,37 @@ function App() {
                     <div className="panel">
                       <div className="panel-head">
                         <div>
-                          <h3>System Frequency - 3 Simulators</h3>
-                          <p>Live traces from all simulator PMUs.</p>
+                          <h3>System Frequency</h3>
+                          <p>Live traces from all connected PMUs.</p>
                         </div>
                       </div>
                       <div className="chart-wrap small">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <LineChart data={mergedTrend}>
+                        <ResponsiveContainer width="99%" height={360} minWidth={1} minHeight={1}>
+                          <AreaChart data={mergedTrend}>
                             <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                             <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
-                            <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={[49.8, 50.2]} />
+                            <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={['auto', 'auto']} scale="linear" />
                             <Tooltip labelFormatter={(value) => formatTS(Number(value))} />
                             <Legend />
-                            {pmus.map((pmu, idx) => (
-                              <Line
-                                key={pmu.name}
-                                type="monotone"
-                                dataKey={`${pmuKey(pmu.name)}__frequency`}
-                                name={pmu.name}
-                                stroke={['#4de0ff', '#7dff93', '#ffd166'][idx % 3]}
-                                dot={false}
-                                strokeWidth={2}
-                                connectNulls
-                                isAnimationActive={false}
-                              />
-                            ))}
-                          </LineChart>
+                            {pmus.map((pmu, idx) => {
+                              const color = ['#4de0ff', '#7dff93', '#ffd166', '#ff719a', '#ab82ff', '#ffa84d'][idx % 6];
+                              return (
+                                <Area
+                                  key={pmu.name}
+                                  type="natural"
+                                  dataKey={`${pmuKey(pmu.name)}__frequency`}
+                                  name={pmu.name}
+                                  stroke={color}
+                                  fill={color}
+                                  fillOpacity={0.15}
+                                  dot={false}
+                                  strokeWidth={2}
+                                  connectNulls
+                                  isAnimationActive={false}
+                                />
+                              );
+                            })}
+                          </AreaChart>
                         </ResponsiveContainer>
                       </div>
                     </div>
@@ -932,7 +961,7 @@ function App() {
                   <article className="panel chart-panel">
                     <div className="panel-head"><h3>Availability by PMU</h3></div>
                     <div className="chart-wrap small">
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="99%" height={360} minWidth={1} minHeight={1}>
                         <BarChart data={pmus.map((pmu) => ({ name: pmu.name, avail: round(availabilityOf(pmu, pmu.meta.targetFps), 2) }))}>
                           <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                           <XAxis dataKey="name" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
@@ -951,7 +980,7 @@ function App() {
                   <article className="panel chart-panel">
                     <div className="panel-head"><h3>Status Distribution</h3></div>
                     <div className="chart-wrap small">
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="99%" height={360} minWidth={1} minHeight={1}>
                         <PieChart>
                           <Pie
                             data={[
@@ -1178,7 +1207,7 @@ function App() {
                   <div className="panel chart-panel">
                     <div className="panel-head"><h3>Voltage Angle Differences</h3></div>
                     <div className="chart-wrap small">
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="99%" height={360} minWidth={1} minHeight={1}>
                         <BarChart data={anglePairs}>
                           <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                           <XAxis dataKey="name" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
@@ -1193,7 +1222,7 @@ function App() {
                   <div className="panel chart-panel">
                     <div className="panel-head"><h3>Oscillation Detection</h3></div>
                     <div className="chart-wrap small">
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="99%" height={360} minWidth={1} minHeight={1}>
                         <ScatterChart>
                           <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                           <XAxis type="number" dataKey="freq" name="freq" unit="Hz" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
@@ -1351,6 +1380,14 @@ function App() {
                 <div>
                   <label style={{display:'block', marginBottom:'4px'}}>Region</label>
                   <input value={newPMU.region} onChange={e => setNewPMU({...newPMU, region: e.target.value})} style={{width:'100%', padding:'8px'}} />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>Latitude</label>
+                  <input type="number" step="any" required value={newPMU.lat} onChange={e => setNewPMU({...newPMU, lat: parseFloat(e.target.value) || 0})} style={{width:'100%', padding:'8px'}} />
+                </div>
+                <div>
+                  <label style={{display:'block', marginBottom:'4px'}}>Longitude</label>
+                  <input type="number" step="any" required value={newPMU.lon} onChange={e => setNewPMU({...newPMU, lon: parseFloat(e.target.value) || 0})} style={{width:'100%', padding:'8px'}} />
                 </div>
                 <div>
                   <label style={{display:'block', marginBottom:'4px'}}>Protocol</label>
