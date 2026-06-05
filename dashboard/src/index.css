@@ -508,7 +508,7 @@ h1 {
 /* ─── KPI Cards ──────────────────────────────────────────── */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -1414,6 +1414,8 @@ tbody td span {
 
 .chart-wrap {
   width: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .chart-wrap.small {
@@ -1769,10 +1771,13 @@ tbody td span {
   position: absolute;
   inset: 0;
   background-image:
+    url('https://upload.wikimedia.org/wikipedia/commons/2/24/India_map_en.svg'),
     linear-gradient(rgba(99, 178, 220, .08) 1px, transparent 1px),
     linear-gradient(90deg, rgba(99, 178, 220, .08) 1px, transparent 1px);
-  background-size: 48px 48px;
-  opacity: .55;
+  background-size: contain, 48px 48px, 48px 48px;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: .35;
 }
 
 .map-pin {

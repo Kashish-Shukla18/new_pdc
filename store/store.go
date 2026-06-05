@@ -67,6 +67,8 @@ func (s *Store) SavePMU(ctx context.Context, cfg config.PMUConfig) error {
 			"timeout_sec":   cfg.TimeoutSec,
 			"reconnect_sec": cfg.ReconnectSec,
 			"region":        cfg.Region,
+			"lat":           cfg.Lat,
+			"lon":           cfg.Lon,
 			"active":        1,
 		},
 		time.Now(),
@@ -129,6 +131,7 @@ func (s *Store) GetAllPMUs(ctx context.Context) ([]config.PMUConfig, error) {
 		region, _ := rec.ValueByKey("region").(string)
 
 		var port, idcode, timeout, reconnect int64
+		var lat, lon float64
 
 		if v := rec.ValueByKey("port"); v != nil {
 			switch val := v.(type) {
@@ -154,6 +157,18 @@ func (s *Store) GetAllPMUs(ctx context.Context) ([]config.PMUConfig, error) {
 			case float64: reconnect = int64(val)
 			}
 		}
+		if v := rec.ValueByKey("lat"); v != nil {
+			switch val := v.(type) {
+			case float64: lat = val
+			case int64: lat = float64(val)
+			}
+		}
+		if v := rec.ValueByKey("lon"); v != nil {
+			switch val := v.(type) {
+			case float64: lon = val
+			case int64: lon = float64(val)
+			}
+		}
 
 		pmus = append(pmus, config.PMUConfig{
 			Name:         name,
@@ -164,6 +179,8 @@ func (s *Store) GetAllPMUs(ctx context.Context) ([]config.PMUConfig, error) {
 			TimeoutSec:   int(timeout),
 			ReconnectSec: int(reconnect),
 			Region:       region,
+			Lat:          lat,
+			Lon:          lon,
 		})
 	}
 	if result.Err() != nil {
