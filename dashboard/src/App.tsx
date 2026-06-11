@@ -33,6 +33,17 @@ import {
   X,
 } from 'lucide-react'
 
+import "leaflet/dist/leaflet.css"
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  Tooltip as LeafletTooltip,
+} from "react-leaflet";
+
+
+
 type TabId = 'overview' | 'devices' | 'dataframes' | 'connectivity' | 'analytics' | 'help' | 'docs'
 
 type TrendPoint = {
@@ -212,6 +223,7 @@ function App() {
   const [openFaq, setOpenFaq] = useState<number | null>(null)
   const [showAddPMU, setShowAddPMU] = useState(false)
   const [newPMU, setNewPMU] = useState({ name: '', ip: '', port: 4712, idcode: 1, region: 'NRLDC', protocol: 'tcp', lat: 20.0, lon: 70.0 })
+  const INDIA_CENTER: [number, number] = [22.5, 80.5]; 
 
   const handleAddPMU = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -762,43 +774,9 @@ function App() {
                   ))}
                 </section>
 
+                
                 <section className="main-grid dashboard-grid">
                   <div className="stacked-panels">
-                    <div className="panel">
-                      <div className="panel-head">
-                        <div>
-                          <h3>Simulator Map</h3>
-                          <p>Mapped using simulator metadata and live status.</p>
-                        </div>
-                        <div className="panel-tools-inline">
-                          <button type="button" className="plot-action" onClick={() => setMapFilter('all')}>All</button>
-                          <button type="button" className="plot-action" onClick={() => setMapFilter('issues')}>Issues</button>
-                        </div>
-                      </div>
-                      <div className="map-wrap-react">
-                        {pmus
-                          .filter((pmu) => (mapFilter === 'issues' ? !pmu.connected || packetLossOf(pmu) > 1 : true))
-                          .map((pmu) => {
-                            const x = ((pmu.meta.lon - 68) / (97 - 68)) * 80 + 10
-                            const y = 95 - ((pmu.meta.lat - 8) / (36 - 8)) * 80
-                            const tone = toneFromStatus(pmu.connected, packetLossOf(pmu))
-                            return (
-                              <button
-                                key={pmu.name}
-                                type="button"
-                                className={`map-pin ${tone}`}
-                                style={{ left: `${x}%`, top: `${y}%` }}
-                                onClick={() => setDrawerPMUName(pmu.name)}
-                                title={`${pmu.name} • ${pmu.meta.substation}`}
-                              >
-                                {pmu.name.replace(/.*PMU/i, 'PMU')}
-                              </button>
-                            )
-                          })}
-                        <div className="map-note">India map coordinate projection (simulator metadata)</div>
-                      </div>
-                    </div>
-
                     <div className="panel">
                       <div className="panel-head">
                         <div>
@@ -836,6 +814,65 @@ function App() {
                         </ResponsiveContainer>
                       </div>
                     </div>
+                    <div className="panel">
+                      <div className="panel-head">
+                        <div>
+                          <h3>Simulator Map</h3>
+                          <p>Mapped using simulator metadata and live status.</p>
+                        </div>
+                        <div className="panel-tools-inline">
+                          <button type="button" className="plot-action" onClick={() => setMapFilter('all')}>All</button>
+                          <button type="button" className="plot-action" onClick={() => setMapFilter('issues')}>Issues</button>
+                        </div>
+                      </div>
+                      <div className="map-wrap-react">
+  <MapContainer
+    center={INDIA_CENTER}
+    zoom={5}
+    style={{
+      height: "450px",
+      width: "100%",
+    }}
+  >
+    <TileLayer
+      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+    />
+
+    {pmus
+      .filter((pmu) =>
+        mapFilter === "issues"
+          ? !pmu.connected || packetLossOf(pmu) > 1
+          : true
+      )
+      .map((pmu) => (
+        <Marker
+          key={pmu.name}
+          position={[
+            pmu.meta.lat,
+            pmu.meta.lon,
+          ]}
+          eventHandlers={{
+            click: () => setDrawerPMUName(pmu.name),
+          }}
+        >
+          <LeafletTooltip direction="top">
+            {pmu.name}
+          </LeafletTooltip>
+
+          <Popup>
+            <strong>{pmu.name}</strong>
+            <br />
+            Region: {pmu.meta.region}
+            <br />
+            Status: {pmu.connected ? "Connected" : "Offline"}
+          </Popup>
+        </Marker>
+      ))}
+  </MapContainer>
+</div>
+                    </div>
+
+                    
                   </div>
 
                   <div className="stacked-panels">
