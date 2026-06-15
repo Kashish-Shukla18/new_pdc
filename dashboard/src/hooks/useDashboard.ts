@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { defaultNewPMU, emptyDashboardState, HELP_SECTIONS } from '../constants'
+import type { AngleHistoryPoint } from '../types/analytics'
+import {
+  computeAnalyticsKpis,
+  computeAnalyticsRecs,
+  computeAnglePairs,
+  computeIslandingRows,
+  computeOscillationModes,
+  computeVoltageProfile,
+  topAnglePairsForChart,
+} from '../utils/analytics'
 import type {
   ConnectivityRow,
   ConversationEvent,
@@ -297,52 +307,40 @@ export function useDashboard() {
       })
   }, [pmus])
 
-  const anglePairs = useMemo(() => {
-    if (pmus.length < 2) return [] as Array<{ name: string; value: number }>
-    const pairs: Array<{ name: string; value: number }> = []
-    for (let i = 0; i < pmus.length; i++) {
-      for (let j = i + 1; j < pmus.length; j++) {
-        const a = pmus[i]
-        const b = pmus[j]
-        const diff =
-          Math.abs((a.lastPhasor?.va?.angleDeg ?? 0) - (b.lastPhasor?.va?.angleDeg ?? 0)) +
-          Math.abs((a.lastReading?.frequency ?? 50) - (b.lastReading?.frequency ?? 50)) * 800
-        pairs.push({ name: `${a.name} ↔ ${b.name}`, value: diff })
-      }
-    }
-    return pairs
-  }, [pmus])
+  const anglePairs = useMemo(() => computeAnglePairs(pmus), [pmus])
+  const chartAnglePairs = useMemo(() => topAnglePairsForChart(pmus), [pmus])
+  const oscillationModes = useMemo(() => computeOscillationModes(pmus), [pmus])
+  const islandingRows = useMemo(() => computeIslandingRows(pmus), [pmus])
+  const voltageProfile = useMemo(() => computeVoltageProfile(pmus), [pmus])
 
-  const analyticsRecs = useMemo(() => {
-    const recs: Array<{ sev: 'bad' | 'warn' | 'info'; title: string; desc: string }> = []
-    const worstAngle = [...anglePairs].sort((a, b) => b.value - a.value)[0]
-    if (worstAngle && worstAngle.value > 25) {
-      recs.push({
-        sev: 'bad',
-        title: `Reduce corridor stress on ${worstAngle.name}`,
-        desc: `Angle separation ${round(worstAngle.value, 1)}° exceeds advisory margin.`,
-      })
+  const analyticsRecs = useMemo(
+    () => computeAnalyticsRecs(pmus, anglePairs, connectivityRows, events),
+    [pmus, anglePairs, connectivityRows, events],
+  )
+
+  const analyticsKpis = useMemo(
+    () => computeAnalyticsKpis(pmus, anglePairs, analyticsRecs),
+    [pmus, anglePairs, analyticsRecs],
+  )
+
+  const angleHistoryRef = useRef<AngleHistoryPoint[]>([])
+  const [angleHistory, setAngleHistory] = useState<AngleHistoryPoint[]>([])
+
+  useEffect(() => {
+    if (!chartAnglePairs.length || isPaused) return
+
+    const point: AngleHistoryPoint = {
+      ts: Date.now(),
+      label: new Date().toLocaleTimeString(),
+    }
+    for (const pair of chartAnglePairs) {
+      point[pair.key] = pair.value
     }
 
-    connectivityRows.forEach((row) => {
-      if (!row.connected) {
-        recs.push({
-          sev: 'warn',
-          title: `Recover ${row.name}`,
-          desc: 'Stream disconnected. Restart simulator stream and check receiver path.',
-        })
-      }
-    })
-
-    if (!recs.length) {
-      recs.push({
-        sev: 'info',
-        title: 'All simulator lanes stable',
-        desc: 'Continue monitoring frequency, MW, MVAR and ROCOF drift windows.',
-      })
-    }
-    return recs.slice(0, 5)
-  }, [anglePairs, connectivityRows])
+    const next = [...angleHistoryRef.current, point].slice(-60)
+    angleHistoryRef.current = next
+    setAngleHistory(next)
+  }, [chartAnglePairs, isPaused, dashboard.nowUtc])
 
   const filteredHelp = HELP_SECTIONS.filter((item) => {
     if (!helpQuery.trim()) return true
@@ -415,6 +413,12 @@ export function useDashboard() {
     filteredDevices,
     connectivityRows,
     anglePairs,
+    chartAnglePairs,
+    angleHistory,
+    oscillationModes,
+    islandingRows,
+    voltageProfile,
+    analyticsKpis,
     analyticsRecs,
     filteredHelp,
     navItems,
