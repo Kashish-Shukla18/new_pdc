@@ -1,37 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Legend,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Scatter,
-  ScatterChart,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
-import {
-  Activity,
-  AlertTriangle,
-  BookOpen,
-  CircleHelp,
-  Clock3,
-  FileText,
-  Gauge,
-  LayoutDashboard,
-  Radio,
-  Signal,
-  SlidersHorizontal,
-  TimerReset,
-  Wifi,
-  X,
-} from 'lucide-react'
+import { AddPMUModal } from './components/drawer/AddPMUModal'
+import { PMUDetailDrawer } from './components/drawer/PMUDetailDrawer'
+import { Header } from './components/layout/Header'
+import { PageHeader } from './components/layout/PageHeader'
+import { Sidebar } from './components/layout/Sidebar'
+import { DashboardProvider, useDashboardContext } from './context/DashboardContext'
+import { PageRouter } from './pages'
 
 import "leaflet/dist/leaflet.css"
 import {
@@ -662,83 +635,10 @@ function App() {
 
   return (
     <div className="console-root">
-      <header className="app-header">
-        <div className="brand">
-          <div className="logo">PDC</div>
-          <div className="brand-text">
-            <h1>National PMU Monitoring Console</h1>
-            <p>3-simulator live streams mapped across all React dashboard tabs</p>
-          </div>
-        </div>
-
-        <div className="header-meta">
-          <div className="system-state">
-            <span className={`dot ${systemTone === 'bad' ? 'bad' : systemTone === 'warn' ? 'warn' : ''}`} />
-            <span>{systemMessage}</span>
-          </div>
-          <span className="utc-badge">{round(frameRate)} fps</span>
-          <span className="clock">
-            <Clock3 size={14} /> {clockLabel} IST
-          </span>
-          <button type="button" className="btn ghost" onClick={() => setIsPaused((current) => !current)}>
-            {isPaused ? 'Resume' : 'Pause'}
-          </button>
-        </div>
-      </header>
+      <Header />
 
       <div className="console-shell">
-        <aside className="sidebar">
-          <div className="nav-section">Monitoring</div>
-          {navItems
-            .filter((item) => item.section === 'Monitoring')
-            .map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
-                onClick={() => setActiveTab(item.id)}
-              >
-                {item.id === 'overview' && <LayoutDashboard size={16} />}
-                {item.id === 'devices' && <SlidersHorizontal size={16} />}
-                {item.id === 'dataframes' && <Signal size={16} />}
-                {item.id === 'connectivity' && <Wifi size={16} />}
-                {item.id === 'analytics' && <Gauge size={16} />}
-                {item.label}
-                {item.badge && <span className={`nav-badge ${item.bad ? 'bad' : ''}`}>{item.badge}</span>}
-              </button>
-            ))}
-
-          <div className="nav-section">Resources</div>
-          {navItems
-            .filter((item) => item.section === 'Resources')
-            .map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
-                onClick={() => setActiveTab(item.id)}
-              >
-                {item.id === 'help' ? <CircleHelp size={16} /> : <FileText size={16} />}
-                {item.label}
-              </button>
-            ))}
-
-          <div className="nav-section">Status</div>
-          <div className="status-box">
-            <div>
-              <strong>{systemCounts.connected}</strong>
-              <span>Connected PMUs</span>
-            </div>
-            <div>
-              <strong>{dashboard.eventCount}</strong>
-              <span>Events observed</span>
-            </div>
-            <div>
-              <strong>{systemCounts.totalErrors}</strong>
-              <span>Pipeline errors</span>
-            </div>
-          </div>
-        </aside>
+        <Sidebar />
 
         <main className="main">
           <div className="app-shell">
@@ -1362,84 +1262,17 @@ function App() {
         </main>
       </div>
 
-      {drawerPMU && (
-        <div className="drawer-overlay" onClick={() => setDrawerPMUName('')}>
-          <aside className="drawer-react" onClick={(event) => event.stopPropagation()}>
-            <div className="drawer-head-react">
-              <h3>{drawerPMU.name}</h3>
-              <button type="button" onClick={() => setDrawerPMUName('')}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="drawer-body-react">
-              <p><strong>Substation:</strong> {drawerPMU.meta.substation}, {drawerPMU.meta.state}</p>
-              <p><strong>Region:</strong> {drawerPMU.meta.region}</p>
-              <p><strong>Voltage:</strong> {drawerPMU.meta.voltage}</p>
-              <p><strong>Vendor:</strong> {drawerPMU.meta.vendor}</p>
-              <p><strong>Primary IP:</strong> {drawerPMU.meta.primaryIp}</p>
-              <p><strong>Redundant IP:</strong> {drawerPMU.meta.redundantIp}</p>
-              <p><strong>Frames:</strong> {drawerPMU.totalFrames}</p>
-              <p><strong>Approx FPS:</strong> {round(drawerPMU.approxFps, 2)}</p>
-              <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
-              {drawerPMU.lastError && <p><strong>Last error:</strong> {drawerPMU.lastError}</p>}
-            </div>
-          </aside>
-        </div>
-      )}
-
-      {showAddPMU && (
-        <div className="drawer-overlay" onClick={() => setShowAddPMU(false)}>
-          <aside className="drawer-react" onClick={(event) => event.stopPropagation()} style={{ width: '400px' }}>
-            <div className="drawer-head-react">
-              <h3>Add PMU Connection</h3>
-              <button type="button" onClick={() => setShowAddPMU(false)}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="drawer-body-react">
-              <form onSubmit={handleAddPMU} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>Name</label>
-                  <input required value={newPMU.name} onChange={e => setNewPMU({...newPMU, name: e.target.value})} style={{width:'100%', padding:'8px'}} placeholder="PMU-1" />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>IP Address</label>
-                  <input required value={newPMU.ip} onChange={e => setNewPMU({...newPMU, ip: e.target.value})} style={{width:'100%', padding:'8px'}} placeholder="127.0.0.1" />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>Port</label>
-                  <input type="number" required value={newPMU.port} onChange={e => setNewPMU({...newPMU, port: parseInt(e.target.value)})} style={{width:'100%', padding:'8px'}} />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>ID Code</label>
-                  <input type="number" required value={newPMU.idcode} onChange={e => setNewPMU({...newPMU, idcode: parseInt(e.target.value)})} style={{width:'100%', padding:'8px'}} />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>Region</label>
-                  <input value={newPMU.region} onChange={e => setNewPMU({...newPMU, region: e.target.value})} style={{width:'100%', padding:'8px'}} />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>Latitude</label>
-                  <input type="number" step="any" required value={newPMU.lat} onChange={e => setNewPMU({...newPMU, lat: parseFloat(e.target.value) || 0})} style={{width:'100%', padding:'8px'}} />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>Longitude</label>
-                  <input type="number" step="any" required value={newPMU.lon} onChange={e => setNewPMU({...newPMU, lon: parseFloat(e.target.value) || 0})} style={{width:'100%', padding:'8px'}} />
-                </div>
-                <div>
-                  <label style={{display:'block', marginBottom:'4px'}}>Protocol</label>
-                  <select value={newPMU.protocol} onChange={e => setNewPMU({...newPMU, protocol: e.target.value})} style={{width:'100%', padding:'8px'}}>
-                    <option value="tcp">TCP</option>
-                    <option value="udp">UDP</option>
-                  </select>
-                </div>
-                <button type="submit" className="btn primary" style={{marginTop: '10px'}}>Connect PMU</button>
-              </form>
-            </div>
-          </aside>
-        </div>
-      )}
+      <PMUDetailDrawer />
+      <AddPMUModal />
     </div>
+  )
+}
+
+function App() {
+  return (
+    <DashboardProvider>
+      <DashboardShell />
+    </DashboardProvider>
   )
 }
 
