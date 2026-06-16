@@ -95,20 +95,35 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 14px 22px;
-  background: linear-gradient(180deg, #0b1325, #0a1020);
+  gap: 24px;
+  padding: 12px 24px;
+  background:
+    linear-gradient(180deg, rgba(11, 19, 37, 0.98), rgba(8, 14, 26, 0.98)),
+    radial-gradient(ellipse 420px 80px at 0% 0%, rgba(77, 200, 240, 0.08), transparent);
   border-bottom: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
   position: sticky;
   top: 0;
   z-index: 30;
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(10px);
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
+  min-width: 0;
+}
+
+.app-logo {
+  flex-shrink: 0;
+  filter: drop-shadow(0 4px 12px rgba(77, 200, 240, 0.25));
+}
+
+.app-logo svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .logo {
@@ -126,25 +141,99 @@ body {
 
 .brand-text h1 {
   margin: 0;
-  font-size: 15px;
-  letter-spacing: 0.02em;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   color: var(--text);
   background: none;
   -webkit-text-fill-color: currentColor;
 }
 
-.brand-text p {
-  margin: 0;
-  font-size: 11px;
-  color: var(--text-2);
+.brand-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.brand-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  border: 1px solid rgba(77, 200, 240, 0.35);
+  background: rgba(77, 200, 240, 0.08);
+}
+
+.brand-text p,
+.brand-tagline {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
 }
 
 .header-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.header-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(8, 16, 28, 0.75);
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.header-pill.accent {
+  border-color: rgba(77, 200, 240, 0.35);
+  color: var(--cyan);
+}
+
+.header-pill.live {
+  border-color: rgba(93, 232, 170, 0.35);
+  color: var(--mint);
+}
+
+.header-pill.system-state.warn {
+  border-color: rgba(245, 200, 66, 0.35);
+}
+
+.header-pill.system-state.bad {
+  border-color: rgba(240, 112, 106, 0.35);
+}
+
+.header-pill .mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.header-pill.clock-pill .tz {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.header-action {
+  padding: 7px 14px;
+  gap: 6px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .system-state {
@@ -1675,6 +1764,7 @@ tbody td span {
 
   .kpi-grid,
   .charts-grid,
+  .device-charts-grid,
   .phasor-legend,
   .form-grid {
     grid-template-columns: 1fr;
@@ -1818,6 +1908,153 @@ tbody td span {
   z-index: 2;
 }
 
+/* ─── Devices Page ─────────────────────────────────────────── */
+.devices-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.devices-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.devices-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-2);
+  max-width: 720px;
+  line-height: 1.5;
+}
+
+.device-summary-grid .kpi-sub {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.device-filters {
+  display: grid;
+  grid-template-columns: 2fr repeat(2, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.device-filters input,
+.device-filters select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(6, 12, 22, 0.9);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.device-table-panel {
+  margin-bottom: 18px;
+}
+
+.device-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.device-table th {
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.device-table td {
+  padding: 12px;
+  border-bottom: 1px solid rgba(99, 178, 220, 0.08);
+  vertical-align: middle;
+}
+
+.device-table tbody tr.row-click:hover {
+  background: rgba(77, 200, 240, 0.06);
+}
+
+.device-id {
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.device-primary {
+  display: block;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.device-muted {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.voltage-tag {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid rgba(77, 200, 240, 0.25);
+  background: rgba(77, 200, 240, 0.08);
+  color: var(--cyan);
+}
+
+.mono-ip {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.fps-ok {
+  color: var(--mint);
+  font-family: var(--mono);
+}
+
+.fps-warn {
+  color: var(--amber);
+  font-family: var(--mono);
+}
+
+.device-disconnect {
+  color: #f0706a !important;
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+}
+
+.device-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mint);
+  box-shadow: 0 0 8px rgba(93, 232, 170, 0.8);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
 .device-filter-row {
   display: flex;
   flex-wrap: wrap;
@@ -1905,6 +2142,144 @@ tbody td span {
   margin: 4px 0 0;
   color: var(--text-2);
   font-size: 12px;
+}
+
+/* ─── Connectivity ────────────────────────────────────────── */
+.connectivity-grid-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.connectivity-kpi-grid .kpi-sub {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.35;
+}
+
+.kpi-card.ok .kpi-value {
+  color: var(--mint);
+}
+
+.kpi-card.bad .kpi-value {
+  color: #f0706a;
+}
+
+.kpi-card.accent .kpi-value {
+  color: var(--cyan);
+}
+
+.kpi-card.ok::before {
+  background: linear-gradient(90deg, transparent, var(--mint), transparent);
+}
+
+.kpi-card.bad::before {
+  background: linear-gradient(90deg, transparent, #f0706a, transparent);
+}
+
+.kpi-card.accent::before {
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+}
+
+.conn-rec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conn-rec {
+  display: grid;
+  grid-template-columns: 30px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(99, 178, 220, .2);
+  border-radius: 9px;
+  padding: 11px 13px;
+  background: rgba(8, 16, 28, .9);
+}
+
+.conn-rec.bad {
+  border-color: rgba(255, 93, 108, .45);
+  background: linear-gradient(90deg, rgba(255, 93, 108, .06), transparent);
+}
+
+.conn-rec.warn {
+  border-color: rgba(244, 183, 64, .4);
+  background: linear-gradient(90deg, rgba(244, 183, 64, .06), transparent);
+}
+
+.conn-rec.info {
+  border-color: rgba(61, 169, 252, .4);
+  background: linear-gradient(90deg, rgba(61, 169, 252, .06), transparent);
+}
+
+.conn-rec-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  color: #0a1020;
+  font-size: 13px;
+}
+
+.conn-rec.bad .conn-rec-icon {
+  background: #f0706a;
+}
+
+.conn-rec.warn .conn-rec-icon {
+  background: var(--amber);
+}
+
+.conn-rec.info .conn-rec-icon {
+  background: var(--cyan);
+}
+
+.conn-rec-body h4 {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.conn-rec-body p {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.conn-rec-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.conn-rec-actions .btn {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.table-wrap.scrollx {
+  overflow-x: auto;
+}
+
+tbody tr.row-click {
+  cursor: pointer;
+}
+
+.conn-rec-cell {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.chart-empty {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+  font-size: 13px;
 }
 
 /* ─── Analytics ───────────────────────────────────────────── */
