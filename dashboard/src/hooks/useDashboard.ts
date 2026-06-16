@@ -10,8 +10,14 @@ import {
   computeVoltageProfile,
   topAnglePairsForChart,
 } from '../utils/analytics'
+import {
+  computeConnectivityKpis,
+  computeConnectivityRecs,
+  computeConnectivityRows,
+} from '../utils/connectivity'
+import { useRttHistory } from './useRttHistory'
+import { useFrameTrendHistory } from './useFrameTrendHistory'
 import type {
-  ConnectivityRow,
   ConversationEvent,
   DashboardState,
   LiveAlert,
@@ -25,8 +31,6 @@ import { ageText, round } from '../utils/format'
 import {
   availabilityOf,
   buildOfflinePMU,
-  jitterOf,
-  latencyOf,
   metaForDB,
   packetLossOf,
   pmuKey,
@@ -280,32 +284,16 @@ export function useDashboard() {
     return () => window.clearInterval(timer)
   }, [isPaused, pmus, selectedFramePMU, selectedFramePMUName])
 
-  const connectivityRows = useMemo<ConnectivityRow[]>(() => {
-    return pmus
-      .map((pmu) => {
-        const loss = packetLossOf(pmu)
-        const latency = latencyOf(pmu)
-        const jitter = jitterOf(pmu)
-        const avail = availabilityOf(pmu, pmu.meta.targetFps)
-        let recommendation = 'Healthy'
-        if (!pmu.connected) recommendation = 'Restart stream and verify source link'
-        else if (loss > 2) recommendation = 'Inspect quality gate and packet path'
-        else if (latency > 120) recommendation = 'Review network route and queueing'
-        return {
-          ...pmu,
-          loss,
-          latency,
-          jitter,
-          avail,
-          recommendation,
-          tone: toneFromStatus(pmu.connected, loss),
-        }
-      })
-      .sort((a, b) => {
-        if (a.connected !== b.connected) return a.connected ? 1 : -1
-        return b.loss - a.loss
-      })
-  }, [pmus])
+  const connectivityRows = useMemo(() => computeConnectivityRows(pmus), [pmus])
+  const connectivityKpis = useMemo(() => computeConnectivityKpis(connectivityRows), [connectivityRows])
+  const connectivityRecs = useMemo(() => computeConnectivityRecs(connectivityRows), [connectivityRows])
+  const { rttHistory, rttStreams } = useRttHistory(connectivityRows, dashboard.nowUtc, isPaused)
+  const frameTrendHistory = useFrameTrendHistory(
+    selectedFramePMU,
+    selectedFramePMUName,
+    dashboard.nowUtc,
+    isPaused,
+  )
 
   const anglePairs = useMemo(() => computeAnglePairs(pmus), [pmus])
   const chartAnglePairs = useMemo(() => topAnglePairsForChart(pmus), [pmus])
@@ -412,6 +400,11 @@ export function useDashboard() {
     liveAlerts,
     filteredDevices,
     connectivityRows,
+    connectivityKpis,
+    connectivityRecs,
+    rttHistory,
+    rttStreams,
+    frameTrendHistory,
     anglePairs,
     chartAnglePairs,
     angleHistory,
