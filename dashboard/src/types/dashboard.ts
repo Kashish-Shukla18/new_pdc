@@ -94,6 +94,9 @@ export type ConnectivityRow = PMUWithMeta & {
   avail: number
   recommendation: string
   tone: 'ok' | 'warn' | 'bad'
+  statusLabel: 'Healthy' | 'Degraded' | 'Offline'
+  link: 'Primary' | 'Down'
+  tableRecommendation: string
 }
 
 export type LiveAlert = {

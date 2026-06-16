@@ -5,7 +5,7 @@ const PAGE_COPY: Partial<Record<string, { title: string; subtitle: string }>> = 
   analytics: {
     title: 'Analytics & Grid Recommendations',
     subtitle:
-      'WAMS analytics — voltage angle differences, oscillation detection, islanding risk, and operator advisories',
+      'Analytics — voltage angle differences, oscillation detection, islanding risk, and operator advisories',
   },
 }
 

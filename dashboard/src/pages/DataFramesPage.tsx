@@ -1,15 +1,6 @@
-import {
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
+import { FreqRocofChart } from '../components/dataframes/FreqRocofChart'
 import { useDashboardContext } from '../context/DashboardContext'
-import { formatTS, round } from '../utils/format'
+import { round } from '../utils/format'
 
 export function DataFramesPage() {
   const {
@@ -21,6 +12,7 @@ export function DataFramesPage() {
     setIsPaused,
     frameLines,
     phasorItems,
+    frameTrendHistory,
   } = useDashboardContext()
 
   if (!selectedFramePMU) return null
@@ -31,7 +23,7 @@ export function DataFramesPage() {
         <div className="panel-head">
           <div>
             <h3>Data Frame Information</h3>
-            <p>Live C37.118-like frame decoding from simulator stream.</p>
+            <p className="panel-sub">Live decoded synchrophasor frames — CFG-2, header, and data quantities</p>
           </div>
           <div className="panel-tools-inline">
             <select
@@ -65,7 +57,10 @@ export function DataFramesPage() {
           </div>
 
           <div className="panel frame-panel">
-            <div className="panel-head"><h3>Live Data Frame</h3></div>
+            <div className="panel-head">
+              <h3>Live Data Frame</h3>
+              <p className="panel-sub"><span className="live-dot" /> streaming · SOC/FRACSEC live</p>
+            </div>
             <div className="frame-box-react">
               {frameLines.length === 0 && <div>Waiting for live frames...</div>}
               {frameLines.map((line, idx) => (
@@ -77,40 +72,13 @@ export function DataFramesPage() {
       </section>
 
       <section className="charts-grid compact-gap">
-        <article className="panel chart-panel">
-          <div className="panel-head"><h3>Frequency & ROCOF</h3></div>
-          <div className="chart-wrap small">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={selectedFramePMU.trends.slice(-120)}>
-                <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-                <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
-                <YAxis yAxisId="left" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
-                <YAxis yAxisId="right" orientation="right" tick={{ fill: '#9eb0c5', fontSize: 11 }} />
-                <Tooltip labelFormatter={(value) => formatTS(Number(value))} />
-                <Legend />
-                <Line
-                  yAxisId="left"
-                  type="monotone"
-                  dataKey="frequency"
-                  stroke="#4de0ff"
-                  dot={false}
-                  strokeWidth={2}
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="rocof"
-                  stroke="#ffd166"
-                  dot={false}
-                  strokeWidth={2}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </article>
+        <FreqRocofChart data={frameTrendHistory} />
 
         <article className="panel">
-          <div className="panel-head"><h3>Phasor Quantities</h3></div>
+          <div className="panel-head">
+            <h3>Phasor Quantities</h3>
+            <p className="panel-sub">Magnitude and angle referenced to GPS time</p>
+          </div>
           <div className="phasor-grid-react">
             {phasorItems.map((item) => (
               <article key={item.label} className="phasor-react-card">
