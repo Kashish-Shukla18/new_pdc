@@ -14,6 +14,9 @@ var (
 	framesReceived = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_frames_received_total", Help: "Total C37.118 data frames received."},
 	)
+	framesDropped = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "pdc_frames_dropped_total", Help: "Total frames dropped because handler pool was full."},
+	)
 	framesParsed = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_frames_parsed_total", Help: "Total frames parsed into readings."},
 	)
@@ -42,11 +45,15 @@ var (
 			Buckets: []float64{0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0},
 		},
 	)
+	sinkInflight = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "pdc_sink_inflight", Help: "Current number of readings queued in sink channel."},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(
 		framesReceived,
+		framesDropped,
 		framesParsed,
 		parseErrors,
 		qualityRejected,
@@ -55,12 +62,15 @@ func init() {
 		spoolQueued,
 		spoolReplayed,
 		processingLatency,
+		sinkInflight,
 	)
 }
 
-func IncFramesReceived() { framesReceived.Inc() }
-
-func IncFramesParsed() { framesParsed.Inc() }
+func IncFramesReceived()  { framesReceived.Inc() }
+func IncFramesDropped()   { framesDropped.Inc() }
+func IncFramesParsed()    { framesParsed.Inc() }
+func IncSinkInflight()    { sinkInflight.Inc() }
+func DecSinkInflight()    { sinkInflight.Dec() }
 
 func IncParseErrors() { parseErrors.Inc() }
 

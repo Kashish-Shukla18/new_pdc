@@ -157,13 +157,25 @@ func NewPublisherFromEnv() *Publisher {
 
 	ensureTopicIfEnabled(context.Background(), brokers, topic)
 
-	batchTimeoutMs := envIntOr("KAFKA_BATCH_TIMEOUT_MS", 10)
+	// BatchTimeout: how long the writer waits to fill a batch before flushing.
+	// Higher values reduce per-message overhead; default 50ms is a good balance
+	// for PMU workloads (50fps × N PMUs produces many small messages rapidly).
+	batchTimeoutMs := envIntOr("KAFKA_BATCH_TIMEOUT_MS", 50)
+	// BatchSize: max messages per batch; 500 is safe for 50fps × 10 PMUs.
+	batchSize := envIntOr("KAFKA_BATCH_SIZE", 500)
 	writeTimeoutMs := envIntOr("KAFKA_WRITE_TIMEOUT_MS", 15000)
 	readTimeoutMs := envIntOr("KAFKA_READ_TIMEOUT_MS", 15000)
 	maxAttempts := envIntOr("KAFKA_MAX_ATTEMPTS", 10)
+	// Async: true lets WriteMessages return immediately without waiting for the
+	// broker ACK. Combined with the spool-on-error path, this is safe and removes
+	// Kafka from the synchronous hot path entirely.
+	asyncMode := envBoolOr("KAFKA_ASYNC", true)
 
 	if batchTimeoutMs < 1 {
 		batchTimeoutMs = 1
+	}
+	if batchSize < 1 {
+		batchSize = 100
 	}
 	if writeTimeoutMs < 1000 {
 		writeTimeoutMs = 1000
@@ -180,12 +192,16 @@ func NewPublisherFromEnv() *Publisher {
 		Topic:        topic,
 		RequiredAcks: requiredAcksFromEnv(),
 		BatchTimeout: time.Duration(batchTimeoutMs) * time.Millisecond,
+		BatchSize:    batchSize,
 		WriteTimeout: time.Duration(writeTimeoutMs) * time.Millisecond,
 		ReadTimeout:  time.Duration(readTimeoutMs) * time.Millisecond,
 		MaxAttempts:  maxAttempts,
-		Async:        false,
+		Async:        asyncMode,
 		Balancer:     &kafka.LeastBytes{},
 	}
+
+	log.Printf("kafka writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d",
+		brokers, topic, asyncMode, batchTimeoutMs, batchSize)
 
 	return &Publisher{writer: w, brokers: brokers, topic: topic}
 }
