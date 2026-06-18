@@ -31,6 +31,10 @@ type pipeline struct {
 	dropQualityRejected bool
 	traceMu             sync.Mutex
 	traceCounts         map[string]int
+	// sinkCh decouples the sink (Redis + InfluxDB) from the Kafka hot path.
+	// Frames are enqueued here and drained by sinkWorkers in the background,
+	// so a slow InfluxDB flush never blocks Kafka publishing or the frame loop.
+	sinkCh chan parser.Reading
 }
 
 func envOrFallback(key, fallback string) string {
@@ -110,6 +114,13 @@ func newPipeline(ctx context.Context) *pipeline {
 	primeSpoolBacklog("kafka", kafkaSpool)
 	primeSpoolBacklog("sink", sinkSpool)
 
+	// Sink channel: buffer enough for several seconds of all-PMU traffic.
+	// At 50fps × 20 PMUs = 1000 frames/s; 8192 gives ~8 s of headroom.
+	sinkBufSize := envInt("SINK_CHANNEL_SIZE", 8192)
+	if sinkBufSize < 256 {
+		sinkBufSize = 256
+	}
+
 	return &pipeline{
 		checker:             checker,
 		publisher:           publisher,
@@ -118,6 +129,7 @@ func newPipeline(ctx context.Context) *pipeline {
 		sinkSpool:           sinkSpool,
 		dropQualityRejected: dropQualityRejected,
 		traceCounts:         make(map[string]int),
+		sinkCh:              make(chan parser.Reading, sinkBufSize),
 	}
 }
 
@@ -209,14 +221,61 @@ func (p *pipeline) startReplayLoop(
 	}()
 }
 
+// StartSinkWorkers drains the sinkCh and writes each reading to Redis + InfluxDB.
+// nWorkers run in parallel so a single slow write doesn't block others.
+func (p *pipeline) StartSinkWorkers(ctx context.Context) {
+	if p.sink == nil {
+		// No sink configured: drain channel to avoid goroutine leak.
+		go func() {
+			for range p.sinkCh {
+			}
+		}()
+		return
+	}
+
+	nWorkers := envInt("SINK_WORKERS", 4)
+	if nWorkers < 1 {
+		nWorkers = 1
+	}
+
+	for i := 0; i < nWorkers; i++ {
+		go func() {
+			for r := range p.sinkCh {
+				monitoring.DecSinkInflight()
+				if err := p.sink.Store(ctx, r); err != nil {
+					monitoring.IncStoreErrors()
+					monitoring.IncSinkErrorForPMU(r.PMUName)
+					log.Printf("[%s] sink store error: %v", r.PMUName, err)
+					monitoring.RecordConversation(r.PMUName, "PDC", "SINK", "store", "error", err.Error())
+					if p.sinkSpool != nil {
+						if spoolErr := p.sinkSpool.Append(r); spoolErr != nil {
+							log.Printf("[%s] sink spool append error: %v", r.PMUName, spoolErr)
+							monitoring.RecordConversation(r.PMUName, "PDC", "SINK", "spool", "error", spoolErr.Error())
+						} else {
+							monitoring.IncSpoolQueued()
+							monitoring.IncSpoolQueuedForPMU(r.PMUName)
+							monitoring.RecordConversation(r.PMUName, "PDC", "SINK", "spool", "queued", "store failed; buffered to disk")
+						}
+					}
+				}
+			}
+		}()
+	}
+}
+
 func (p *pipeline) Close() {
 	if p == nil {
 		return
+	}
+	// Close sink channel so workers drain cleanly.
+	if p.sinkCh != nil {
+		close(p.sinkCh)
 	}
 	if p.publisher != nil {
 		_ = p.publisher.Close()
 	}
 	if p.sink != nil {
+		p.sink.Flush()
 		p.sink.Close()
 	}
 }
@@ -340,20 +399,23 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 		}
 	}
 
+	// Enqueue to sink channel (non-blocking): if channel is full, spool directly
+	// rather than blocking Kafka or the frame goroutine.
 	if p.sink != nil {
-		if err := p.sink.Store(ctx, reading); err != nil {
+		select {
+		case p.sinkCh <- reading:
+			monitoring.IncSinkInflight()
+		default:
 			monitoring.IncStoreErrors()
 			monitoring.IncSinkErrorForPMU(pmuName)
-			log.Printf("[%s] sink store error: %v", pmuName, err)
-			monitoring.RecordConversation(pmuName, "PDC", "SINK", "store", "error", err.Error())
+			log.Printf("[%s] sink channel full – spooling directly", pmuName)
+			monitoring.RecordConversation(pmuName, "PDC", "SINK", "overload", "warn", "sink channel full; spooled")
 			if p.sinkSpool != nil {
 				if spoolErr := p.sinkSpool.Append(reading); spoolErr != nil {
 					log.Printf("[%s] sink spool append error: %v", pmuName, spoolErr)
-					monitoring.RecordConversation(pmuName, "PDC", "SINK", "spool", "error", spoolErr.Error())
 				} else {
 					monitoring.IncSpoolQueued()
 					monitoring.IncSpoolQueuedForPMU(pmuName)
-					monitoring.RecordConversation(pmuName, "PDC", "SINK", "spool", "queued", "store failed; buffered to disk")
 				}
 			}
 		}
@@ -382,6 +444,7 @@ func main() {
 	pl := newPipeline(ctx)
 	defer pl.Close()
 	pl.StartReplay(ctx)
+	pl.StartSinkWorkers(ctx)
 
 	monitoring.RecordConversation("SYSTEM", "PDC", "SYSTEM", "startup", "ok", "pipeline started")
 
