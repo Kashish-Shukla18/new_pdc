@@ -435,11 +435,23 @@ func (r *Receiver) connect(ctx context.Context) error {
 				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "stream", "ok", fmt.Sprintf("received %d data frames", dataFrames))
 			}
 			payload := append([]byte(nil), raw...)
-			r.sem <- struct{}{}
-			go func(name string, frame []byte) {
-				defer func() { <-r.sem }()
-				r.handler(name, frame)
-			}(r.cfg.Name, payload)
+
+			// Non-blocking semaphore acquisition: if the handler pool is full, drop
+			// this frame and record a metric rather than stalling the TCP read loop.
+			// Stalling the read loop causes OS TCP buffers to fill, which eventually
+			// makes the PMU retransmit or disconnect.
+			select {
+			case r.sem <- struct{}{}:
+				go func(name string, frame []byte) {
+					defer func() { <-r.sem }()
+					r.handler(name, frame)
+				}(r.cfg.Name, payload)
+			default:
+				monitoring.IncFramesDropped()
+				log.Printf("[%s] frame dropped: handler pool full (inflight=%d)", r.cfg.Name, len(r.sem))
+				monitoring.RecordConversation(r.cfg.Name, "PDC", "PDC", "overload", "warn",
+					fmt.Sprintf("frame dropped – handler pool full (inflight=%d/%d)", len(r.sem), cap(r.sem)))
+			}
 		}
 	}
 }
