@@ -1,143 +1,183 @@
 # PDC
 
-PDC is a Go-based synchrophasor processing service. It reads PMU streams from the configuration in `config/pmus.yaml`, validates frames, publishes data, and exposes Prometheus metrics.
+PDC is a Go-based synchrophasor processing service. It connects to PMUs over IEEE C37.118, parses and validates frames, publishes readings to Kafka, stores live state in Redis and history in InfluxDB, and exposes a real-time **React dashboard** for operators.
+
+## Architecture
+
+```
+PMU → Receiver → Parse → Quality gate → Kafka (queue)
+                                      ↘ Redis (live) + InfluxDB (history)
+                                              ↓
+                                    React dashboard (SSE + REST API)
+```
+
+| Component | Role |
+|-----------|------|
+| **Go PDC** | Ingestion, parsing, quality checks, Kafka publish, Redis/Influx sink |
+| **Kafka** | Durable message queue (`pmu.readings`) |
+| **Redis** | Latest reading + short rolling timeline per PMU |
+| **InfluxDB** | Historical time-series + PMU configuration |
+| **Prometheus** | Pipeline metrics (`/metrics` on `:2112`) |
+| **React dashboard** | Live operator UI — overview, devices, data frames, connectivity, analytics |
+
+Grafana is **not** used. All visualization and PMU management is handled by the React app in `dashboard/`.
 
 ## Requirements
 
 - Go 1.26 or newer
-- Docker Desktop if you want to run the supporting services from `docker-compose.yaml`
+- Node.js 20+ (for the React dashboard)
+- Docker Desktop (for Kafka, Redis, InfluxDB, Prometheus)
+- Python 3 (optional, for PMU simulators)
 
-## Start the application
+## Quick start
 
-Run the service from the repository root:
-
-```bash
-go run . -config config/pmus.yaml -metrics-addr :2112
-```
-
-## Start the PMU simulator
-
-The default PMU config points at `127.0.0.1:4712`, so start the simulator first in another terminal:
-
-```bash
-python stimulator.py --tcp-port 4712 --udp-port 4713
-```
-
-## Run 3 simulators + plot graphs
-
-1. Start three simulator instances:
-
-```bash
-python run_3_simulators.py
-```
-
-This launcher starts the three PMUs with slightly different signal biases so the graph shows three distinct traces instead of overlapping lines.
-
-2. Start PDC with the 3-PMU config:
-
-```bash
-go run . -config config/pmus_3.yaml -metrics-addr :2112
-```
-
-Note: `pmus_3.yaml` is inside the `config` directory, so `-config pmus_3.yaml` from repo root will fail.
-
-3. Open live graphs (Frequency, MW, MVAR):
-
-```bash
-python plot_pmu_graphs.py
-```
-
-4. Stop everything with `Ctrl+C` in each terminal.
-
-## Stop the application
-
-The process shuts down cleanly when you press `Ctrl+C` in the terminal.
-
-## Stop the PMU simulator
-
-Press `Ctrl+C` in the simulator terminal.
-
-## Start the supporting stack
-
-If you want Kafka, Redis, InfluxDB, Grafana, and Prometheus locally, start the compose stack:
+### 1. Start the supporting stack
 
 ```bash
 docker compose up -d
 ```
 
-If Kafka starts slowly, wait 10-20 seconds before starting PDC.
+Wait 10–20 seconds for Kafka to become ready.
+
+Services:
+
+| Service | URL / port |
+|---------|------------|
+| Kafka | `localhost:9093` |
+| Redis | `localhost:6380` |
+| InfluxDB | `http://localhost:8087` |
+| Prometheus | `http://localhost:9090` |
+
+### 2. Start PDC
+
+```bash
+go run . -metrics-addr :2112 -api-addr :8080
+```
+
+- Metrics + live conversation state: `http://localhost:2112`
+- REST API (PMU CRUD): `http://localhost:8080`
+
+PMU connections are loaded from InfluxDB on startup and can be added at runtime via the dashboard or `POST /api/pmus`.
+
+### 3. Start the React dashboard
+
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+
+Open **http://localhost:5173** (Vite dev server).
+
+The dev server proxies API calls to the Go backend:
+
+- `/conversation/*` → `:2112` (live state + SSE events)
+- `/api/*` → `:8080` (PMU management)
+- `/metrics` → `:2112` (Prometheus)
+
+### 4. Start PMU simulators (optional)
+
+Single simulator:
+
+```bash
+python stimulator.py --tcp-port 4712 --udp-port 4713
+```
+
+Three or more simulators with distinct traces:
+
+```bash
+python run_3_simulators.py
+```
+
+Register each simulator in the dashboard (**Devices → Register New PMU**) or via the API. Reference PMU definitions are in `config/pmus.yaml` and `config/pmus_3.yaml`.
+
+## Dashboard pages
+
+| Page | Description |
+|------|-------------|
+| **Overview** | System KPIs, frequency trend, map, alerts, regional health |
+| **Devices** | PMU inventory, filters, region/voltage/vendor charts |
+| **Data Frames** | Live frame details, phasor quantities, frequency & ROCOF chart |
+| **Connectivity** | RTT chart, per-PMU matrix, recommendations |
+| **Analytics** | Angle differences, oscillation detection, operator recommendations |
+| **Help / Docs** | In-app documentation |
+
+## Stop services
+
+- PDC / dashboard / simulators: `Ctrl+C` in each terminal
+- Docker stack: `docker compose down`
+
+## Configuration
+
+### PMU reference configs
+
+- `config/pmus.yaml` — single simulator
+- `config/pmus_3.yaml` — three simulators
+
+These YAML files are reference definitions. Runtime PMU config is persisted in InfluxDB and managed through the dashboard or REST API.
+
+### Environment variables (pipeline)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KAFKA_BROKERS` | `127.0.0.1:9093` | Kafka broker list |
+| `KAFKA_TOPIC` | `pmu.readings` | Publish topic |
+| `KAFKA_ASYNC` | `true` | Non-blocking Kafka writes |
+| `KAFKA_BATCH_SIZE` | `500` | Messages per Kafka batch |
+| `REDIS_ADDR` | `127.0.0.1:6380` | Redis address |
+| `INFLUX_URL` | `http://127.0.0.1:8087` | InfluxDB URL |
+| `INFLUX_BATCH_SIZE` | `500` | Points per Influx batch |
+| `SINK_CHANNEL_SIZE` | `8192` | Buffered sink queue depth |
+| `SINK_WORKERS` | `4` | Parallel Redis/Influx writers |
+| `FRAME_HANDLER_MAX_INFLIGHT` | `128` | Max concurrent frame handlers |
 
 ### Kafka topic quick fix
 
-If you see `Unknown Topic Or Partition`, create the topic manually once:
+If you see `Unknown Topic Or Partition`:
 
 ```bash
 docker compose exec kafka kafka-topics --create --if-not-exists --topic pmu.readings --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
 ```
 
-Verify it exists:
+## No-data-loss design (heavy load)
 
-```bash
-docker compose exec kafka kafka-topics --list --bootstrap-server localhost:9092
+The pipeline is built for high frame rates (50 fps × many PMUs):
+
+1. **Per-PMU receivers** with auto-reconnect
+2. **Non-blocking frame dispatch** — if the handler pool is full, frames are dropped with a metric instead of stalling the TCP read loop
+3. **Decoupled sink** — Kafka publish returns immediately; Redis/Influx writes run in a buffered channel with worker pool
+4. **Batched InfluxDB writes** — non-blocking WriteAPI with internal batching and retry
+5. **Pipelined Redis** — ZAdd + Expire + Set in one round-trip
+6. **Disk spool** — failed Kafka/sink writes are buffered to `data/spool/` and replayed automatically
+7. **Prometheus metrics** — frame drops, spool backlog, processing latency
+
+Recommended settings for heavy load:
+
+```powershell
+$env:KAFKA_ASYNC="true"
+$env:KAFKA_BATCH_SIZE="500"
+$env:KAFKA_BATCH_TIMEOUT_MS="50"
+$env:INFLUX_BATCH_SIZE="500"
+$env:INFLUX_FLUSH_INTERVAL_MS="1000"
+$env:SINK_CHANNEL_SIZE="8192"
+$env:SINK_WORKERS="4"
+$env:FRAME_HANDLER_MAX_INFLIGHT="256"
+$env:SPOOL_FSYNC="true"
+go run . -metrics-addr :2112 -api-addr :8080
 ```
 
-## Stop the supporting stack
+## Production dashboard build
 
 ```bash
-docker compose down
+cd dashboard
+npm run build
+npm run preview
 ```
 
-## Configuration
-
-- Main PMU configuration: `config/pmus.yaml`
-- Metrics endpoint: `http://localhost:2112/metrics`
-- Compose ports:
-  - Kafka: `localhost:9093`
-  - Redis: `localhost:6380`
-  - InfluxDB: `localhost:8087`
-  - Grafana: `http://localhost:3000`
-  - Prometheus: `http://localhost:9090`
+For production, serve the `dashboard/dist` output behind a reverse proxy that forwards `/conversation`, `/api`, and `/metrics` to the Go backend.
 
 ## Notes
 
-- The application uses `127.0.0.1` defaults in the sample config to avoid Windows localhost resolution issues.
-- If you run multiple instances, make sure they do not point at the same spool files.
-
-## No-Data-Loss structure (heavy load)
-
-This project now follows the same reliability flow you shared:
-
-1. PMU connections: one connection per PMU, reconnect loop per device.
-2. Start command + stream: handshake requests configuration and data stream.
-3. Parse stage: frames are parsed and quality-checked.
-4. Queue stage: parsed readings are written to Kafka.
-5. Time sync + quality gate: invalid data is flagged and tracked.
-6. Dual sink: writes to Redis (live view) and InfluxDB (history).
-7. Dashboard: Grafana reads live/historical views.
-8. Monitoring: Prometheus tracks errors, spool backlog, and replay.
-
-To protect against data loss during outages and load spikes:
-
-- Kafka writes are synchronous (`Async=false`) with retry attempts and durable acks (`KAFKA_REQUIRED_ACKS=all` by default).
-- Failed Kafka/Redis/Influx writes are buffered to local disk spool files.
-- Spool appends are fsynced by default (`SPOOL_FSYNC=true`) so crash/power-loss windows are minimized.
-- Spool replay is streaming-based, so large spool files do not need full in-memory loading.
-
-Recommended runtime settings for heavy load:
-
-```powershell
-$env:KAFKA_REQUIRED_ACKS="all"
-$env:KAFKA_MAX_ATTEMPTS="10"
-$env:KAFKA_WRITE_TIMEOUT_MS="15000"
-$env:KAFKA_READ_TIMEOUT_MS="15000"
-$env:KAFKA_ENSURE_TOPIC="true"
-$env:KAFKA_TOPIC_PARTITIONS="3"
-$env:KAFKA_TOPIC_REPLICATION_FACTOR="1"
-$env:SPOOL_FSYNC="true"
-go run . -config config/pmus_3.yaml -metrics-addr :2112
-```
-
-Important production note:
-
-- A single Kafka broker can still be a single point of failure.
-- For stronger no-loss guarantees, run Kafka with replication (3 brokers), topic replication factor >= 3, and min in-sync replicas >= 2.
+- The application uses `127.0.0.1` defaults to avoid Windows localhost resolution issues.
+- If you run multiple PDC instances, use separate spool file paths (`KAFKA_SPOOL_FILE`, `SINK_SPOOL_FILE`).
+- A single Kafka broker is a single point of failure; use replication (3 brokers, RF ≥ 3, min ISR ≥ 2) for production.
