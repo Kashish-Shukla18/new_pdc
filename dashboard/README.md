@@ -1,73 +1,67 @@
-# React + TypeScript + Vite
+# PDC React Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Operator dashboard for the PDC synchrophasor platform. Replaces Grafana with a purpose-built React UI for live PMU monitoring, device management, and analytics.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- React 19 + TypeScript
+- Vite 8
+- Recharts (charts)
+- React Leaflet (map)
+- Lucide React (icons)
 
-## React Compiler
+## Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+From this directory:
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open **http://localhost:5173**.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+The Vite dev server proxies backend routes to the Go PDC service:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Proxy path | Backend |
+|------------|---------|
+| `/conversation/*` | `http://127.0.0.1:2112` |
+| `/metrics` | `http://127.0.0.1:2112` |
+| `/api/*` | `http://127.0.0.1:8080` |
+
+Start PDC before the dashboard:
+
+```bash
+# from repo root
+go run . -metrics-addr :2112 -api-addr :8080
+```
+
+## Pages
+
+- **Overview** — KPIs, frequency chart, simulator map, alerts
+- **Devices** — inventory table, filters, distribution charts
+- **Data Frames** — live frame data, frequency & ROCOF chart
+- **Connectivity** — RTT chart, connectivity matrix, recommendations
+- **Analytics** — angle differences, oscillation, islanding risk
+- **Help / Docs** — in-app documentation
+
+## Production build
+
+```bash
+npm run build
+npm run preview
+```
+
+Serve `dist/` behind a reverse proxy that forwards `/conversation`, `/api`, and `/metrics` to the Go backend.
+
+## Project structure
+
+```
+src/
+  components/   # UI components by feature (layout, connectivity, devices, …)
+  context/      # DashboardContext provider
+  hooks/        # useDashboard, useRttHistory, useFrameTrendHistory
+  pages/        # Route-level page components
+  types/        # TypeScript definitions
+  utils/        # Data transforms and chart helpers
 ```
