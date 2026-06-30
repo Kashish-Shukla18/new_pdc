@@ -1,16 +1,51 @@
-import { Clock3, Pause, Play, Radio } from 'lucide-react'
+import { useEffect, useRef } from 'react'
+import { Clock3, Menu, Pause, Play, Radio } from 'lucide-react'
 import { useClock } from '../../hooks/useClock'
 import { useDashboardContext } from '../../context/DashboardContext'
 import { round } from '../../utils/format'
 import { Logo } from './Logo'
 
-export function Header() {
+interface HeaderProps {
+  onMenuToggle?: () => void
+  sidebarOpen?: boolean
+}
+
+export function Header({ onMenuToggle, sidebarOpen = false }: HeaderProps) {
+  const headerRef = useRef<HTMLElement>(null)
   const clockLabel = useClock()
   const { frameRate, systemTone, systemMessage, isPaused, setIsPaused, streamOnline, pmus } = useDashboardContext()
 
+  useEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+
+    const syncHeaderHeight = () => {
+      document.documentElement.style.setProperty('--header-height', `${header.offsetHeight}px`)
+    }
+
+    syncHeaderHeight()
+    const observer = new ResizeObserver(syncHeaderHeight)
+    observer.observe(header)
+    window.addEventListener('resize', syncHeaderHeight)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', syncHeaderHeight)
+    }
+  }, [])
+
   return (
-    <header className="app-header">
+    <header ref={headerRef} className="app-header">
       <div className="brand">
+        <button
+          type="button"
+          className="btn sidebar-toggle"
+          aria-label="Open navigation menu"
+          aria-expanded={sidebarOpen}
+          onClick={onMenuToggle}
+        >
+          <Menu size={18} />
+        </button>
         <Logo size={44} />
         <div className="brand-text">
           <div className="brand-title-row">
