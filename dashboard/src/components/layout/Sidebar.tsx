@@ -20,21 +20,31 @@ const navIcons: Partial<Record<TabId, React.ReactNode>> = {
   docs: <FileText size={16} />,
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  isOpen?: boolean
+  onClose?: () => void
+}
+
+export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   const { activeTab, setActiveTab, navItems, systemCounts, dashboard } = useDashboardContext()
+
+  const selectTab = (id: Parameters<typeof setActiveTab>[0]) => {
+    setActiveTab(id)
+    onClose?.()
+  }
 
   const monitoringItems = navItems.filter((item) => item.section === 'Monitoring')
   const resourceItems = navItems.filter((item) => item.section === 'Resources')
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${isOpen ? ' open' : ''}`}>
       <div className="nav-section">Monitoring</div>
       {monitoringItems.map((item) => (
         <button
           key={item.id}
           type="button"
           className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
-          onClick={() => setActiveTab(item.id)}
+          onClick={() => selectTab(item.id)}
         >
           {navIcons[item.id]}
           {item.label}
@@ -48,7 +58,7 @@ export function Sidebar() {
           key={item.id}
           type="button"
           className={`nav-item ${activeTab === item.id ? 'active' : ''}`}
-          onClick={() => setActiveTab(item.id)}
+          onClick={() => selectTab(item.id)}
         >
           {navIcons[item.id]}
           {item.label}
