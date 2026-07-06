@@ -20,6 +20,7 @@ type Props = {
   statusFilter: string
   setStatusFilter: (value: string) => void
   onRowClick: (name: string) => void
+  onEdit: (name: string) => void
   onDelete: (name: string, e: React.MouseEvent) => void
 }
 
@@ -33,6 +34,7 @@ export function DeviceInventoryTable({
   statusFilter,
   setStatusFilter,
   onRowClick,
+  onEdit,
   onDelete,
 }: Props) {
   return (
@@ -83,7 +85,7 @@ export function DeviceInventoryTable({
               <th>Status</th>
               <th>Data Avail.</th>
               <th>Latency</th>
-              <th />
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -119,13 +121,25 @@ export function DeviceInventoryTable({
                   <td>{pmu.connected ? `${round(availabilityOf(pmu, pmu.meta.targetFps), 1)}%` : '—'}</td>
                   <td>{pmu.connected ? `${round(latencyOf(pmu), 0)} ms` : '—'}</td>
                   <td>
-                    <button
-                      type="button"
-                      className="btn ghost device-disconnect"
-                      onClick={(e) => onDelete(pmu.name, e)}
-                    >
-                      Disconnect
-                    </button>
+                    <div className="device-row-actions">
+                      <button
+                        type="button"
+                        className="btn ghost device-edit-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onEdit(pmu.name)
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost device-disconnect"
+                        onClick={(e) => onDelete(pmu.name, e)}
+                      >
+                        Disconnect
+                      </button>
+                    </div>
                   </td>
                 </tr>
               )

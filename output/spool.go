@@ -44,6 +44,25 @@ func NewReadingSpool(path string) *ReadingSpool {
 	return &ReadingSpool{path: clean}
 }
 
+func isSpoolTokenTooLong(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, bufio.ErrTooLong) || strings.Contains(strings.ToLower(err.Error()), "token too long")
+}
+
+func (s *ReadingSpool) quarantineCorrupt(cause error) error {
+	if s == nil {
+		return cause
+	}
+	ts := time.Now().Format("20060102-150405")
+	quarantine := s.path + ".corrupt." + ts
+	if err := os.Rename(s.path, quarantine); err != nil {
+		return fmt.Errorf("quarantine corrupt spool: %w (original: %v)", err, cause)
+	}
+	return fmt.Errorf("spool quarantined to %s: %w", quarantine, cause)
+}
+
 func replaceFileWithRetry(dst, src string) error {
 	const attempts = 12
 	const delay = 150 * time.Millisecond
@@ -283,6 +302,10 @@ func (s *ReadingSpool) Replay(ctx context.Context, fn func(context.Context, pars
 	if scanErr := scanner.Err(); scanErr != nil {
 		_ = tmp.Close()
 		_ = f.Close()
+		_ = removeFileWithRetry(tmpPath)
+		if isSpoolTokenTooLong(scanErr) {
+			return stats, s.quarantineCorrupt(scanErr)
+		}
 		return ReplayStats{}, fmt.Errorf("scan spool: %w", scanErr)
 	}
 
