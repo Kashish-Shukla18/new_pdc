@@ -81,6 +81,8 @@ export type PMUConfig = {
   idcode: number
   region: string
   protocol: string
+  timeout_sec?: number
+  reconnect_sec?: number
   lat: number
   lon: number
 }
@@ -106,16 +108,9 @@ export type LiveAlert = {
   time: string
 }
 
-export type NewPMUForm = {
-  name: string
-  ip: string
-  port: number
-  idcode: number
-  region: string
-  protocol: string
-  lat: number
-  lon: number
-}
+export type NewPMUForm = PMUConfig
+
+export type EditPMUForm = PMUConfig
 
 export type NavItem = {
   id: TabId

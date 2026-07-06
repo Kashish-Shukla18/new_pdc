@@ -12,7 +12,8 @@ bin/
 *.coverprofile
 coverage.out
 *.prof
-
+data/spool/
+*.corrupt*
 # Python artifacts
 __pycache__/
 *.py[cod]

@@ -1604,7 +1604,8 @@ tbody td span {
 }
 
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   width: 100%;
   color: var(--text);
   border-radius: var(--radius-sm);
@@ -1627,7 +1628,8 @@ tbody td span {
 }
 
 .field input:focus,
-.field textarea:focus {
+.field textarea:focus,
+.field select:focus {
   border-color: rgba(77, 200, 240, .45);
   box-shadow: 0 0 0 3px rgba(77, 200, 240, .10);
 }
@@ -2062,10 +2064,45 @@ tbody td span {
   font-family: var(--mono);
 }
 
+.device-edit-btn {
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+}
+
 .device-disconnect {
   color: #f0706a !important;
   padding: 4px 8px !important;
   font-size: 11px !important;
+}
+
+.device-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.device-edit-back {
+  margin-bottom: 10px;
+}
+
+.device-edit-panel {
+  max-width: 760px;
+}
+
+.device-edit-form {
+  padding: 0 16px 16px;
+}
+
+.device-edit-error {
+  margin: 12px 0 0;
+  color: #ff719a;
+  font-size: 13px;
+}
+
+.device-edit-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .device-charts-grid {

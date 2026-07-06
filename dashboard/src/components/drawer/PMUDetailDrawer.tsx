@@ -1,9 +1,9 @@
-import { X } from 'lucide-react'
+import { Pencil, X } from 'lucide-react'
 import { useDashboardContext } from '../../context/DashboardContext'
 import { ageText, round } from '../../utils/format'
 
 export function PMUDetailDrawer() {
-  const { drawerPMU, setDrawerPMUName } = useDashboardContext()
+  const { drawerPMU, setDrawerPMUName, openEditPMU } = useDashboardContext()
 
   if (!drawerPMU) return null
 
@@ -27,6 +27,14 @@ export function PMUDetailDrawer() {
           <p><strong>Approx FPS:</strong> {round(drawerPMU.approxFps, 2)}</p>
           <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
           {drawerPMU.lastError && <p><strong>Last error:</strong> {drawerPMU.lastError}</p>}
+          <button
+            type="button"
+            className="btn primary"
+            style={{ marginTop: '16px' }}
+            onClick={() => openEditPMU(drawerPMU.name)}
+          >
+            <Pencil size={14} /> Edit device
+          </button>
         </div>
       </aside>
     </div>
