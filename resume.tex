@@ -1,0 +1,175 @@
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\usepackage[margin=0.55in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\input{glyphtounicode}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\urlstyle{same}
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large\bfseries
+}{}{0em}{}[\titlerule \vspace{-6pt}]
+
+\pdfgentounicode=1
+
+\newcommand{\resumeItem}[1]{\item\small{#1 \vspace{-1pt}}}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+  \begin{tabular*}{1.0\textwidth}[t]{l@{\extracolsep{\fill}}r}
+    \textbf{#1} & \textbf{\small #2} \\
+    \textit{\small #3} & \textit{\small #4} \\
+  \end{tabular*}\vspace{-6pt}
+}
+
+\newcommand{\resumeProjectHeading}[3]{
+  \item
+  \begin{tabular*}{1.0\textwidth}[t]{l@{\extracolsep{\fill}}r}
+    \textbf{#1} & \textit{\small #2} \\
+  \end{tabular*}
+  {\small\textit{#3}} \vspace{-6pt}
+}
+
+\newcommand{\resumeStack}[1]{
+  \vspace{1pt}
+  \textbf{\small Tech Stack:} {\small #1} \vspace{4pt}
+}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.0in, label={}, itemsep=0pt]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}[leftmargin=0.15in, itemsep=-2pt, label=\textbullet]}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{3pt}}
+
+\begin{document}
+
+\begin{center}
+  {\Huge \scshape Kashish Shukla} \\[3mm]
+  \small
+  Software Engineer \textbar{} Python \textperiodcentered{} Machine Learning \textperiodcentered{} FastAPI \textperiodcentered{} CI/CD \textperiodcentered{} Validation \\[2mm]
+  \href{tel:+917007849495}{+91 7007849495} \textbar{}
+  \href{mailto:kashish.shukla.8076@gmail.com}{kashish.shukla.8076@gmail.com} \textbar{}
+  \href{https://linkedin.com/in/kashish-shukla-dev/}{linkedin.com/in/kashish-shukla-dev} \textbar{}
+  \href{https://github.com/Kashish-Shukla18}{github.com/Kashish-Shukla18} \textbar{}
+  \href{https://kashish-shukla-portfolio.vercel.app}{Portfolio}
+\end{center}
+
+\section{Professional Summary}
+\small{
+Software Engineer with 2 years of experience in Python development, machine learning workflows, and production software validation at IIT Kanpur. Strong in building test and monitoring infrastructure, automating API validation, debugging distributed pipelines, and shipping ML-powered applications with measurable performance benchmarks. B.Tech in Computer Science; GATE CSE Qualified (2026).
+}
+
+\section{Education}
+\resumeSubHeadingListStart
+  \resumeSubheading
+    {Dr. Ram Manohar Lohia Awadh University}{Ayodhya, UP}
+    {B.Tech in Computer Science and Engineering \textemdash{} 78\%}{Sep 2024}
+\resumeSubHeadingListEnd
+
+\section{Experience}
+\resumeSubHeadingListStart
+
+  \resumeSubheading
+    {Indian Institute of Technology (IIT) Kanpur}{Kanpur, India}
+    {Software Engineer -- Project Associate}{Dec 2024 -- Present}
+  \resumeItemListStart
+    \resumeItem{Engineered a high-throughput PMU data pipeline (Python, Go, FastAPI, Kafka, InfluxDB) processing 10,000+ messages/sec across 15+ substations with automated quality gates and 99.9\% uptime.}
+    \resumeItem{Developed validation and observability infrastructure using Prometheus metrics, pipeline tracing, and spool-replay tests to troubleshoot Kafka/Redis/InfluxDB failures and prevent data loss under load.}
+    \resumeItem{Validated end-to-end system behavior by functionally testing API responses, SSE/WebSocket data flows, and dashboard outputs across 50+ devices; reduced operator triage time by 40\%.}
+    \resumeItem{Collaborated with grid engineers to define performance requirements, analyze anomalies, and deliver production releases for GREET Portal and UPCON 2026 (500+ registrations).}
+  \resumeItemListEnd
+  \resumeStack{Python \textperiodcentered{} Go \textperiodcentered{} FastAPI \textperiodcentered{} Django \textperiodcentered{} Kafka \textperiodcentered{} Prometheus \textperiodcentered{} Docker \textperiodcentered{} GitLab CI/CD \textperiodcentered{} PostgreSQL}
+
+  \resumeSubheading
+    {SIIC Incubation Centre, IIT Kanpur}{Kanpur, India}
+    {Software Engineer -- Intern}{Jun 2024 -- Dec 2024}
+  \resumeItemListStart
+    \resumeItem{Established a React/Laravel portal with automated document workflows and role-based validation rules, processing 500+ monthly submissions across 3 incubation programmes.}
+    \resumeItem{Automated 200+ weekly SMTP notifications (70\% less manual follow-up); applied module-level RBAC reducing review time by 40\% and improving NIDHI data retrieval by 60\%.}
+  \resumeItemListEnd
+  \resumeStack{Python \textperiodcentered{} Laravel \textperiodcentered{} PHP \textperiodcentered{} MySQL \textperiodcentered{} REST APIs \textperiodcentered{} SMTP}
+
+\resumeSubHeadingListEnd
+
+\section{Projects}
+\resumeSubHeadingListStart
+
+  \resumeProjectHeading
+    {CVision -- AI Resume Analyzer (ML Evaluation Platform)}
+    {Jun 2025 -- Present}
+    {Python/FastAPI ML application that scores resumes, runs embedding-based skill matching, and benchmarks model output quality with automated evaluation metrics.}
+  \resumeItemListStart
+    \resumeItem{Architected RAG pipeline (LangChain, ChromaDB, OpenAI) with PDF ingestion, chunking, and embedding workflows; benchmarked sub-100ms inference across 10+ evaluation dimensions.}
+    \resumeItem{Validated AI responses with source-grounded citations; containerized 3-service stack with Docker Compose for reproducible local test environments.}
+  \resumeItemListEnd
+
+  \resumeProjectHeading
+    {Phasor Data Concentrator (PDC) -- Pipeline Validation \& Monitoring}
+    {Jan 2025 -- Present}
+    {Real-time data concentrator with IEEE C37.118 frame validation, quality checks, and operator dashboards for high-frequency telemetry benchmarking.}
+  \resumeItemListStart
+    \resumeItem{Engineered Go ingestion with CRC validation and quality gates at 50+ frames/sec per PMU (under 5ms parse latency); Python PMU simulators with CRC self-test vectors for protocol validation.}
+    \resumeItem{Designed benchmarking pipeline (Kafka, Redis, InfluxDB, Prometheus) with disk spooling and replay---maintained zero data loss across 3+ concurrent streams during load testing.}
+    \resumeItem{Launched React/TypeScript monitoring dashboard with SSE live updates across 7 views, cutting anomaly detection time from minutes to under 1 second.}
+  \resumeItemListEnd
+
+  \resumeProjectHeading
+    {WorkSpace Connect -- API Test \& Automation Platform}
+    {Jan 2025 -- May 2025}
+    {Full-stack collaboration app used to validate 40+ REST endpoints, real-time Socket.IO flows, and cross-module integration before production deployment.}
+  \resumeItemListStart
+    \resumeItem{Architected and validated 40+ REST APIs across 6 modules with under 200ms average response time; executed integration tests for auth, chat, and notification workflows.}
+    \resumeItem{Deployed on Render with managed PostgreSQL; monitored live dashboard metrics from 5+ data sources to verify end-to-end system behavior.}
+  \resumeItemListEnd
+
+  \resumeProjectHeading
+    {Breaker Guard -- IoT Monitoring Platform (UPPCL)}
+    {Jul 2025 -- Dec 2025}
+    {Django-based utility operations system for outage tracking, IoT device heartbeat validation, OTA firmware updates, and field geolocation monitoring.}
+  \resumeItemListStart
+    \resumeItem{Deployed platform consolidating 4 operational workflows; reduced outage response time by 40\% through automated device status checks and audit-tracked RBAC across 5+ roles.}
+  \resumeItemListEnd
+
+\resumeSubHeadingListEnd
+
+\section{Technical Skills}
+\begin{itemize}[leftmargin=0.15in, label={}]
+  \small{\item{
+    \textbf{Languages:} Python, Go, JavaScript, TypeScript, SQL, Java, C++ \\
+    \textbf{Machine Learning:} LangChain, RAG Pipelines, Embeddings, ChromaDB, OpenAI API, Model Evaluation, Hugging Face \\
+    \textbf{Backend \& APIs:} FastAPI, Django, REST APIs, WebSocket, SSE, Socket.IO \\
+    \textbf{Testing \& Validation:} API Testing, Functional Validation, Postman, Debugging, Test Automation, Quality Gates \\
+    \textbf{DevOps \& Monitoring:} Docker, Docker Compose, Git, GitLab CI/CD, Prometheus, Kafka, Redis, InfluxDB \\
+    \textbf{Databases:} PostgreSQL, MySQL, MongoDB \\
+    \textbf{Frontend (supporting):} React, TypeScript, Recharts
+  }}
+\end{itemize}
+
+\section{Certifications}
+\begin{itemize}[leftmargin=0.15in, label={\textbullet}]
+  \small{
+    \item GATE CSE Qualified (2026)
+    \item AI Agents Fundamentals -- Hugging Face (2026)
+    \item Google Prompting Essentials Specialization (2026)
+    \item Advanced React -- Meta (2024)
+    \item Docker Essentials: A Developer Introduction (2025)
+  }
+\end{itemize}
+
+\end{document}

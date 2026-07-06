@@ -426,7 +426,7 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 
 func main() {
 	metricsAddr := flag.String("metrics-addr", ":2112", "prometheus metrics listen address")
-	apiAddr := flag.String("api-addr", ":8080", "REST API listen address")
+	apiAddr := flag.String("api-addr", ":8081", "REST API listen address")
 	flag.Parse()
 
 	dbStore, err := store.NewStore()

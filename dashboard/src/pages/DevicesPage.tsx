@@ -1,10 +1,11 @@
 import { Upload } from 'lucide-react'
+import { useMemo } from 'react'
 import { DeviceDistributionCharts } from '../components/devices/DeviceDistributionCharts'
 import { DeviceInventoryTable } from '../components/devices/DeviceInventoryTable'
 import { DeviceSummaryGrid } from '../components/devices/DeviceSummaryGrid'
 import { useDashboardContext } from '../context/DashboardContext'
 import { computeDeviceSummary } from '../utils/devices'
-import { useMemo } from 'react'
+import { EditDevicePage } from './EditDevicePage'
 
 export function DevicesPage() {
   const {
@@ -19,9 +20,15 @@ export function DevicesPage() {
     setShowAddPMU,
     setDrawerPMUName,
     handleDeletePMU,
+    editingPMUName,
+    openEditPMU,
   } = useDashboardContext()
 
   const summary = useMemo(() => computeDeviceSummary(pmus), [pmus])
+
+  if (editingPMUName) {
+    return <EditDevicePage />
+  }
 
   return (
     <>
@@ -54,6 +61,7 @@ export function DevicesPage() {
         statusFilter={statusFilter}
         setStatusFilter={setStatusFilter}
         onRowClick={setDrawerPMUName}
+        onEdit={openEditPMU}
         onDelete={handleDeletePMU}
       />
 

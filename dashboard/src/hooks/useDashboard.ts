@@ -20,6 +20,7 @@ import { useFrameTrendHistory } from './useFrameTrendHistory'
 import type {
   ConversationEvent,
   DashboardState,
+  EditPMUForm,
   LiveAlert,
   NavItem,
   NewPMUForm,
@@ -56,6 +57,62 @@ export function useDashboard() {
   const [openFaq, setOpenFaq] = useState<number | null>(null)
   const [showAddPMU, setShowAddPMU] = useState(false)
   const [newPMU, setNewPMU] = useState<NewPMUForm>(defaultNewPMU)
+  const [editingPMUName, setEditingPMUName] = useState('')
+  const [editPMU, setEditPMU] = useState<EditPMUForm | null>(null)
+  const [updateSaving, setUpdateSaving] = useState(false)
+  const [updateError, setUpdateError] = useState('')
+
+  const openEditPMU = useCallback((name: string) => {
+    const cfg = dbConfigs.find((item) => item.name === name)
+    if (!cfg) return
+    setEditPMU({
+      name: cfg.name,
+      ip: cfg.ip,
+      port: cfg.port,
+      idcode: cfg.idcode,
+      region: cfg.region,
+      protocol: cfg.protocol || 'tcp',
+      timeout_sec: cfg.timeout_sec ?? 0,
+      reconnect_sec: cfg.reconnect_sec ?? 0,
+      lat: cfg.lat,
+      lon: cfg.lon,
+    })
+    setUpdateError('')
+    setDrawerPMUName('')
+    setEditingPMUName(name)
+  }, [dbConfigs])
+
+  const closeEditPMU = useCallback(() => {
+    setEditingPMUName('')
+    setEditPMU(null)
+    setUpdateError('')
+  }, [])
+
+  const handleUpdatePMU = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editPMU) return
+    setUpdateSaving(true)
+    setUpdateError('')
+    try {
+      const res = await fetch('/api/pmus', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editPMU),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        setUpdateError(text || 'Failed to update device')
+        return
+      }
+      closeEditPMU()
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      setUpdateError(message)
+      console.error(err)
+    } finally {
+      setUpdateSaving(false)
+    }
+  }, [closeEditPMU, editPMU])
 
   const handleAddPMU = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
@@ -93,6 +150,12 @@ export function useDashboard() {
       console.error(err)
     }
   }, [])
+
+  useEffect(() => {
+    if (activeTab !== 'devices' && editingPMUName) {
+      closeEditPMU()
+    }
+  }, [activeTab, closeEditPMU, editingPMUName])
 
   useEffect(() => {
     if (isPaused) return
@@ -173,6 +236,7 @@ export function useDashboard() {
   const selectedPMU = pmus.find((pmu) => pmu.name === selectedPMUName) ?? pmus[0]
   const selectedFramePMU = pmus.find((pmu) => pmu.name === selectedFramePMUName) ?? pmus[0]
   const drawerPMU = pmus.find((pmu) => pmu.name === drawerPMUName)
+  const editingPMU = pmus.find((pmu) => pmu.name === editingPMUName)
 
   const regionSummary = useMemo(() => {
     const map = new Map<string, { total: number; connected: number; availability: number }>()
@@ -391,6 +455,15 @@ export function useDashboard() {
     setNewPMU,
     handleAddPMU,
     handleDeletePMU,
+    editingPMUName,
+    editingPMU,
+    editPMU,
+    setEditPMU,
+    openEditPMU,
+    closeEditPMU,
+    handleUpdatePMU,
+    updateSaving,
+    updateError,
     regionSummary,
     mergedTrend,
     systemCounts,

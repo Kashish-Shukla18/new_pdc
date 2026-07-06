@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -34,6 +35,7 @@ func StartServer(addr string, db *store.Store, m *manager.PMUManager) {
 		if r.Method == "GET" {
 			pmus, err := db.GetAllPMUs(r.Context())
 			if err != nil {
+				log.Printf("api GET /api/pmus error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
