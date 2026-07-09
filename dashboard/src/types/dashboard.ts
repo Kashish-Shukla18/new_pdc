@@ -83,6 +83,7 @@ export type PMUConfig = {
   protocol: string
   timeout_sec?: number
   reconnect_sec?: number
+  data_rate?: number
   lat: number
   lon: number
 }

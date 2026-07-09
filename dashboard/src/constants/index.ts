@@ -15,24 +15,24 @@ export const defaultNewPMU: NewPMUForm = {
   ip: '',
   port: 4712,
   idcode: 1,
-  region: 'NRLDC',
+  region: 'FIELD',
   protocol: 'tcp',
-  lat: 20.0,
-  lon: 70.0,
+  lat: 0,
+  lon: 0,
 }
 
 export const HELP_SECTIONS = [
   {
     title: 'Getting Started',
-    content: 'This dashboard now uses the three simulator streams from /conversation/state in every tab.',
+    content: 'This dashboard shows live telemetry from registered field PMUs via the PDC backend.',
   },
   {
     title: 'Data Frames',
-    content: 'Use Data Frames tab to inspect per-simulator SOC/FRACSEC and phasor values in near real-time.',
+    content: 'Use Data Frames to inspect per-PMU SOC/FRACSEC, phasor values, and frequency in near real-time.',
   },
   {
     title: 'Connectivity',
-    content: 'Connectivity metrics are computed from live simulator frame rates, rejects, and trend variance.',
+    content: 'Connectivity metrics are computed from live frame rates, quality rejects, and trend variance.',
   },
 ]
 

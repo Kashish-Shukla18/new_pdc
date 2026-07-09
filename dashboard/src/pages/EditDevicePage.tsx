@@ -49,7 +49,7 @@ export function EditDevicePage() {
                 required
                 value={editPMU.ip}
                 onChange={(e) => setEditPMU({ ...editPMU, ip: e.target.value })}
-                placeholder="172.24.108.1"
+                placeholder="PMU IP address"
               />
             </label>
 
@@ -83,7 +83,7 @@ export function EditDevicePage() {
                 required
                 value={editPMU.region}
                 onChange={(e) => setEditPMU({ ...editPMU, region: e.target.value })}
-                placeholder="NRLDC"
+                placeholder="FIELD"
               />
             </label>
 

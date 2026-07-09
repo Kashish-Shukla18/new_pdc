@@ -14,8 +14,6 @@ export const REGION_COLORS: Record<string, string> = {
 export const VOLTAGE_CLASSES = ['765 kV', '400 kV', '220 kV', 'HVDC', '132 kV'] as const
 export const VOLTAGE_COLORS = ['#3da9fc', '#7ee0ff', '#27d3a2', '#a07cff', '#f4b740']
 
-const VENDORS = ['ABB', 'Siemens', 'GE', 'Schneider/Alstom', 'BHEL', 'Generic PMU']
-
 export type DeviceSummary = {
   label: string
   value: string
@@ -31,13 +29,7 @@ export function voltageClassFor(pmu: PMUWithMeta): string {
 }
 
 export function vendorFor(pmu: PMUWithMeta): string {
-  const vendor = pmu.meta.vendor
-  if (!vendor || vendor === 'Generic PMU') {
-    let hash = 0
-    for (let i = 0; i < pmu.name.length; i++) hash = (hash + pmu.name.charCodeAt(i)) % VENDORS.length
-    return VENDORS[hash]
-  }
-  return vendor.split(' ')[0]
+  return pmu.meta.vendor
 }
 
 export function statusLabel(pmu: PMUWithMeta): 'Healthy' | 'Degraded' | 'Offline' {
