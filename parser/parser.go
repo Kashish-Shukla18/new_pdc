@@ -155,7 +155,15 @@ func calcSequenceMetrics(va, vb, vc Phasor) (float32, float32, float32, float32)
 }
 
 // ParseDataFrame decodes one CRC-verified C37.118 data frame.
+// When a CFG2 profile was registered for pmuName, channel layout follows that profile.
 func ParseDataFrame(pmuName string, raw []byte) (Reading, error) {
+	if profile, ok := GetProfile(pmuName); ok {
+		return parseDataWithProfile(pmuName, raw, profile)
+	}
+	return parseDataLegacy(pmuName, raw)
+}
+
+func parseDataLegacy(pmuName string, raw []byte) (Reading, error) {
 	if len(raw) < minFrameSize {
 		return Reading{}, fmt.Errorf("short frame: got %d bytes", len(raw))
 	}
@@ -315,6 +323,229 @@ func ParseDataFrame(pmuName string, raw []byte) (Reading, error) {
 	}
 
 	return reading, nil
+}
+
+func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, error) {
+	if len(raw) < 16 || raw[0] != 0xAA || (raw[1]&0xF0) != frameTypeData {
+		return Reading{}, fmt.Errorf("not a data frame")
+	}
+	frameSize := int(binary.BigEndian.Uint16(raw[2:4]))
+	if frameSize != len(raw) {
+		return Reading{}, fmt.Errorf("frame size mismatch: header=%d actual=%d", frameSize, len(raw))
+	}
+
+	syncWord := binary.BigEndian.Uint16(raw[0:2])
+	idCode := binary.BigEndian.Uint16(raw[4:6])
+	socRaw := binary.BigEndian.Uint32(raw[6:10])
+	fracsec := binary.BigEndian.Uint32(raw[10:14])
+	checksumRx := binary.BigEndian.Uint16(raw[len(raw)-2:])
+	checksumValid := checksumRx == crc16(raw[:len(raw)-2])
+	timeQuality := uint8(fracsec >> 24)
+
+	tb := cfg.TimeBase
+	if tb == 0 {
+		tb = 1_000_000
+	}
+	fracCount := fracsec & 0x00FFFFFF
+	nanos := int64(fracCount) * int64(time.Second) / int64(tb)
+	ts := time.Unix(int64(socRaw), nanos).UTC()
+
+	p := raw[14 : len(raw)-2]
+	o := 0
+	if len(p) < 2 {
+		return Reading{}, fmt.Errorf("empty payload")
+	}
+	stat := binary.BigEndian.Uint16(p[o:])
+	o += 2
+
+	readF32 := func() (float32, error) {
+		if o+4 > len(p) {
+			return 0, fmt.Errorf("short float at %d", o)
+		}
+		v := math.Float32frombits(binary.BigEndian.Uint32(p[o : o+4]))
+		o += 4
+		return v, nil
+	}
+	readI16 := func() (float32, error) {
+		if o+2 > len(p) {
+			return 0, fmt.Errorf("short int16 at %d", o)
+		}
+		v := int16(binary.BigEndian.Uint16(p[o : o+2]))
+		o += 2
+		return float32(v), nil
+	}
+
+	phasors := make([]Phasor, cfg.Phnmr)
+	for i := 0; i < cfg.Phnmr; i++ {
+		var a, b float32
+		var err error
+		if cfg.PhFloat {
+			a, err = readF32()
+			if err != nil {
+				return Reading{}, err
+			}
+			b, err = readF32()
+			if err != nil {
+				return Reading{}, err
+			}
+		} else {
+			a, err = readI16()
+			if err != nil {
+				return Reading{}, err
+			}
+			b, err = readI16()
+			if err != nil {
+				return Reading{}, err
+			}
+		}
+		if cfg.Polar {
+			rad := float64(b)
+			phasors[i] = Phasor{
+				Magnitude:    a,
+				PhaseRadians: b,
+				PhaseDegrees: float32(rad * 180.0 / math.Pi),
+				Real:         a * float32(math.Cos(rad)),
+				Imag:         a * float32(math.Sin(rad)),
+			}
+		} else {
+			phasors[i] = calcPhasor(a, b)
+		}
+	}
+
+	var frequency, rocof float32
+	var err error
+	if cfg.FreqFloat {
+		frequency, err = readF32()
+		if err != nil {
+			return Reading{}, err
+		}
+		rocof, err = readF32()
+		if err != nil {
+			return Reading{}, err
+		}
+	} else {
+		var f, r float32
+		f, err = readI16()
+		if err != nil {
+			return Reading{}, err
+		}
+		r, err = readI16()
+		if err != nil {
+			return Reading{}, err
+		}
+		frequency = float32(cfg.FnomHz) + f/1000.0
+		rocof = r / 100.0
+	}
+
+	names := phasorNames(cfg)
+	va, vb, vc, ia := mapPhasorsToStandard(names, phasors)
+
+	var mw, mvar float32
+	for i := 0; i < cfg.Annmr; i++ {
+		var v float32
+		if cfg.AnFloat {
+			v, err = readF32()
+		} else {
+			v, err = readI16()
+		}
+		if err != nil {
+			return Reading{}, err
+		}
+		if i == 0 {
+			mw = v
+		} else if i == 1 {
+			mvar = v
+		}
+	}
+
+	var digital uint16
+	if cfg.Dgnmr > 0 {
+		if o+2 > len(p) {
+			return Reading{}, fmt.Errorf("short digital")
+		}
+		digital = binary.BigEndian.Uint16(p[o:])
+	}
+
+	nominal := float32(cfg.FnomHz)
+	if nominal <= 0 {
+		nominal = 50
+	}
+	frequencyDeviation := frequency - nominal
+
+	seqPos, seqNeg, seqZero, voltageImbalance := calcSequenceMetrics(va, vb, vc)
+	vab_diff := vb.PhaseDegrees - va.PhaseDegrees
+	if vab_diff > 180 {
+		vab_diff -= 360
+	} else if vab_diff < -180 {
+		vab_diff += 360
+	}
+	vbc_diff := vc.PhaseDegrees - vb.PhaseDegrees
+	if vbc_diff > 180 {
+		vbc_diff -= 360
+	} else if vbc_diff < -180 {
+		vbc_diff += 360
+	}
+	vca_diff := va.PhaseDegrees - vc.PhaseDegrees
+	if vca_diff > 180 {
+		vca_diff -= 360
+	} else if vca_diff < -180 {
+		vca_diff += 360
+	}
+
+	s := math.Sqrt(float64(mw*mw + mvar*mvar))
+	pf := float32(1.0)
+	pfDir := "unity"
+	if s > 0.1 {
+		pf = mw / float32(s)
+		if pf > 1.0 {
+			pf = 1.0
+		}
+		if mvar > 0 {
+			pfDir = "lagging"
+		} else if mvar < 0 {
+			pfDir = "leading"
+		}
+	}
+
+	return Reading{
+		PMUName:                  pmuName,
+		SyncWord:                 syncWord,
+		FrameType:                "DATA",
+		FrameSize:                frameSize,
+		IDCode:                   idCode,
+		SOC:                      socRaw,
+		FracSecRaw:               fracsec,
+		TimeQuality:              timeQuality,
+		FracSecCount:             fracCount,
+		Checksum:                 checksumRx,
+		ChecksumValid:            checksumValid,
+		Timestamp:                ts,
+		FrameBytes:               len(raw),
+		Stat:                     stat,
+		StatDetail:               decodeStat(stat),
+		VA:                       va,
+		VB:                       vb,
+		VC:                       vc,
+		IA:                       ia,
+		VoltageImbalancePercent:  voltageImbalance,
+		VAB_PhaseAngleDifference: vab_diff,
+		VBC_PhaseAngleDifference: vbc_diff,
+		VCA_PhaseAngleDifference: vca_diff,
+		SequencePos:              seqPos,
+		SequenceNeg:              seqNeg,
+		SequenceZero:             seqZero,
+		Frequency:                frequency,
+		FrequencyDeviation:       frequencyDeviation,
+		ROCOF:                    rocof,
+		MW:                       mw,
+		MVAR:                     mvar,
+		MVA:                      float32(s),
+		PowerFactor:              pf,
+		PowerFactorLeadLag:       pfDir,
+		TotalPowerReal:           va.Real*ia.Real + va.Imag*ia.Imag,
+		TotalPowerImag:           va.Imag*ia.Real - va.Real*ia.Imag,
+		Digital:                  digital,
+	}, nil
 }
 
 // crc16 computes the CRC-CCITT (0xFFFF) used by C37.118

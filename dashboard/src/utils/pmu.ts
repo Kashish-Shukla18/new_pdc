@@ -1,5 +1,9 @@
 import type { LivePMUState, PMUConfig, PMUMeta, PMUWithMeta } from '../types/dashboard'
 
+/** Display-only labels for the field PMU — everything else comes from live config/telemetry. */
+export const FIELD_PMU_VENDOR = 'ABB'
+export const FIELD_PMU_REGION = 'FIELD'
+
 export function pmuKey(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
 }
@@ -7,15 +11,15 @@ export function pmuKey(name: string) {
 export function metaForDB(name: string, config?: PMUConfig): PMUMeta {
   return {
     substation: config?.name || name,
-    region: config?.region || 'Unknown',
+    region: config?.region || FIELD_PMU_REGION,
     state: '-',
     voltage: '-',
-    vendor: 'Generic PMU',
+    vendor: FIELD_PMU_VENDOR,
     primaryIp: config?.ip || '0.0.0.0',
     redundantIp: '-',
-    targetFps: 50,
-    lat: config?.lat || 20,
-    lon: config?.lon || 70,
+    targetFps: config?.data_rate && config.data_rate > 0 ? config.data_rate : 30,
+    lat: config?.lat ?? 0,
+    lon: config?.lon ?? 0,
   }
 }
 
