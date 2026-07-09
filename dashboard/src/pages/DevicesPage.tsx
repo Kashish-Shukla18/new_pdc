@@ -36,7 +36,7 @@ export function DevicesPage() {
         <div>
           <h2 className="devices-title">Device Inventory & Locations</h2>
           <p className="devices-subtitle">
-            All PMUs registered with the National PDC — substation, voltage class, vendor, IP, and operational status
+            Registered field PMUs — connection details, vendor, region, IP, and live operational status
           </p>
         </div>
         <div className="page-actions">

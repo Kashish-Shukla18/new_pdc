@@ -16,6 +16,7 @@ import (
 
 	"pdc/config"
 	"pdc/monitoring"
+	"pdc/parser"
 )
 
 // ─── IEEE C37.118 constants ───────────────────────────────────────────────────
@@ -398,6 +399,11 @@ func (r *Receiver) connect(ctx context.Context) error {
 	decodeCFG2Details(r.cfg.Name, cfg2)
 	log.Printf("[%s] received CFG2 frame (%d bytes)", r.cfg.Name, len(cfg2))
 	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok", fmt.Sprintf("received CFG2 frame (%d bytes)", len(cfg2)))
+	if profile, err := parser.ParseCFG2Frame(cfg2); err == nil {
+		parser.SetProfile(r.cfg.Name, profile)
+		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d fnom=%dHz polar=%v ph=%d",
+			r.cfg.Name, profile.Station, profile.DataRate, profile.FnomHz, profile.Polar, profile.Phnmr)
+	}
 
 	// ── Step 2: start data transmission ──────────────────────────────────────
 	log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdDataOn))
