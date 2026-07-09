@@ -1,27 +1,28 @@
-// capture-pmu connects to a C37.118 PMU, unpacks CFG2+DATA frames, and writes CSV.
-// There is no link-layer encryption on standard IEEE C37.118 — "decrypt" here means
-// binary unpack (CRC verify + CFG2-driven field decode).
+// capture-pmu connects to a registered PMU, unpacks CFG2+DATA frames, and writes CSV.
 //
 // Usage:
-//   go run ./cmd/capture-pmu -addr 172.24.105.87:4713 -duration 1m -out data/pmu001_1min.csv
+//   go run ./cmd/capture-pmu -api http://127.0.0.1:8081 -duration 1m
+//   go run ./cmd/capture-pmu -addr 172.24.105.87:4713 -name PMU.001 -duration 1m
 package main
 
 import (
-	"encoding/binary"
 	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"pdc/parser"
 )
 
-func crc16(data []byte) uint16 {
+func cmdCRC(data []byte) uint16 {
 	crc := uint16(0xFFFF)
 	for _, b := range data {
 		crc ^= uint16(b) << 8
@@ -39,12 +40,19 @@ func crc16(data []byte) uint16 {
 func buildCMD(idcode uint16, cmd uint16) []byte {
 	f := make([]byte, 18)
 	f[0], f[1] = 0xAA, 0x41
-	binary.BigEndian.PutUint16(f[2:], 18)
-	binary.BigEndian.PutUint16(f[4:], idcode)
-	binary.BigEndian.PutUint32(f[6:], uint32(time.Now().Unix()))
-	binary.BigEndian.PutUint32(f[10:], 0)
-	binary.BigEndian.PutUint16(f[14:], cmd)
-	binary.BigEndian.PutUint16(f[16:], crc16(f[:16]))
+	f[2], f[3] = 0, 18
+	f[4] = byte(idcode >> 8)
+	f[5] = byte(idcode)
+	now := uint32(time.Now().Unix())
+	f[6] = byte(now >> 24)
+	f[7] = byte(now >> 16)
+	f[8] = byte(now >> 8)
+	f[9] = byte(now)
+	f[14] = byte(cmd >> 8)
+	f[15] = byte(cmd)
+	crc := cmdCRC(f[:16])
+	f[16] = byte(crc >> 8)
+	f[17] = byte(crc)
 	return f
 }
 
@@ -53,9 +61,9 @@ func readFrame(r io.Reader) ([]byte, error) {
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return nil, err
 	}
-	n := int(binary.BigEndian.Uint16(hdr[2:]))
+	n := int(hdr[2])<<8 | int(hdr[3])
 	if n < 4 || n > 65535 {
-		return nil, fmt.Errorf("bad frame size %d (hdr=%x)", n, hdr)
+		return nil, fmt.Errorf("bad frame size %d", n)
 	}
 	rest := make([]byte, n-4)
 	if _, err := io.ReadFull(r, rest); err != nil {
@@ -64,293 +72,88 @@ func readFrame(r io.Reader) ([]byte, error) {
 	return append(hdr, rest...), nil
 }
 
-func trimASCII(b []byte) string {
-	s := string(b)
-	if i := strings.IndexByte(s, 0); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
+type pmuConfig struct {
+	Name    string `json:"name"`
+	IP      string `json:"ip"`
+	Port    int    `json:"port"`
+	IDCode  int    `json:"idcode"`
+	Region  string `json:"region"`
 }
 
-type cfg2Info struct {
-	station   string
-	idcode    uint16
-	timeBase  uint32
-	format    uint16
-	phnmr     int
-	annmr     int
-	dgnmr     int
-	fnom      int
-	dataRate  int16
-	channels  []string
-	phasorMag []bool // true => polar (mag,angle); false => rect (real,imag) — from FORMAT bit0
-	phFloat   bool
-	anFloat   bool
-	freqFloat bool
+func loadFromAPI(apiURL, wantName string) (addr string, name string, idcode uint16, err error) {
+	resp, err := http.Get(strings.TrimRight(apiURL, "/") + "/api/pmus")
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", 0, fmt.Errorf("api status %d", resp.StatusCode)
+	}
+	var list []pmuConfig
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return "", "", 0, err
+	}
+	if len(list) == 0 {
+		return "", "", 0, fmt.Errorf("no PMUs registered in API")
+	}
+	var pick *pmuConfig
+	for i := range list {
+		if wantName != "" && list[i].Name == wantName {
+			pick = &list[i]
+			break
+		}
+	}
+	if pick == nil {
+		pick = &list[0]
+	}
+	id := uint16(1)
+	if pick.IDCode > 0 {
+		id = uint16(pick.IDCode)
+	}
+	return fmt.Sprintf("%s:%d", pick.IP, pick.Port), pick.Name, id, nil
 }
 
-func parseCFG2(raw []byte) (*cfg2Info, error) {
-	if len(raw) < 40 || raw[0] != 0xAA || (raw[1]&0x70) != 0x30 {
-		return nil, fmt.Errorf("not a CFG2 frame")
-	}
-	p := raw[14 : len(raw)-2]
-	if len(p) < 34 {
-		return nil, fmt.Errorf("CFG2 payload too short")
-	}
-	o := 0
-	timeBase := binary.BigEndian.Uint32(p[o:])
-	o += 4
-	numPMU := binary.BigEndian.Uint16(p[o:])
-	o += 2
-	if numPMU < 1 {
-		return nil, fmt.Errorf("NUM_PMU=%d", numPMU)
-	}
-	station := trimASCII(p[o : o+16])
-	o += 16
-	id := binary.BigEndian.Uint16(p[o:])
-	o += 2
-	format := binary.BigEndian.Uint16(p[o:])
-	o += 2
-	phnmr := int(binary.BigEndian.Uint16(p[o:]))
-	o += 2
-	annmr := int(binary.BigEndian.Uint16(p[o:]))
-	o += 2
-	dgnmr := int(binary.BigEndian.Uint16(p[o:]))
-	o += 2
-
-	chnCount := phnmr + annmr + 16*dgnmr
-	if len(p) < o+chnCount*16 {
-		return nil, fmt.Errorf("channel names truncated")
-	}
-	channels := make([]string, chnCount)
-	for i := 0; i < chnCount; i++ {
-		channels[i] = trimASCII(p[o+i*16 : o+(i+1)*16])
-	}
-	o += chnCount * 16
-	o += phnmr*4 + annmr*4 // units
-	if dgnmr > 0 {
-		o += dgnmr * 4
-	}
-	if len(p) < o+6 {
-		return nil, fmt.Errorf("fnom/rate truncated")
-	}
-	fnomWord := binary.BigEndian.Uint16(p[o:])
-	o += 2
-	o += 2 // cfgcnt
-	dataRate := int16(binary.BigEndian.Uint16(p[o:]))
-	fnom := 60
-	if fnomWord&1 == 1 {
-		fnom = 50
-	}
-
-	return &cfg2Info{
-		station:   station,
-		idcode:    id,
-		timeBase:  timeBase,
-		format:    format,
-		phnmr:     phnmr,
-		annmr:     annmr,
-		dgnmr:     dgnmr,
-		fnom:      fnom,
-		dataRate:  dataRate,
-		channels:  channels,
-		phasorMag: nil,
-		phFloat:   format&0x0002 != 0,
-		anFloat:   format&0x0004 != 0,
-		freqFloat: format&0x0008 != 0,
-	}, nil
-}
-
-func (c *cfg2Info) polar() bool {
-	// FORMAT bit 0: 0=rectangular, 1=polar
-	return c.format&0x0001 != 0
-}
-
-func (c *cfg2Info) phasorNames() []string {
-	out := make([]string, c.phnmr)
-	copy(out, c.channels[:c.phnmr])
-	return out
-}
-
-func (c *cfg2Info) analogNames() []string {
-	out := make([]string, c.annmr)
-	copy(out, c.channels[c.phnmr:c.phnmr+c.annmr])
-	return out
-}
-
-type row struct {
-	isoTime   string
-	soc       uint32
-	frac      uint32
-	idcode    uint16
-	stat      uint16
-	crcOK     bool
-	freq      float64
-	rocof     float64
-	phasors   [][2]float64 // mag/angle or real/imag
-	analogs   []float64
-	digital   uint16
-	rawSize   int
-}
-
-func unpackData(cfg *cfg2Info, raw []byte) (*row, error) {
-	if len(raw) < 16 || raw[0] != 0xAA || (raw[1]&0x70) != 0x00 {
-		return nil, fmt.Errorf("not a data frame (type=0x%02X size=%d)", raw[1]&0x70, len(raw))
-	}
-	crcRx := binary.BigEndian.Uint16(raw[len(raw)-2:])
-	crcOK := crcRx == crc16(raw[:len(raw)-2])
-
-	id := binary.BigEndian.Uint16(raw[4:6])
-	soc := binary.BigEndian.Uint32(raw[6:10])
-	frac := binary.BigEndian.Uint32(raw[10:14])
-	tq := frac >> 24
-	fracCount := frac & 0x00FFFFFF
-	tb := cfg.timeBase
-	if tb == 0 {
-		tb = 1_000_000
-	}
-	nanos := int64(fracCount) * int64(time.Second) / int64(tb)
-	ts := time.Unix(int64(soc), nanos).UTC()
-
-	p := raw[14 : len(raw)-2]
-	o := 0
-	if len(p) < 2 {
-		return nil, fmt.Errorf("empty payload")
-	}
-	stat := binary.BigEndian.Uint16(p[o:])
-	o += 2
-
-	readF32 := func() (float64, error) {
-		if o+4 > len(p) {
-			return 0, fmt.Errorf("short float at offset %d", o)
-		}
-		v := math.Float32frombits(binary.BigEndian.Uint32(p[o : o+4]))
-		o += 4
-		return float64(v), nil
-	}
-	readI16 := func() (float64, error) {
-		if o+2 > len(p) {
-			return 0, fmt.Errorf("short int16 at offset %d", o)
-		}
-		v := int16(binary.BigEndian.Uint16(p[o : o+2]))
-		o += 2
-		return float64(v), nil
-	}
-
-	phasors := make([][2]float64, cfg.phnmr)
-	for i := 0; i < cfg.phnmr; i++ {
-		var a, b float64
-		var err error
-		if cfg.phFloat {
-			a, err = readF32()
-			if err != nil {
-				return nil, err
-			}
-			b, err = readF32()
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			a, err = readI16()
-			if err != nil {
-				return nil, err
-			}
-			b, err = readI16()
-			if err != nil {
-				return nil, err
-			}
-		}
-		if cfg.polar() {
-			// polar float: magnitude, angle(radians per IEEE)
-			phasors[i] = [2]float64{a, b * 180.0 / math.Pi}
-		} else {
-			mag := math.Hypot(a, b)
-			ang := math.Atan2(b, a) * 180.0 / math.Pi
-			phasors[i] = [2]float64{mag, ang}
-		}
-	}
-
-	var freq, rocof float64
-	var err error
-	if cfg.freqFloat {
-		freq, err = readF32()
-		if err != nil {
-			return nil, err
-		}
-		rocof, err = readF32()
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		freq, err = readI16()
-		if err != nil {
-			return nil, err
-		}
-		rocof, err = readI16()
-		if err != nil {
-			return nil, err
-		}
-		freq = float64(cfg.fnom) + freq/1000.0
-		rocof = rocof / 100.0
-	}
-
-	analogs := make([]float64, cfg.annmr)
-	for i := 0; i < cfg.annmr; i++ {
-		if cfg.anFloat {
-			analogs[i], err = readF32()
-		} else {
-			analogs[i], err = readI16()
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	var dig uint16
-	if cfg.dgnmr > 0 {
-		if o+2 > len(p) {
-			return nil, fmt.Errorf("short digital")
-		}
-		dig = binary.BigEndian.Uint16(p[o:])
-		o += 2
-	}
-
-	_ = tq
-	return &row{
-		isoTime: ts.Format(time.RFC3339Nano),
-		soc:     soc,
-		frac:    fracCount,
-		idcode:  id,
-		stat:    stat,
-		crcOK:   crcOK,
-		freq:    freq,
-		rocof:   rocof,
-		phasors: phasors,
-		analogs: analogs,
-		digital: dig,
-		rawSize: len(raw),
-	}, nil
-}
-
-func f64(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
+func f64(v float32) string { return strconv.FormatFloat(float64(v), 'f', 6, 64) }
 
 func main() {
-	addr := flag.String("addr", "172.24.105.87:4713", "PMU host:port")
-	idcode := flag.Uint("idcode", 1, "command IDCODE")
+	apiURL := flag.String("api", "http://127.0.0.1:8081", "PDC API base URL (loads registered PMU)")
+	addr := flag.String("addr", "", "PMU host:port (overrides -api)")
+	name := flag.String("name", "", "PMU name filter when using -api")
+	idcodeFlag := flag.Uint("idcode", 0, "command IDCODE (0 = from API)")
 	duration := flag.Duration("duration", time.Minute, "capture duration")
-	outPath := flag.String("out", "", "output CSV path (default data/pmu_<ts>.csv)")
-	timeout := flag.Duration("timeout", 10*time.Second, "dial/read timeout during handshake")
+	outPath := flag.String("out", "", "output CSV path")
+	timeout := flag.Duration("timeout", 10*time.Second, "handshake timeout")
 	flag.Parse()
 
+	targetAddr := *addr
+	pmuName := *name
+	idcode := uint16(*idcodeFlag)
+
+	if targetAddr == "" {
+		var err error
+		targetAddr, pmuName, idcode, err = loadFromAPI(*apiURL, *name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "load PMU from API: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if pmuName == "" {
+		pmuName = "PMU"
+	}
+	if idcode == 0 {
+		idcode = 1
+	}
 	if *outPath == "" {
-		*outPath = filepath.Join("data", fmt.Sprintf("pmu_capture_%s.csv", time.Now().Format("20060102_150405")))
+		safe := strings.ReplaceAll(pmuName, " ", "_")
+		*outPath = filepath.Join("data", fmt.Sprintf("%s_%s.csv", safe, time.Now().Format("20060102_150405")))
 	}
 	if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "mkdir: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("target %s for %s -> %s\n", *addr, *duration, *outPath)
+	fmt.Printf("capture %s (%s) for %s -> %s\n", pmuName, targetAddr, *duration, *outPath)
+	fmt.Println("note: stop PDC / Connection Tester if the PMU allows only one TCP client")
 
 	f, err := os.Create(*outPath)
 	if err != nil {
@@ -361,69 +164,51 @@ func main() {
 	w := csv.NewWriter(f)
 
 	var (
-		cfg            *cfg2Info
-		headerWritten  bool
+		profile       parser.Profile
+		headerWritten bool
 		nOK, nBad, sess int
-		deadline       = time.Now().Add(*duration)
+		deadline      = time.Now().Add(*duration)
 	)
 
 	for time.Now().Before(deadline) {
 		sess++
-		conn, err := net.DialTimeout("tcp", *addr, *timeout)
+		conn, err := net.DialTimeout("tcp", targetAddr, *timeout)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "session %d dial failed: %v — retry in 2s\n", sess, err)
+			fmt.Fprintf(os.Stderr, "session %d dial: %v\n", sess, err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		fmt.Printf("session %d connected local=%s\n", sess, conn.LocalAddr())
+		fmt.Printf("session %d connected\n", sess)
 
 		_ = conn.SetDeadline(time.Now().Add(*timeout))
-		if _, err := conn.Write(buildCMD(uint16(*idcode), 0x0005)); err != nil {
-			conn.Close()
-			fmt.Fprintf(os.Stderr, "CFG2 cmd: %v\n", err)
-			time.Sleep(time.Second)
-			continue
-		}
+		_, _ = conn.Write(buildCMD(idcode, 0x0005))
 		cfgRaw, err := readFrame(conn)
 		if err != nil {
 			conn.Close()
 			fmt.Fprintf(os.Stderr, "CFG2 read: %v\n", err)
-			time.Sleep(time.Second)
 			continue
 		}
-		parsed, err := parseCFG2(cfgRaw)
+		profile, err = parser.ParseCFG2Frame(cfgRaw)
 		if err != nil {
 			conn.Close()
 			fmt.Fprintf(os.Stderr, "CFG2 parse: %v\n", err)
-			time.Sleep(time.Second)
 			continue
 		}
-		cfg = parsed
+		parser.SetProfile(pmuName, profile)
+
 		if !headerWritten {
-			fmt.Printf("CFG2 unpacked: station=%q id=%d rate=%d fnom=%dHz format=0x%04X polar=%v ph=%d an=%d dg=%d\n",
-				cfg.station, cfg.idcode, cfg.dataRate, cfg.fnom, cfg.format, cfg.polar(), cfg.phnmr, cfg.annmr, cfg.dgnmr)
-			header := []string{"timestamp_utc", "soc", "fracsec", "idcode", "stat_hex", "crc_ok", "frequency_hz", "rocof_hz_s", "frame_bytes"}
-			for _, name := range cfg.phasorNames() {
-				header = append(header, name+"_mag", name+"_angle_deg")
-			}
-			for _, name := range cfg.analogNames() {
-				header = append(header, name)
-			}
-			if cfg.dgnmr > 0 {
-				header = append(header, "digital_hex")
+			fmt.Printf("CFG2: station=%q rate=%d fnom=%dHz ph=%d an=%d\n",
+				profile.Station, profile.DataRate, profile.FnomHz, profile.Phnmr, profile.Annmr)
+			header := []string{
+				"pmu_name", "timestamp_utc", "soc", "fracsec", "idcode", "stat_hex", "crc_ok",
+				"frequency_hz", "rocof_hz_s", "mw", "mvar", "digital_hex", "frame_bytes",
+				"va_mag", "va_angle_deg", "vb_mag", "vb_angle_deg", "vc_mag", "vc_angle_deg", "ia_mag", "ia_angle_deg",
 			}
 			_ = w.Write(header)
 			headerWritten = true
 		}
 
-		_ = conn.SetDeadline(time.Now().Add(*timeout))
-		if _, err := conn.Write(buildCMD(uint16(*idcode), 0x0002)); err != nil {
-			conn.Close()
-			fmt.Fprintf(os.Stderr, "DATA_ON: %v\n", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
+		_, _ = conn.Write(buildCMD(idcode, 0x0002))
 		sessFrames := 0
 		for time.Now().Before(deadline) {
 			remain := time.Until(deadline)
@@ -433,50 +218,45 @@ func main() {
 			_ = conn.SetReadDeadline(time.Now().Add(remain))
 			raw, err := readFrame(conn)
 			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					if sessFrames == 0 {
-						continue
-					}
-					// idle after data started — keep waiting until overall deadline
+				if ne, ok := err.(net.Error); ok && ne.Timeout() && sessFrames > 0 {
 					continue
 				}
-				fmt.Printf("session %d ended after %d frames: %v\n", sess, sessFrames, err)
+				if sessFrames > 0 {
+					fmt.Printf("session %d ended after %d frames: %v\n", sess, sessFrames, err)
+				}
 				break
 			}
-			r, err := unpackData(cfg, raw)
+			reading, err := parser.ParseDataFrame(pmuName, raw)
 			if err != nil {
 				nBad++
 				continue
 			}
-			rec := []string{
-				r.isoTime,
-				strconv.FormatUint(uint64(r.soc), 10),
-				strconv.FormatUint(uint64(r.frac), 10),
-				strconv.FormatUint(uint64(r.idcode), 10),
-				fmt.Sprintf("0x%04X", r.stat),
-				strconv.FormatBool(r.crcOK),
-				f64(r.freq),
-				f64(r.rocof),
-				strconv.Itoa(r.rawSize),
-			}
-			for _, ph := range r.phasors {
-				rec = append(rec, f64(ph[0]), f64(ph[1]))
-			}
-			for _, a := range r.analogs {
-				rec = append(rec, f64(a))
-			}
-			if cfg.dgnmr > 0 {
-				rec = append(rec, fmt.Sprintf("0x%04X", r.digital))
-			}
-			_ = w.Write(rec)
+			_ = w.Write([]string{
+				pmuName,
+				reading.Timestamp.Format(time.RFC3339Nano),
+				strconv.FormatUint(uint64(reading.SOC), 10),
+				strconv.FormatUint(uint64(reading.FracSecCount), 10),
+				strconv.FormatUint(uint64(reading.IDCode), 10),
+				fmt.Sprintf("0x%04X", reading.Stat),
+				strconv.FormatBool(reading.ChecksumValid),
+				f64(reading.Frequency),
+				f64(reading.ROCOF),
+				f64(reading.MW),
+				f64(reading.MVAR),
+				fmt.Sprintf("0x%04X", reading.Digital),
+				strconv.Itoa(reading.FrameBytes),
+				f64(reading.VA.Magnitude), f64(reading.VA.PhaseDegrees),
+				f64(reading.VB.Magnitude), f64(reading.VB.PhaseDegrees),
+				f64(reading.VC.Magnitude), f64(reading.VC.PhaseDegrees),
+				f64(reading.IA.Magnitude), f64(reading.IA.PhaseDegrees),
+			})
 			nOK++
 			sessFrames++
 			if nOK == 1 || nOK%150 == 0 {
-				fmt.Printf("… %d frames  last f=%.4f Hz\n", nOK, r.freq)
+				fmt.Printf("… %d frames  f=%.4f Hz\n", nOK, reading.Frequency)
 			}
 		}
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		_, _ = conn.Write(buildCMD(uint16(*idcode), 0x0001))
+		_, _ = conn.Write(buildCMD(idcode, 0x0001))
 		conn.Close()
 		w.Flush()
 		if time.Now().Before(deadline) {
@@ -485,15 +265,8 @@ func main() {
 	}
 
 	w.Flush()
-	fmt.Printf("done: wrote %d rows (%d bad) across %d sessions -> %s\n", nOK, nBad, sess, *outPath)
+	fmt.Printf("done: %d rows (%d bad) in %d sessions -> %s\n", nOK, nBad, sess, *outPath)
 	if nOK == 0 {
 		os.Exit(2)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
