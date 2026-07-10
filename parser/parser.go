@@ -8,22 +8,32 @@ import (
 )
 
 const (
-	frameTypeData = 0x00
-	minFrameSize  = 68
+	frameTypeData = 0x00 // SYNC bits 6-4
+	frameTypeMask = 0x70 // mask for frame type (bits 6-4)
+	minFrameSize  = 68   // legacy simulator layout only
 )
 
-// STATDecoded represents all 9 decoded flags from the STAT word
+// STATDecoded is IEEE C37.118.2-2011 Table 7.
 type STATDecoded struct {
-	SyncPMU          bool  // bit 15: 1 if data out of sync
-	DataErr          bool  // bit 14: 1 if data error
-	CFGChange        bool  // bit 13: 1 if config change pending
-	TriggerDetected  bool  // bit 12: 1 if trigger event detected
-	SortMethod       bool  // bit 11: 1 if data sorted by arrival time, 0 if by sample time
-	PMUSyncStatus    bool  // bit 10: 1 if GPS not locked
-	PMUTimeQuality   uint8 // bits 9-7: time quality code (0=locked to UTC, 1-7 various unlocked states)
-	UnlockedDuration uint8 // bits 6-5: unlocked time range (0=<5s, 1=5-10s, 2=10-60s, 3=>60s)
-	DSO              bool  // bit 4: 1 if data was post-processed/digital signature output
-	PMUTriggerReason uint8 // bits 3-0: trigger reason code (0=manual, 1-15 various fault types)
+	DataErrorCode    uint8 `json:"data_error_code"`    // bits 15-14: 00=good, 01=PMU error, 10=test mode, 11=invalid
+	DataError        bool  `json:"data_error"`         // true when DataErrorCode != 0
+	CFGChange        bool  `json:"cfg_change"`         // bit 13
+	TriggerDetected  bool  `json:"trigger_detected"`   // bit 12
+	SortMethod       bool  `json:"sort_method"`        // bit 11: 0=timestamp, 1=arrival
+	PMUSyncStatus    bool  `json:"pmu_sync_status"`    // bit 10: 0=locked to UTC, 1=unlocked
+	PMUTimeQuality   uint8 `json:"pmu_time_quality"`   // bits 9-6 (4-bit TQ code)
+	UnlockedDuration uint8 `json:"unlocked_duration"`  // bits 5-4: 00=<10s, 01=10-100s, 10=100-1000s, 11=>1000s
+	PMUTriggerReason uint8 `json:"pmu_trigger_reason"` // bits 3-0
+}
+
+// MsgTimeQuality is FRACSEC bits 31-24 (IEEE C37.118.2-2011 Table 5).
+type MsgTimeQuality struct {
+	Raw                 uint8 `json:"raw"`
+	Reserved            bool  `json:"reserved"`              // bit 7
+	LeapSecondDirection bool  `json:"leap_second_direction"` // bit 6: 0=add, 1=delete
+	LeapSecondOccurred  bool  `json:"leap_second_occurred"`  // bit 5
+	LeapSecondPending   bool  `json:"leap_second_pending"`   // bit 4
+	TimeQualityCode     uint8 `json:"time_quality_code"`     // bits 3-0
 }
 
 // Phasor represents a single phasor measurement with derived metrics
@@ -47,17 +57,21 @@ type Reading struct {
 	FrameSize     int       `json:"frame_size"`
 	IDCode        uint16    `json:"idcode"`
 	SOC           uint32    `json:"soc"`
-	FracSecRaw    uint32    `json:"fracsec_raw"`
-	TimeQuality   uint8     `json:"time_quality"`
-	FracSecCount  uint32    `json:"fracsec_count"`
-	Checksum      uint16    `json:"checksum"`
-	ChecksumValid bool      `json:"checksum_valid"`
-	Timestamp     time.Time `json:"timestamp"`
-	FrameBytes    int       `json:"frame_bytes"`
+	FracSecRaw    uint32         `json:"fracsec_raw"`
+	TimeQuality   uint8          `json:"time_quality"` // FRACSEC high byte (raw MSG_TQ)
+	MsgTQ         MsgTimeQuality `json:"msg_tq"`
+	FracSecCount  uint32         `json:"fracsec_count"`
+	Checksum      uint16         `json:"checksum"`
+	ChecksumValid bool           `json:"checksum_valid"`
+	Timestamp     time.Time      `json:"timestamp"`
+	FrameBytes    int            `json:"frame_bytes"`
 
 	// ─ STAT Word (decoded)
 	Stat       uint16      `json:"stat_raw"`
 	StatDetail STATDecoded `json:"stat_decoded"`
+
+	// ─ All digital status words (Digital keeps word 0 for compatibility)
+	Digitals []uint16 `json:"digitals,omitempty"`
 
 	// ─ Phasors (raw components + derived metrics)
 	VA Phasor `json:"va"`
@@ -92,19 +106,32 @@ type Reading struct {
 	Digital uint16 `json:"digital"`
 }
 
-// decodeStat unpacks all 9 flag fields from the STAT word
+// decodeStat unpacks STAT per IEEE C37.118.2-2011 Table 7.
 func decodeStat(stat uint16) STATDecoded {
+	code := uint8((stat >> 14) & 0x3)
 	return STATDecoded{
-		SyncPMU:          (stat>>15)&1 == 1,
-		DataErr:          (stat>>14)&1 == 1,
+		DataErrorCode:    code,
+		DataError:        code != 0,
 		CFGChange:        (stat>>13)&1 == 1,
 		TriggerDetected:  (stat>>12)&1 == 1,
 		SortMethod:       (stat>>11)&1 == 1,
 		PMUSyncStatus:    (stat>>10)&1 == 1,
-		PMUTimeQuality:   uint8((stat >> 7) & 0x7),
-		UnlockedDuration: uint8((stat >> 5) & 0x3),
-		DSO:              (stat>>4)&1 == 1,
+		PMUTimeQuality:   uint8((stat >> 6) & 0xF),
+		UnlockedDuration: uint8((stat >> 4) & 0x3),
 		PMUTriggerReason: uint8(stat & 0xF),
+	}
+}
+
+// decodeMsgTQ unpacks FRACSEC bits 31-24 per Table 5.
+func decodeMsgTQ(fracsec uint32) MsgTimeQuality {
+	b := uint8(fracsec >> 24)
+	return MsgTimeQuality{
+		Raw:                 b,
+		Reserved:            (b>>7)&1 == 1,
+		LeapSecondDirection: (b>>6)&1 == 1,
+		LeapSecondOccurred:  (b>>5)&1 == 1,
+		LeapSecondPending:   (b>>4)&1 == 1,
+		TimeQualityCode:     b & 0x0F,
 	}
 }
 
@@ -154,12 +181,19 @@ func calcSequenceMetrics(va, vb, vc Phasor) (float32, float32, float32, float32)
 	return float32(vpPos), float32(vpNeg), float32(vpZero), imbalance
 }
 
-// ParseDataFrame decodes one CRC-verified C37.118 data frame.
-// When a CFG2 profile was registered for pmuName, channel layout follows that profile.
+// ParseDataFrame decodes one C37.118 DATA frame using the registered CFG2 profile.
+// A CFG2 profile is required (IEEE layout is not fixed without configuration).
 func ParseDataFrame(pmuName string, raw []byte) (Reading, error) {
-	if profile, ok := GetProfile(pmuName); ok {
-		return parseDataWithProfile(pmuName, raw, profile)
+	profile, ok := GetProfile(pmuName)
+	if !ok {
+		return Reading{}, fmt.Errorf("no CFG2 profile for %q; complete handshake first", pmuName)
 	}
+	return parseDataWithProfile(pmuName, raw, profile)
+}
+
+// ParseDataFrameLegacy decodes the fixed simulator layout (4 float rectangular phasors).
+// Prefer ParseDataFrame with a CFG2 profile for field PMUs.
+func ParseDataFrameLegacy(pmuName string, raw []byte) (Reading, error) {
 	return parseDataLegacy(pmuName, raw)
 }
 
@@ -170,8 +204,8 @@ func parseDataLegacy(pmuName string, raw []byte) (Reading, error) {
 	if raw[0] != 0xAA {
 		return Reading{}, fmt.Errorf("invalid sync byte: 0x%02X", raw[0])
 	}
-	if raw[1]&0xF0 != frameTypeData {
-		return Reading{}, fmt.Errorf("not a data frame: type=0x%02X", raw[1]&0xF0)
+	if raw[1]&frameTypeMask != frameTypeData {
+		return Reading{}, fmt.Errorf("not a data frame: type=0x%02X", raw[1]&frameTypeMask)
 	}
 
 	frameSize := int(binary.BigEndian.Uint16(raw[2:4]))
@@ -189,12 +223,17 @@ func parseDataLegacy(pmuName string, raw []byte) (Reading, error) {
 	checksumValid := checksumRx == checksumCalc
 
 	timeQuality := uint8(fracsec >> 24)
+	msgTQ := decodeMsgTQ(fracsec)
 
 	// Simulator uses TIME_BASE=1_000_000 and stores fraction count in lower 24 bits.
 	fracCountRaw := fracsec & 0x00FFFFFF
 	fracCount := int64(fracCountRaw)
 	nanos := (fracCount * int64(time.Second)) / 1_000_000
 	ts := time.Unix(soc, nanos).UTC()
+
+	if !checksumValid {
+		return Reading{}, fmt.Errorf("CRC mismatch: rx=0x%04X calc=0x%04X", checksumRx, checksumCalc)
+	}
 
 	p := raw[14 : len(raw)-2]
 	if len(p) < 52 {
@@ -291,6 +330,7 @@ func parseDataLegacy(pmuName string, raw []byte) (Reading, error) {
 		SOC:                      socRaw,
 		FracSecRaw:               fracsec,
 		TimeQuality:              timeQuality,
+		MsgTQ:                    msgTQ,
 		FracSecCount:             fracCountRaw,
 		Checksum:                 checksumRx,
 		ChecksumValid:            checksumValid,
@@ -326,7 +366,7 @@ func parseDataLegacy(pmuName string, raw []byte) (Reading, error) {
 }
 
 func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, error) {
-	if len(raw) < 16 || raw[0] != 0xAA || (raw[1]&0xF0) != frameTypeData {
+	if len(raw) < 16 || raw[0] != 0xAA || (raw[1]&frameTypeMask) != frameTypeData {
 		return Reading{}, fmt.Errorf("not a data frame")
 	}
 	frameSize := int(binary.BigEndian.Uint16(raw[2:4]))
@@ -339,8 +379,12 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	socRaw := binary.BigEndian.Uint32(raw[6:10])
 	fracsec := binary.BigEndian.Uint32(raw[10:14])
 	checksumRx := binary.BigEndian.Uint16(raw[len(raw)-2:])
-	checksumValid := checksumRx == crc16(raw[:len(raw)-2])
-	timeQuality := uint8(fracsec >> 24)
+	checksumCalc := crc16(raw[:len(raw)-2])
+	if checksumRx != checksumCalc {
+		return Reading{}, fmt.Errorf("CRC mismatch: rx=0x%04X calc=0x%04X", checksumRx, checksumCalc)
+	}
+	msgTQ := decodeMsgTQ(fracsec)
+	timeQuality := msgTQ.Raw
 
 	tb := cfg.TimeBase
 	if tb == 0 {
@@ -351,10 +395,19 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	ts := time.Unix(int64(socRaw), nanos).UTC()
 
 	p := raw[14 : len(raw)-2]
-	o := 0
-	if len(p) < 2 {
-		return Reading{}, fmt.Errorf("empty payload")
+	want := cfg.DataPayloadBytes
+	if want == 0 {
+		want = ExpectedDataPayloadSize(cfg)
 	}
+	totalWant := cfg.TotalDataPayloadBytes
+	if totalWant == 0 {
+		totalWant = want
+	}
+	if len(p) != totalWant {
+		return Reading{}, fmt.Errorf("payload length %d != expected %d (first_block=%d NUM_PMU=%d)", len(p), totalWant, want, cfg.NumPMU)
+	}
+
+	o := 0
 	stat := binary.BigEndian.Uint16(p[o:])
 	o += 2
 
@@ -366,55 +419,96 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		o += 4
 		return v, nil
 	}
-	readI16 := func() (float32, error) {
+	readI16 := func() (int16, error) {
 		if o+2 > len(p) {
 			return 0, fmt.Errorf("short int16 at %d", o)
 		}
 		v := int16(binary.BigEndian.Uint16(p[o : o+2]))
 		o += 2
-		return float32(v), nil
+		return v, nil
+	}
+	readU16 := func() (uint16, error) {
+		if o+2 > len(p) {
+			return 0, fmt.Errorf("short uint16 at %d", o)
+		}
+		v := binary.BigEndian.Uint16(p[o : o+2])
+		o += 2
+		return v, nil
+	}
+
+	phScale := func(i int) float64 {
+		if i < len(cfg.PhUnits) && cfg.PhUnits[i].Factor > 0 {
+			return cfg.PhUnits[i].Factor
+		}
+		return 1
+	}
+	anScale := func(i int) float64 {
+		if i < len(cfg.AnUnits) && cfg.AnUnits[i].Factor > 0 {
+			return cfg.AnUnits[i].Factor
+		}
+		return 1
 	}
 
 	phasors := make([]Phasor, cfg.Phnmr)
 	for i := 0; i < cfg.Phnmr; i++ {
-		var a, b float32
-		var err error
+		scale := float32(phScale(i))
 		if cfg.PhFloat {
-			a, err = readF32()
+			a, err := readF32()
 			if err != nil {
 				return Reading{}, err
 			}
-			b, err = readF32()
+			b, err := readF32()
 			if err != nil {
 				return Reading{}, err
 			}
-		} else {
-			a, err = readI16()
+			if cfg.Polar {
+				rad := float64(b)
+				phasors[i] = Phasor{
+					Magnitude:    a,
+					PhaseRadians: b,
+					PhaseDegrees: float32(rad * 180.0 / math.Pi),
+					Real:         a * float32(math.Cos(rad)),
+					Imag:         a * float32(math.Sin(rad)),
+				}
+			} else {
+				phasors[i] = calcPhasor(a, b)
+			}
+		} else if cfg.Polar {
+			// Integer polar: magnitude uint16, angle int16 in radians × 10^4
+			magRaw, err := readU16()
 			if err != nil {
 				return Reading{}, err
 			}
-			b, err = readI16()
+			angRaw, err := readI16()
 			if err != nil {
 				return Reading{}, err
 			}
-		}
-		if cfg.Polar {
-			rad := float64(b)
+			mag := float32(magRaw) * scale
+			rad := float64(angRaw) / 10000.0
 			phasors[i] = Phasor{
-				Magnitude:    a,
-				PhaseRadians: b,
+				Magnitude:    mag,
+				PhaseRadians: float32(rad),
 				PhaseDegrees: float32(rad * 180.0 / math.Pi),
-				Real:         a * float32(math.Cos(rad)),
-				Imag:         a * float32(math.Sin(rad)),
+				Real:         mag * float32(math.Cos(rad)),
+				Imag:         mag * float32(math.Sin(rad)),
 			}
 		} else {
-			phasors[i] = calcPhasor(a, b)
+			// Integer rectangular: both int16 × PHUNIT
+			reRaw, err := readI16()
+			if err != nil {
+				return Reading{}, err
+			}
+			imRaw, err := readI16()
+			if err != nil {
+				return Reading{}, err
+			}
+			phasors[i] = calcPhasor(float32(reRaw)*scale, float32(imRaw)*scale)
 		}
 	}
 
 	var frequency, rocof float32
-	var err error
 	if cfg.FreqFloat {
+		var err error
 		frequency, err = readF32()
 		if err != nil {
 			return Reading{}, err
@@ -424,17 +518,16 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 			return Reading{}, err
 		}
 	} else {
-		var f, r float32
-		f, err = readI16()
+		f, err := readI16()
 		if err != nil {
 			return Reading{}, err
 		}
-		r, err = readI16()
+		r, err := readI16()
 		if err != nil {
 			return Reading{}, err
 		}
-		frequency = float32(cfg.FnomHz) + f/1000.0
-		rocof = r / 100.0
+		frequency = float32(cfg.FnomHz) + float32(f)/1000.0
+		rocof = float32(r) / 100.0
 	}
 
 	names := phasorNames(cfg)
@@ -444,12 +537,17 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	for i := 0; i < cfg.Annmr; i++ {
 		var v float32
 		if cfg.AnFloat {
-			v, err = readF32()
+			fv, err := readF32()
+			if err != nil {
+				return Reading{}, err
+			}
+			v = fv
 		} else {
-			v, err = readI16()
-		}
-		if err != nil {
-			return Reading{}, err
+			iv, err := readI16()
+			if err != nil {
+				return Reading{}, err
+			}
+			v = float32(iv) * float32(anScale(i))
 		}
 		if i == 0 {
 			mw = v
@@ -458,12 +556,21 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		}
 	}
 
-	var digital uint16
-	if cfg.Dgnmr > 0 {
-		if o+2 > len(p) {
-			return Reading{}, fmt.Errorf("short digital")
+	digitals := make([]uint16, cfg.Dgnmr)
+	for i := 0; i < cfg.Dgnmr; i++ {
+		w, err := readU16()
+		if err != nil {
+			return Reading{}, err
 		}
-		digital = binary.BigEndian.Uint16(p[o:])
+		digitals[i] = w
+	}
+	var digital uint16
+	if len(digitals) > 0 {
+		digital = digitals[0]
+	}
+
+	if o != want {
+		return Reading{}, fmt.Errorf("first PMU block consumed %d bytes, expected %d", o, want)
 	}
 
 	nominal := float32(cfg.FnomHz)
@@ -516,9 +623,10 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		SOC:                      socRaw,
 		FracSecRaw:               fracsec,
 		TimeQuality:              timeQuality,
+		MsgTQ:                    msgTQ,
 		FracSecCount:             fracCount,
 		Checksum:                 checksumRx,
-		ChecksumValid:            checksumValid,
+		ChecksumValid:            true,
 		Timestamp:                ts,
 		FrameBytes:               len(raw),
 		Stat:                     stat,
@@ -545,6 +653,7 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		TotalPowerReal:           va.Real*ia.Real + va.Imag*ia.Imag,
 		TotalPowerImag:           va.Imag*ia.Real - va.Real*ia.Imag,
 		Digital:                  digital,
+		Digitals:                 digitals,
 	}, nil
 }
 

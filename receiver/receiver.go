@@ -24,13 +24,17 @@ import (
 const (
 	syncByte = 0xAA // SYNC leading byte for all C37.118 frames
 
-	// Frame type nibbles (upper nibble of FRAMETYP byte)
+	// Frame type in SYNC bits 6-4 (mask with frameTypeMask). Version is bits 3-0.
+	frameTypeMask = 0x70
 	frameTypeData = 0x00
 	frameTypeHdr  = 0x10
 	frameTypeCfg1 = 0x20
 	frameTypeCfg2 = 0x30
-	frameTypeCmd  = 0x41
+	frameTypeCmd  = 0x40
 	frameTypeCfg3 = 0x50
+
+	// C37.118.2-2011 version number in SYNC bits 3-0.
+	syncVersion = 0x02
 
 	// CMD word values (sent inside a CMD frame)
 	cmdDataOff  uint16 = 0x0001 // turn off data transmission
@@ -67,7 +71,7 @@ func buildCMDFrame(idcode uint16, cmd uint16) []byte {
 	buf := make([]byte, frameSize)
 
 	buf[0] = syncByte
-	buf[1] = frameTypeCmd // frame type = CMD
+	buf[1] = frameTypeCmd | syncVersion // type=CMD (100), version=2
 	binary.BigEndian.PutUint16(buf[2:], frameSize)
 	binary.BigEndian.PutUint16(buf[4:], idcode)
 
@@ -93,8 +97,8 @@ func readFrame(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("invalid SYNC byte: 0x%02X", hdr[0])
 	}
 	frameSize := int(binary.BigEndian.Uint16(hdr[2:]))
-	if frameSize < 4 {
-		return nil, fmt.Errorf("frame size too small: %d", frameSize)
+	if frameSize < 16 {
+		return nil, fmt.Errorf("frame size too small: %d (min 16)", frameSize)
 	}
 
 	buf := make([]byte, frameSize)
@@ -112,12 +116,12 @@ func readFrame(r io.Reader) ([]byte, error) {
 	return buf, nil
 }
 
-// frameType returns the FRAMETYP nibble of a raw frame.
+// frameType returns the frame type field (SYNC bits 6-4).
 func frameType(raw []byte) byte {
 	if len(raw) < 2 {
 		return 0xFF
 	}
-	return raw[1] & 0xF0
+	return raw[1] & frameTypeMask
 }
 
 func frameTypeName(frameType byte) string {
@@ -399,10 +403,15 @@ func (r *Receiver) connect(ctx context.Context) error {
 	decodeCFG2Details(r.cfg.Name, cfg2)
 	log.Printf("[%s] received CFG2 frame (%d bytes)", r.cfg.Name, len(cfg2))
 	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok", fmt.Sprintf("received CFG2 frame (%d bytes)", len(cfg2)))
-	if profile, err := parser.ParseCFG2Frame(cfg2); err == nil {
+	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
+		return fmt.Errorf("parse CFG2: %w", err)
+	} else {
 		parser.SetProfile(r.cfg.Name, profile)
-		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d fnom=%dHz polar=%v ph=%d",
-			r.cfg.Name, profile.Station, profile.DataRate, profile.FnomHz, profile.Polar, profile.Phnmr)
+		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d fnom=%dHz polar=%v ph=%d an=%d dg=%d cfgcnt=%d",
+			r.cfg.Name, profile.Station, profile.DataRate, profile.FnomHz, profile.Polar, profile.Phnmr, profile.Annmr, profile.Dgnmr, profile.CfgCnt)
+		if profile.IDCode != 0 && r.cfg.IDCode != 0 && profile.IDCode != r.cfg.IDCode {
+			log.Printf("[%s] warning: CFG2 idcode=%d != configured idcode=%d", r.cfg.Name, profile.IDCode, r.cfg.IDCode)
+		}
 	}
 
 	// ── Step 2: start data transmission ──────────────────────────────────────
