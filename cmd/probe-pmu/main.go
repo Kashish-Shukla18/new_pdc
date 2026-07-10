@@ -27,7 +27,7 @@ func crc(data []byte) uint16 {
 
 func cmd(id uint16, word uint16) []byte {
 	f := make([]byte, 18)
-	f[0], f[1] = 0xAA, 0x41
+	f[0], f[1] = 0xAA, 0x42 // CMD type=0x40, version=2
 	binary.BigEndian.PutUint16(f[2:], 18)
 	binary.BigEndian.PutUint16(f[4:], id)
 	binary.BigEndian.PutUint32(f[6:], uint32(time.Now().Unix()))
