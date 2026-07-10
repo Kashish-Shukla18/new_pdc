@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -39,7 +40,7 @@ func cmdCRC(data []byte) uint16 {
 
 func buildCMD(idcode uint16, cmd uint16) []byte {
 	f := make([]byte, 18)
-	f[0], f[1] = 0xAA, 0x41
+	f[0], f[1] = 0xAA, 0x42 // CMD type=0x40, version=2 (C37.118.2-2011)
 	f[2], f[3] = 0, 18
 	f[4] = byte(idcode >> 8)
 	f[5] = byte(idcode)
@@ -62,14 +63,20 @@ func readFrame(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	n := int(hdr[2])<<8 | int(hdr[3])
-	if n < 4 || n > 65535 {
+	if n < 16 || n > 65535 {
 		return nil, fmt.Errorf("bad frame size %d", n)
 	}
 	rest := make([]byte, n-4)
 	if _, err := io.ReadFull(r, rest); err != nil {
 		return nil, err
 	}
-	return append(hdr, rest...), nil
+	buf := append(hdr, rest...)
+	want := binary.BigEndian.Uint16(buf[n-2:])
+	got := cmdCRC(buf[:n-2])
+	if want != got {
+		return nil, fmt.Errorf("CRC mismatch: want=0x%04X got=0x%04X", want, got)
+	}
+	return buf, nil
 }
 
 type pmuConfig struct {
