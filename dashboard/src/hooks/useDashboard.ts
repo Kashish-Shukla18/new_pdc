@@ -5,9 +5,6 @@ import {
   computeAnalyticsKpis,
   computeAnalyticsRecs,
   computeAnglePairs,
-  computeIslandingRows,
-  computeOscillationModes,
-  computeVoltageProfile,
   topAnglePairsForChart,
 } from '../utils/analytics'
 import {
@@ -37,6 +34,8 @@ import {
   pmuKey,
   toneFromStatus,
 } from '../utils/pmu'
+import { displayPhasors } from '../utils/phasorLabels'
+
 
 export function useDashboard() {
   const [dashboard, setDashboard] = useState<DashboardState>(emptyDashboardState)
@@ -260,12 +259,19 @@ export function useDashboard() {
     for (const pmu of pmus) {
       const key = pmuKey(pmu.name)
       const trend = pmu.trends.slice(-120)
+      const fnom = pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : 60
       for (const point of trend) {
         const row = rows.get(point.ts) ?? { ts: point.ts }
+        const freqDev =
+          typeof point.frequencyDev === 'number'
+            ? point.frequencyDev
+            : point.frequency - fnom
         row[`${key}__frequency`] = point.frequency
+        row[`${key}__frequencyDev`] = freqDev
         row[`${key}__mw`] = point.mw
         row[`${key}__mvar`] = point.mvar
         row[`${key}__rocof`] = point.rocof
+        row.fnom = fnom
         rows.set(point.ts, row)
       }
     }
@@ -329,24 +335,33 @@ export function useDashboard() {
     })
   }, [pmus, deviceSearch, statusFilter, regionFilter])
 
+  const frameLineKeyRef = useRef('')
+
   useEffect(() => {
-    if (!selectedFramePMU) return
-    if (isPaused) return
+    if (!selectedFramePMU || isPaused) return
+    const frame = selectedFramePMU.lastFrame
+    if (!frame || !frame.soc) return
 
-    const timer = window.setInterval(() => {
-      setFrameLines((current) => {
-        const selected = pmus.find((pmu) => pmu.name === selectedFramePMUName)
-        if (!selected) return current
-        const now = Date.now()
-        const soc = Math.floor(now / 1000)
-        const frac = String(Math.floor((now % 1000) * 1000)).padStart(6, '0')
-        const line = `SOC ${soc}  FRACSEC ${frac}  F ${(selected.lastReading?.frequency ?? 0).toFixed(4)}  ROCOF ${(selected.lastReading?.rocof ?? 0).toFixed(4)}  STAT ${selected.connected ? '0x0000' : '0x2000'}`
-        return [line, ...current].slice(0, 45)
-      })
-    }, 1000)
+    const key = `${selectedFramePMU.name}:${frame.soc}:${frame.fracSecCount}:${selectedFramePMU.totalFrames}`
+    if (key === frameLineKeyRef.current) return
+    frameLineKeyRef.current = key
 
-    return () => window.clearInterval(timer)
-  }, [isPaused, pmus, selectedFramePMU, selectedFramePMUName])
+    const fracHex = `0x${(frame.fracSecRaw >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+    const statHex = `0x${(frame.stat >>> 0).toString(16).toUpperCase().padStart(4, '0')}`
+    const digHex = `0x${((frame.digital ?? 0) >>> 0).toString(16).toUpperCase().padStart(4, '0')}`
+    const line =
+      `SOC ${frame.soc}  FRACSEC ${fracHex} (${frame.fracSecCount} µs)  ` +
+      `F ${(selectedFramePMU.lastReading?.frequency ?? 0).toFixed(4)}  ` +
+      `ROCOF ${(selectedFramePMU.lastReading?.rocof ?? 0).toFixed(4)}  ` +
+      `STAT ${statHex}  DIG ${digHex}`
+
+    setFrameLines((current) => [line, ...current].slice(0, 45))
+  }, [isPaused, selectedFramePMU])
+
+  useEffect(() => {
+    frameLineKeyRef.current = ''
+    setFrameLines([])
+  }, [selectedFramePMUName])
 
   const connectivityRows = useMemo(() => computeConnectivityRows(pmus), [pmus])
   const connectivityKpis = useMemo(() => computeConnectivityKpis(connectivityRows), [connectivityRows])
@@ -361,9 +376,6 @@ export function useDashboard() {
 
   const anglePairs = useMemo(() => computeAnglePairs(pmus), [pmus])
   const chartAnglePairs = useMemo(() => topAnglePairsForChart(pmus), [pmus])
-  const oscillationModes = useMemo(() => computeOscillationModes(pmus), [pmus])
-  const islandingRows = useMemo(() => computeIslandingRows(pmus), [pmus])
-  const voltageProfile = useMemo(() => computeVoltageProfile(pmus), [pmus])
 
   const analyticsRecs = useMemo(
     () => computeAnalyticsRecs(pmus, anglePairs, connectivityRows, events),
@@ -415,12 +427,22 @@ export function useDashboard() {
     { id: 'docs', label: 'Documentation', section: 'Resources' },
   ], [pmus.length, connectivityRows])
 
-  const phasorItems = useMemo(() => [
-    { label: 'VA', value: selectedFramePMU?.lastPhasor?.va },
-    { label: 'VB', value: selectedFramePMU?.lastPhasor?.vb },
-    { label: 'VC', value: selectedFramePMU?.lastPhasor?.vc },
-    { label: 'IA', value: selectedFramePMU?.lastPhasor?.ia },
-  ], [selectedFramePMU])
+  const phasorItems = useMemo(() => {
+    const channels = selectedFramePMU?.lastChannels?.phasors
+    if (channels?.length) {
+      return displayPhasors(channels).map((p) => ({
+        label: p.label,
+        cfgName: p.cfgName,
+        value: { magnitude: p.magnitude, angleDeg: p.angleDeg },
+      }))
+    }
+    return [
+      { label: 'VA', cfgName: 'VA', value: selectedFramePMU?.lastPhasor?.va },
+      { label: 'VB', cfgName: 'VB', value: selectedFramePMU?.lastPhasor?.vb },
+      { label: 'VC', cfgName: 'VC', value: selectedFramePMU?.lastPhasor?.vc },
+      { label: 'IA', cfgName: 'IA', value: selectedFramePMU?.lastPhasor?.ia },
+    ]
+  }, [selectedFramePMU])
 
   return {
     dashboard,
@@ -481,9 +503,6 @@ export function useDashboard() {
     anglePairs,
     chartAnglePairs,
     angleHistory,
-    oscillationModes,
-    islandingRows,
-    voltageProfile,
     analyticsKpis,
     analyticsRecs,
     filteredHelp,

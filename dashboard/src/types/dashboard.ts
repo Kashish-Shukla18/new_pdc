@@ -10,9 +10,17 @@ export type TabId =
 export type TrendPoint = {
   ts: number
   frequency: number
+  frequencyDev?: number
   mw: number
   mvar: number
   rocof: number
+  statDataError?: boolean
+  va?: number
+  vb?: number
+  vc?: number
+  ia?: number
+  ib?: number
+  ic?: number
 }
 
 export type PhasorVector = {
@@ -26,6 +34,82 @@ export type PhasorSnapshot = {
   vc: PhasorVector
   ia: PhasorVector
   ts: number
+}
+
+export type FrameStamp = {
+  soc: number
+  fracSecRaw: number
+  fracSecCount: number
+  timeQuality: number
+  msgTq?: {
+    raw: number
+    time_quality_code?: number
+    timeQualityCode?: number
+  }
+  stat: number
+  statDetail?: {
+    data_error?: boolean
+    dataError?: boolean
+    data_error_code?: number
+    dataErrorCode?: number
+    cfg_change?: boolean
+    cfgChange?: boolean
+    trigger_detected?: boolean
+    triggerDetected?: boolean
+    pmu_sync_status?: boolean
+    pmuSyncStatus?: boolean
+    pmu_time_quality?: number
+    pmuTimeQuality?: number
+    unlocked_duration?: number
+    unlockedDuration?: number
+  }
+  idCode: number
+  syncWord: number
+  digital?: number
+  digitals?: number[]
+}
+
+export type NamedPhasorView = {
+  name: string
+  magnitude: number
+  angleDeg: number
+}
+
+export type NamedAnalogView = {
+  name: string
+  value: number
+}
+
+export type DigitalBitView = {
+  name: string
+  bit: number
+  set: boolean
+}
+
+export type ChannelSnapshot = {
+  phasors: NamedPhasorView[]
+  analogs: NamedAnalogView[]
+  digitalBits: DigitalBitView[]
+  ts: number
+}
+
+export type CFGSummary = {
+  available: boolean
+  syncWord: number
+  idCode: number
+  station: string
+  fnomHz: number
+  dataRate: number
+  format: number
+  polar: boolean
+  phFloat: boolean
+  anFloat: boolean
+  freqFloat: boolean
+  phasors: string[]
+  analogs: string[]
+  digitalWords: number
+  cfgCnt: number
+  headerText?: string
 }
 
 export type LivePMUState = {
@@ -44,7 +128,12 @@ export type LivePMUState = {
   spoolQueued: number
   lastReading: TrendPoint
   lastPhasor: PhasorSnapshot
+  lastChannels?: ChannelSnapshot
+  lastFrame?: FrameStamp
+  cfg?: CFGSummary
   trends: TrendPoint[]
+  fnomHz?: number
+  statDataError?: boolean
 }
 
 export type DashboardState = {

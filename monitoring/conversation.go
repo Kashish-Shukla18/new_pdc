@@ -25,11 +25,19 @@ type ConversationEvent struct {
 }
 
 type TrendPoint struct {
-	TS        int64   `json:"ts"`
-	Frequency float64 `json:"frequency"`
-	MW        float64 `json:"mw"`
-	MVAR      float64 `json:"mvar"`
-	ROCOF     float64 `json:"rocof"`
+	TS             int64   `json:"ts"`
+	Frequency      float64 `json:"frequency"`
+	FrequencyDev   float64 `json:"frequencyDev"` // Hz relative to CFG FNOM
+	MW             float64 `json:"mw"`
+	MVAR           float64 `json:"mvar"`
+	ROCOF          float64 `json:"rocof"`
+	StatDataError  bool    `json:"statDataError"`
+	VA             float64 `json:"va"`
+	VB             float64 `json:"vb"`
+	VC             float64 `json:"vc"`
+	IA             float64 `json:"ia"`
+	IB             float64 `json:"ib"`
+	IC             float64 `json:"ic"`
 }
 
 type PhasorVector struct {
@@ -43,6 +51,66 @@ type PhasorSnapshot struct {
 	VC PhasorVector `json:"vc"`
 	IA PhasorVector `json:"ia"`
 	TS int64        `json:"ts"`
+}
+
+// FrameStamp is timing/STAT from the latest parsed DATA frame (wire values).
+type FrameStamp struct {
+	SOC          uint32             `json:"soc"`
+	FracSecRaw   uint32             `json:"fracSecRaw"`
+	FracSecCount uint32             `json:"fracSecCount"`
+	TimeQuality  uint8              `json:"timeQuality"`
+	MsgTQ        parser.MsgTimeQuality `json:"msgTq"`
+	Stat         uint16             `json:"stat"`
+	StatDetail   parser.STATDecoded `json:"statDetail"`
+	IDCode       uint16             `json:"idCode"`
+	SyncWord     uint16             `json:"syncWord"`
+	Digital      uint16             `json:"digital"`
+	Digitals     []uint16           `json:"digitals,omitempty"`
+}
+
+type NamedPhasorView struct {
+	Name      string  `json:"name"`
+	Magnitude float64 `json:"magnitude"`
+	AngleDeg  float64 `json:"angleDeg"`
+}
+
+type NamedAnalogView struct {
+	Name  string  `json:"name"`
+	Value float64 `json:"value"`
+}
+
+type DigitalBitView struct {
+	Name string `json:"name"`
+	Bit  int    `json:"bit"`
+	Set  bool   `json:"set"`
+}
+
+// ChannelSnapshot is the full CFG-driven data frame decode for the inspector page.
+type ChannelSnapshot struct {
+	Phasors     []NamedPhasorView `json:"phasors"`
+	Analogs     []NamedAnalogView `json:"analogs"`
+	DigitalBits []DigitalBitView  `json:"digitalBits"`
+	TS          int64             `json:"ts"`
+}
+
+// CFGSummary is a compact view of the CFG-2 profile used by the parser.
+type CFGSummary struct {
+	Available  bool     `json:"available"`
+	SyncWord   uint16   `json:"syncWord"`
+	IDCode     uint16   `json:"idCode"`
+	Station    string   `json:"station"`
+	FnomHz     int      `json:"fnomHz"`
+	DataRate   int16    `json:"dataRate"`
+	Format     uint16   `json:"format"`
+	Polar      bool     `json:"polar"`
+	PhFloat    bool     `json:"phFloat"`
+	AnFloat    bool     `json:"anFloat"`
+	FreqFloat  bool     `json:"freqFloat"`
+	Phasors    []string `json:"phasors"`
+	Analogs    []string `json:"analogs"`
+	DigitalWords int    `json:"digitalWords"`
+	CfgCnt     uint16   `json:"cfgCnt"`
+	HeaderText string   `json:"headerText,omitempty"`
 }
 
 type PMUState struct {
@@ -59,9 +127,14 @@ type PMUState struct {
 	KafkaErrors    int64          `json:"kafkaErrors"`
 	SinkErrors     int64          `json:"sinkErrors"`
 	SpoolQueued    int64          `json:"spoolQueued"`
-	LastReading    TrendPoint     `json:"lastReading"`
-	LastPhasor     PhasorSnapshot `json:"lastPhasor"`
-	Trends         []TrendPoint   `json:"trends"`
+	LastReading    TrendPoint       `json:"lastReading"`
+	LastPhasor     PhasorSnapshot   `json:"lastPhasor"`
+	LastChannels   ChannelSnapshot  `json:"lastChannels"`
+	LastFrame      FrameStamp       `json:"lastFrame"`
+	CFG            CFGSummary       `json:"cfg"`
+	Trends         []TrendPoint     `json:"trends"`
+	FnomHz         int              `json:"fnomHz"`
+	StatDataError  bool             `json:"statDataError"`
 }
 
 type DashboardState struct {
@@ -82,11 +155,81 @@ type pmuRuntime struct {
 	sinkErrors    int64
 	spoolQueued   int64
 	lastPhasor    PhasorSnapshot
+	lastChannels  ChannelSnapshot
+	lastFrame     FrameStamp
 	trends        []TrendPoint
+	fnomHz        int
+	statDataError bool
 }
 
 const maxConversationEvents = 1000
 const maxTrendPoints = 600
+
+// trendPhasorMags maps CFG channel names onto VA–IC magnitudes for trend series.
+func trendPhasorMags(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
+	va = float64(r.VA.Magnitude)
+	vb = float64(r.VB.Magnitude)
+	vc = float64(r.VC.Magnitude)
+	ia = float64(r.IA.Magnitude)
+	for _, p := range r.Phasors {
+		n := strings.ToUpper(strings.TrimSpace(p.Name))
+		mag := float64(p.Phasor.Magnitude)
+		switch {
+		case n == "VA" || strings.HasSuffix(n, "AV"):
+			va = mag
+		case n == "VB" || strings.HasSuffix(n, "BV"):
+			vb = mag
+		case n == "VC" || strings.HasSuffix(n, "CV"):
+			vc = mag
+		case n == "IA" || strings.HasSuffix(n, "AI"):
+			ia = mag
+		case n == "IB" || strings.HasSuffix(n, "BI"):
+			ib = mag
+		case n == "IC" || strings.HasSuffix(n, "CI"):
+			ic = mag
+		}
+	}
+	return
+}
+
+// cfgSummaryForPMU builds a dashboard CFG-2 summary from the parser profile registry.
+func cfgSummaryForPMU(name string) CFGSummary {
+	prof, ok := parser.GetProfile(name)
+	if !ok {
+		return CFGSummary{Available: false}
+	}
+	phasors := make([]string, 0, prof.Phnmr)
+	analogs := make([]string, 0, prof.Annmr)
+	if len(prof.Channels) >= prof.Phnmr {
+		phasors = append(phasors, prof.Channels[:prof.Phnmr]...)
+	}
+	if len(prof.Channels) >= prof.Phnmr+prof.Annmr {
+		analogs = append(analogs, prof.Channels[prof.Phnmr:prof.Phnmr+prof.Annmr]...)
+	}
+	// Prefer actual CFG-2 SYNC from handshake when present.
+	sync := prof.SyncWord
+	if sync == 0 {
+		sync = uint16(0xAA31)
+	}
+	return CFGSummary{
+		Available:    true,
+		SyncWord:     sync,
+		IDCode:       prof.IDCode,
+		Station:      prof.Station,
+		FnomHz:       prof.FnomHz,
+		DataRate:     prof.DataRate,
+		Format:       prof.Format,
+		Polar:        prof.Polar,
+		PhFloat:      prof.PhFloat,
+		AnFloat:      prof.AnFloat,
+		FreqFloat:    prof.FreqFloat,
+		Phasors:      phasors,
+		Analogs:      analogs,
+		DigitalWords: prof.Dgnmr,
+		CfgCnt:       prof.CfgCnt,
+		HeaderText:   strings.TrimSpace(prof.HeaderText),
+	}
+}
 
 var conversationBus = struct {
 	mu          sync.Mutex
@@ -121,13 +264,35 @@ func RecordReading(r parser.Reading) {
 	st.lastEventTime = now
 	st.lastFrameTime = now
 	st.totalFrames++
+	st.statDataError = r.StatDetail.DataError
+
+	fnom := 0
+	if prof, ok := parser.GetProfile(r.PMUName); ok && prof.FnomHz > 0 {
+		fnom = prof.FnomHz
+	}
+	st.fnomHz = fnom
+
+	freqDev := float64(r.FrequencyDeviation)
+	if fnom > 0 {
+		freqDev = float64(r.Frequency) - float64(fnom)
+	}
+
+	vaMag, vbMag, vcMag, iaMag, ibMag, icMag := trendPhasorMags(r)
 
 	t := TrendPoint{
-		TS:        now.UnixMilli(),
-		Frequency: float64(r.Frequency),
-		MW:        float64(r.MW),
-		MVAR:      float64(r.MVAR),
-		ROCOF:     float64(r.ROCOF),
+		TS:            now.UnixMilli(),
+		Frequency:     float64(r.Frequency),
+		FrequencyDev:  freqDev,
+		MW:            float64(r.MW),
+		MVAR:          float64(r.MVAR),
+		ROCOF:         float64(r.ROCOF),
+		StatDataError: r.StatDetail.DataError,
+		VA:            vaMag,
+		VB:            vbMag,
+		VC:            vcMag,
+		IA:            iaMag,
+		IB:            ibMag,
+		IC:            icMag,
 	}
 
 	st.lastPhasor = PhasorSnapshot{
@@ -136,6 +301,60 @@ func RecordReading(r parser.Reading) {
 		VC: PhasorVector{Magnitude: float64(r.VC.Magnitude), AngleDeg: float64(r.VC.PhaseDegrees)},
 		IA: PhasorVector{Magnitude: float64(r.IA.Magnitude), AngleDeg: float64(r.IA.PhaseDegrees)},
 		TS: now.UnixMilli(),
+	}
+
+	phasorViews := make([]NamedPhasorView, 0, len(r.Phasors))
+	for _, p := range r.Phasors {
+		phasorViews = append(phasorViews, NamedPhasorView{
+			Name:      p.Name,
+			Magnitude: float64(p.Phasor.Magnitude),
+			AngleDeg:  float64(p.Phasor.PhaseDegrees),
+		})
+	}
+	if len(phasorViews) == 0 {
+		// Fallback for legacy parse path without named phasors.
+		phasorViews = []NamedPhasorView{
+			{Name: "VA", Magnitude: float64(r.VA.Magnitude), AngleDeg: float64(r.VA.PhaseDegrees)},
+			{Name: "VB", Magnitude: float64(r.VB.Magnitude), AngleDeg: float64(r.VB.PhaseDegrees)},
+			{Name: "VC", Magnitude: float64(r.VC.Magnitude), AngleDeg: float64(r.VC.PhaseDegrees)},
+			{Name: "IA", Magnitude: float64(r.IA.Magnitude), AngleDeg: float64(r.IA.PhaseDegrees)},
+		}
+	}
+	analogViews := make([]NamedAnalogView, 0, len(r.Analogs))
+	for _, a := range r.Analogs {
+		analogViews = append(analogViews, NamedAnalogView{Name: a.Name, Value: float64(a.Value)})
+	}
+	bits := make([]DigitalBitView, 0, 16)
+	digWord := r.Digital
+	for bit := 0; bit < 16; bit++ {
+		name := fmt.Sprintf("bit%d", bit)
+		if bit < len(r.DigitalNames) && r.DigitalNames[bit] != "" {
+			name = r.DigitalNames[bit]
+		}
+		bits = append(bits, DigitalBitView{
+			Name: name,
+			Bit:  bit,
+			Set:  (digWord>>uint(bit))&1 == 1,
+		})
+	}
+	st.lastChannels = ChannelSnapshot{
+		Phasors:     phasorViews,
+		Analogs:     analogViews,
+		DigitalBits: bits,
+		TS:          now.UnixMilli(),
+	}
+	st.lastFrame = FrameStamp{
+		SOC:          r.SOC,
+		FracSecRaw:   r.FracSecRaw,
+		FracSecCount: r.FracSecCount,
+		TimeQuality:  r.TimeQuality,
+		MsgTQ:        r.MsgTQ,
+		Stat:         r.Stat,
+		StatDetail:   r.StatDetail,
+		IDCode:       r.IDCode,
+		SyncWord:     r.SyncWord,
+		Digital:      r.Digital,
+		Digitals:     append([]uint16(nil), r.Digitals...),
 	}
 
 	if len(st.trends) == maxTrendPoints {
@@ -375,7 +594,12 @@ func snapshotDashboard() DashboardState {
 			SpoolQueued:    st.spoolQueued,
 			LastReading:    last,
 			LastPhasor:     st.lastPhasor,
+			LastChannels:   st.lastChannels,
+			LastFrame:      st.lastFrame,
+			CFG:            cfgSummaryForPMU(st.name),
 			Trends:         trendCopy,
+			FnomHz:         st.fnomHz,
+			StatDataError:  st.statDataError,
 		})
 	}
 

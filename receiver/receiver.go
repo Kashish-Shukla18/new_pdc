@@ -1,5 +1,5 @@
 // Package receiver manages TCP connections to PMUs and implements the
-// IEEE C37.118 connection handshake (request config-2 frame → start data).
+// IEEE C37.118 connection handshake (request header → config-2 → start data).
 package receiver
 
 import (
@@ -380,42 +380,70 @@ func (r *Receiver) connect(ctx context.Context) error {
 	log.Printf("[%s] connected to %s", r.cfg.Name, addr)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok", fmt.Sprintf("connected to %s", addr))
 
-	// ── Step 1: request Config-2 frame ───────────────────────────────────────
-	log.Printf("[%s] handshake step 1: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
+	// Stop any residual data stream from a prior session before config exchange.
+	_ = r.sendCMD(conn, cmdDataOff)
+
+	headerText := ""
+
+	// ── Step 1: request Header frame (optional — many PMUs omit or ignore) ───
+	log.Printf("[%s] handshake step 1: sending %s", r.cfg.Name, cmdName(cmdSendHdr))
+	if err := r.sendCMD(conn, cmdSendHdr); err != nil {
+		return fmt.Errorf("send HDR request: %w", err)
+	}
+	log.Printf("[%s] sent CMD_SEND_HDR", r.cfg.Name)
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "handshake", "ok", "sent CMD_SEND_HDR")
+
+	hdrDeadline := 3 * time.Second
+	if timeout > 0 && timeout < hdrDeadline {
+		hdrDeadline = timeout
+	}
+	if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
+		log.Printf("[%s] header frame not received (%v) – continuing with CFG2", r.cfg.Name, err)
+		monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "warn",
+			fmt.Sprintf("HDR not received: %v", err))
+	} else {
+		logFrameTrace(r.cfg.Name, "handshake step 1 rx", hdrRaw)
+		text, perr := parser.ParseHeaderFrame(hdrRaw)
+		if perr != nil {
+			log.Printf("[%s] header frame parse error: %v", r.cfg.Name, perr)
+		} else {
+			headerText = text
+			log.Printf("[%s] HEADER frame (%d bytes):\n%s", r.cfg.Name, len(hdrRaw), text)
+			monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok",
+				fmt.Sprintf("received HEADER frame (%d bytes)", len(hdrRaw)))
+		}
+	}
+
+	// ── Step 2: request Config-2 frame ───────────────────────────────────────
+	log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
 	if err := r.sendCMD(conn, cmdSendCfg2); err != nil {
 		return fmt.Errorf("send CFG2 request: %w", err)
 	}
 	log.Printf("[%s] sent CMD_SEND_CFG2", r.cfg.Name)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "handshake", "ok", "sent CMD_SEND_CFG2")
 
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return fmt.Errorf("set read deadline: %w", err)
-	}
-	cfg2, err := readFrame(conn)
+	cfg2, err := readFrameOfType(conn, frameTypeCfg2, timeout)
 	if err != nil {
 		return fmt.Errorf("read CFG2 frame: %w", err)
 	}
-	if frameType(cfg2) != frameTypeCfg2 {
-		return fmt.Errorf("expected CFG2 frame (0x%02X), got 0x%02X",
-			frameTypeCfg2, frameType(cfg2))
-	}
-	logFrameTrace(r.cfg.Name, "handshake step 1 rx", cfg2)
+	logFrameTrace(r.cfg.Name, "handshake step 2 rx", cfg2)
 	decodeCFG2Details(r.cfg.Name, cfg2)
 	log.Printf("[%s] received CFG2 frame (%d bytes)", r.cfg.Name, len(cfg2))
 	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok", fmt.Sprintf("received CFG2 frame (%d bytes)", len(cfg2)))
 	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
 		return fmt.Errorf("parse CFG2: %w", err)
 	} else {
+		profile.HeaderText = headerText
 		parser.SetProfile(r.cfg.Name, profile)
-		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d fnom=%dHz polar=%v ph=%d an=%d dg=%d cfgcnt=%d",
-			r.cfg.Name, profile.Station, profile.DataRate, profile.FnomHz, profile.Polar, profile.Phnmr, profile.Annmr, profile.Dgnmr, profile.CfgCnt)
+		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d fnom=%dHz polar=%v ph=%d an=%d dg=%d cfgcnt=%d header=%q",
+			r.cfg.Name, profile.Station, profile.DataRate, profile.FnomHz, profile.Polar, profile.Phnmr, profile.Annmr, profile.Dgnmr, profile.CfgCnt, profile.HeaderText)
 		if profile.IDCode != 0 && r.cfg.IDCode != 0 && profile.IDCode != r.cfg.IDCode {
 			log.Printf("[%s] warning: CFG2 idcode=%d != configured idcode=%d", r.cfg.Name, profile.IDCode, r.cfg.IDCode)
 		}
 	}
 
-	// ── Step 2: start data transmission ──────────────────────────────────────
-	log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdDataOn))
+	// ── Step 3: start data transmission ──────────────────────────────────────
+	log.Printf("[%s] handshake step 3: sending %s", r.cfg.Name, cmdName(cmdDataOn))
 	if err := r.sendCMD(conn, cmdDataOn); err != nil {
 		return fmt.Errorf("send CMD_DATA_ON: %w", err)
 	}
@@ -424,7 +452,7 @@ func (r *Receiver) connect(ctx context.Context) error {
 
 	dataFrames := 0
 
-	// ── Step 3: stream data frames ────────────────────────────────────────────
+	// ── Step 4: stream data frames ────────────────────────────────────────────
 	for {
 		if ctx.Err() != nil {
 			// Politely stop data before closing.
@@ -468,6 +496,35 @@ func (r *Receiver) connect(ctx context.Context) error {
 					fmt.Sprintf("frame dropped – handler pool full (inflight=%d/%d)", len(r.sem), cap(r.sem)))
 			}
 		}
+	}
+}
+
+// readFrameOfType reads frames until one matching wantType arrives, skipping
+// DATA frames (common when a prior session left transmission enabled).
+func readFrameOfType(conn net.Conn, wantType byte, timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	skipped := 0
+	for {
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			return nil, fmt.Errorf("timeout waiting for %s (skipped %d data frames)", frameTypeName(wantType), skipped)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(remain)); err != nil {
+			return nil, err
+		}
+		raw, err := readFrame(conn)
+		if err != nil {
+			return nil, err
+		}
+		ft := frameType(raw)
+		if ft == wantType {
+			return raw, nil
+		}
+		if ft == frameTypeData {
+			skipped++
+			continue
+		}
+		return nil, fmt.Errorf("expected %s, got %s", frameTypeName(wantType), frameTypeName(ft))
 	}
 }
 
