@@ -72,7 +72,7 @@ export function buildOfflinePMU(name: string, meta: PMUMeta): PMUWithMeta {
     kafkaErrors: 0,
     sinkErrors: 0,
     spoolQueued: 0,
-    lastReading: { ts: 0, frequency: 0, mw: 0, mvar: 0, rocof: 0 },
+    lastReading: { ts: 0, frequency: 0, frequencyDev: 0, mw: 0, mvar: 0, rocof: 0, statDataError: false },
     lastPhasor: {
       va: { magnitude: 0, angleDeg: 0 },
       vb: { magnitude: 0, angleDeg: 0 },
@@ -80,7 +80,21 @@ export function buildOfflinePMU(name: string, meta: PMUMeta): PMUWithMeta {
       ia: { magnitude: 0, angleDeg: 0 },
       ts: 0,
     },
+    lastFrame: {
+      soc: 0,
+      fracSecRaw: 0,
+      fracSecCount: 0,
+      timeQuality: 0,
+      stat: 0,
+      idCode: 0,
+      syncWord: 0,
+      digital: 0,
+    },
+    lastChannels: { phasors: [], analogs: [], digitalBits: [], ts: 0 },
+    cfg: { available: false, syncWord: 0, idCode: 0, station: '', fnomHz: 0, dataRate: 0, format: 0, polar: false, phFloat: false, anFloat: false, freqFloat: false, phasors: [], analogs: [], digitalWords: 0, cfgCnt: 0 },
     trends: [],
+    fnomHz: 0,
+    statDataError: false,
     meta,
   }
 }

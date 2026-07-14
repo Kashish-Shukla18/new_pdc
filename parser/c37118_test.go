@@ -228,3 +228,22 @@ func TestBuildCMDVersion(t *testing.T) {
 		t.Fatal("crc")
 	}
 }
+
+func TestParseHeaderFrame(t *testing.T) {
+	info := []byte("IITK PMU Simulator\nStation: TEST\x00pad")
+	frameSize := 14 + len(info) + 2
+	raw := make([]byte, frameSize)
+	raw[0], raw[1] = 0xAA, 0x12 // HDR type=0x10, version=2
+	binary.BigEndian.PutUint16(raw[2:], uint16(frameSize))
+	binary.BigEndian.PutUint16(raw[4:], 1)
+	copy(raw[14:], info)
+	putCRC(raw)
+
+	text, err := ParseHeaderFrame(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "IITK PMU Simulator\nStation: TEST" {
+		t.Fatalf("got %q", text)
+	}
+}

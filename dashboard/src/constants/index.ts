@@ -24,29 +24,68 @@ export const defaultNewPMU: NewPMUForm = {
 export const HELP_SECTIONS = [
   {
     title: 'Getting Started',
-    content: 'This dashboard shows live telemetry from registered field PMUs via the PDC backend.',
+    content:
+      'Register PMUs under Device Inventory, check Overview for fleet health, Data Frames for decode detail, Analytics for V/I trends and advisories.',
+  },
+  {
+    title: 'Overview',
+    content:
+      'Fleet KPIs, frequency and ROCOF charts, map from registration lat/lon, regional health, and live alerts.',
+  },
+  {
+    title: 'Device Inventory',
+    content:
+      'Add or edit PMUs (IP, IDCODE, region, coordinates). Offline means configured but not streaming.',
   },
   {
     title: 'Data Frames',
-    content: 'Use Data Frames to inspect per-PMU SOC/FRACSEC, phasor values, and frequency in near real-time.',
+    content:
+      'CFG-2 profile, live DATA lines (SOC/FRACSEC/STAT/DIG), VA–IC / analogs / digital bits, and a frequency trend for one PMU.',
   },
   {
     title: 'Connectivity',
-    content: 'Connectivity metrics are computed from live frame rates, quality rejects, and trend variance.',
+    content:
+      'Loss, derived latency/jitter, and availability from frame rates — not true network ping.',
+  },
+  {
+    title: 'Analytics',
+    content:
+      'V/I magnitude trends, phasor diagram, inter-PMU VA angle Δ (≥2 PMUs), and advisories from live DATA.',
+  },
+  {
+    title: 'Documentation',
+    content:
+      'Page-by-page reference under Resources → Documentation (data sources and what each panel shows).',
   },
 ]
 
 export const FAQ_ITEMS = [
   {
     q: 'Why are some PMUs offline?',
-    a: 'This means they are configured in the database, but no live data is currently streaming.',
+    a: 'They are registered, but no DATA frames have arrived recently (~3 s).',
   },
   {
     q: 'Where does data come from?',
-    a: 'The dashboard polls /conversation/state and subscribes to /conversation/events (SSE) exposed by the Go backend.',
+    a: 'IEEE C37.118 CFG-2 and DATA frames are decoded by the PDC; the dashboard shows that live stream state and registration.',
   },
   {
     q: 'How do I pause updates?',
-    a: 'Use Pause in the header. It pauses both polling and SSE consumption in this React dashboard.',
+    a: 'Use Pause in the header (and Pause stream on Data Frames). That freezes live updates in this UI.',
+  },
+  {
+    q: 'Why is the map empty on Overview?',
+    a: 'Set non-zero latitude and longitude when registering. (0, 0) is off the India view.',
+  },
+  {
+    q: 'What does Worst Δf mean with one PMU?',
+    a: 'That PMU’s current frequency minus CFG FNOM. With many PMUs it is the largest |Δf| online right now.',
+  },
+  {
+    q: 'What is STAT data errors?',
+    a: 'How many online PMUs have DATA STAT bits 15–14 ≠ 00 (error / test / invalid) on the latest frame.',
+  },
+  {
+    q: 'Why is Analytics angle Δ empty?',
+    a: 'Inter-PMU angle needs at least two online streams. V/I charts and the phasor diagram still work with one PMU.',
   },
 ]

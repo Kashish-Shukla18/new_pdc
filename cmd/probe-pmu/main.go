@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -108,6 +109,31 @@ func min(a, b int) int {
 	return b
 }
 
+func readUntilType(conn net.Conn, want byte, timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	skipped := 0
+	for {
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			return nil, fmt.Errorf("timeout waiting for type 0x%02X (skipped %d data)", want, skipped)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remain))
+		raw, err := readFrame(conn)
+		if err != nil {
+			return nil, err
+		}
+		ft := raw[1] & 0x70
+		if ft == want {
+			return raw, nil
+		}
+		if ft == 0x00 {
+			skipped++
+			continue
+		}
+		return nil, fmt.Errorf("expected type 0x%02X, got 0x%02X size=%d", want, ft, len(raw))
+	}
+}
+
 func main() {
 	addr := flag.String("addr", "172.24.105.87:4712", "tcp host:port")
 	wait := flag.Duration("wait", 20*time.Second, "wait for data after DATA_ON")
@@ -124,12 +150,41 @@ func main() {
 	defer conn.Close()
 	fmt.Printf("TCP connected to %s (local=%s)\n", conn.RemoteAddr(), conn.LocalAddr())
 
+	useID := uint16(1)
+	if *idcodeFlag != 0 {
+		useID = uint16(*idcodeFlag)
+	}
+
+	// Stop residual stream, then ask for Header.
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+	if _, err := conn.Write(cmd(useID, 0x0001)); err != nil {
+		fmt.Fprintf(os.Stderr, "write DATA_OFF: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("sent CMD_DATA_OFF")
+	time.Sleep(200 * time.Millisecond)
+
+	if _, err := conn.Write(cmd(useID, 0x0003)); err != nil {
+		fmt.Fprintf(os.Stderr, "write HDR: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("sent CMD_SEND_HDR (0x0003)")
+	if hdr, err := readUntilType(conn, 0x10, 4*time.Second); err != nil {
+		fmt.Printf("HDR not received: %v\n", err)
+	} else {
+		fmt.Printf("HDR response size=%d head=%x\n", len(hdr), hdr[:min(16, len(hdr))])
+		body := hdr[14 : len(hdr)-2]
+		text := strings.TrimRight(string(body), "\x00")
+		fmt.Printf("HEADER text:\n%s\n", text)
+	}
+
 	_ = conn.SetDeadline(time.Now().Add(6 * time.Second))
-	if _, err := conn.Write(cmd(1, 0x0005)); err != nil {
+	if _, err := conn.Write(cmd(useID, 0x0005)); err != nil {
 		fmt.Fprintf(os.Stderr, "write CFG2: %v\n", err)
 		os.Exit(1)
 	}
-	cfg2, err := readFrame(conn)
+	fmt.Println("sent CMD_SEND_CFG2")
+	cfg2, err := readUntilType(conn, 0x30, 6*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read CFG2: %v\n", err)
 		os.Exit(1)
@@ -140,10 +195,7 @@ func main() {
 	fmt.Printf("format bits: phasor_float=%v rectangular=%v analog_float=%v freq_float=%v\n",
 		format&0x0002 != 0, format&0x0001 != 0, format&0x0004 != 0, format&0x0008 != 0)
 
-	useID := uint16(1)
-	if *idcodeFlag != 0 {
-		useID = uint16(*idcodeFlag)
-	} else if pmuID != 0 {
+	if *idcodeFlag == 0 && pmuID != 0 {
 		useID = pmuID
 	}
 	fmt.Printf("sending DATA_ON with idcode=%d\n", useID)
