@@ -15,25 +15,6 @@ export type AnalyticsKpi = {
   tone: 'ok' | 'warn' | 'bad' | 'accent' | 'neutral'
 }
 
-export type OscillationMode = {
-  freq: number
-  damping: number
-  pmu: string
-  label: string
-}
-
-export type IslandingRow = {
-  name: string
-  risk: 'Low' | 'Medium' | 'High'
-  detail: string
-}
-
-export type VoltageBus = {
-  name: string
-  pu: number
-  tone: 'ok' | 'warn' | 'bad'
-}
-
 export type AnalyticsRecommendation = {
   sev: AnalyticsSeverity
   title: string

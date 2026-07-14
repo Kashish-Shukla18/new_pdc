@@ -31,6 +31,7 @@ type DigUnit struct {
 type Profile struct {
 	Station  string
 	IDCode   uint16
+	SyncWord uint16
 	TimeBase uint32
 	NumPMU   uint16
 	Format   uint16
@@ -53,6 +54,8 @@ type Profile struct {
 	DataPayloadBytes int
 	// TotalDataPayloadBytes sums all PMU blocks (for multi-PMU frames).
 	TotalDataPayloadBytes int
+	// HeaderText is optional ASCII from a Header frame (CMD 0x0003).
+	HeaderText string
 }
 
 var profileRegistry sync.Map // map[string]Profile
@@ -248,6 +251,7 @@ func ParseCFG2Frame(raw []byte) (Profile, error) {
 	return Profile{
 		Station:               station,
 		IDCode:                id,
+		SyncWord:              binary.BigEndian.Uint16(raw[0:2]),
 		TimeBase:              timeBase,
 		NumPMU:                numPMU,
 		Format:                format,

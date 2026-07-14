@@ -48,6 +48,18 @@ type Phasor struct {
 	PowerImag    float32 // imaginary power component (VAR)
 }
 
+// NamedPhasor is one CFG phasor channel with its wire name.
+type NamedPhasor struct {
+	Name   string `json:"name"`
+	Phasor Phasor `json:"phasor"`
+}
+
+// NamedAnalog is one CFG analog channel with its wire name.
+type NamedAnalog struct {
+	Name  string  `json:"name"`
+	Value float32 `json:"value"`
+}
+
 // Reading is the parsed payload from one C37.118 data frame.
 type Reading struct {
 	// ─ Identity & Timing
@@ -71,9 +83,14 @@ type Reading struct {
 	StatDetail STATDecoded `json:"stat_decoded"`
 
 	// ─ All digital status words (Digital keeps word 0 for compatibility)
-	Digitals []uint16 `json:"digitals,omitempty"`
+	Digitals     []uint16 `json:"digitals,omitempty"`
+	DigitalNames []string `json:"digital_names,omitempty"` // CFG bit names for dig words
 
-	// ─ Phasors (raw components + derived metrics)
+	// ─ All CFG phasors / analogs (by channel name)
+	Phasors []NamedPhasor `json:"phasors,omitempty"`
+	Analogs []NamedAnalog `json:"analogs,omitempty"`
+
+	// ─ Phasors (mapped VA/VB/VC/IA for compatibility)
 	VA Phasor `json:"va"`
 	VB Phasor `json:"vb"`
 	VC Phasor `json:"vc"`
@@ -533,6 +550,20 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	names := phasorNames(cfg)
 	va, vb, vc, ia := mapPhasorsToStandard(names, phasors)
 
+	namedPhasors := make([]NamedPhasor, len(phasors))
+	for i, p := range phasors {
+		name := fmt.Sprintf("PH%d", i+1)
+		if i < len(names) && names[i] != "" {
+			name = names[i]
+		}
+		namedPhasors[i] = NamedPhasor{Name: name, Phasor: p}
+	}
+
+	analogNames := make([]string, 0, cfg.Annmr)
+	if len(cfg.Channels) >= cfg.Phnmr+cfg.Annmr {
+		analogNames = cfg.Channels[cfg.Phnmr : cfg.Phnmr+cfg.Annmr]
+	}
+	namedAnalogs := make([]NamedAnalog, 0, cfg.Annmr)
 	var mw, mvar float32
 	for i := 0; i < cfg.Annmr; i++ {
 		var v float32
@@ -549,6 +580,11 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 			}
 			v = float32(iv) * float32(anScale(i))
 		}
+		name := fmt.Sprintf("ANA%d", i+1)
+		if i < len(analogNames) && analogNames[i] != "" {
+			name = analogNames[i]
+		}
+		namedAnalogs = append(namedAnalogs, NamedAnalog{Name: name, Value: v})
 		if i == 0 {
 			mw = v
 		} else if i == 1 {
@@ -567,6 +603,11 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	var digital uint16
 	if len(digitals) > 0 {
 		digital = digitals[0]
+	}
+	digStart := cfg.Phnmr + cfg.Annmr
+	var digitalNames []string
+	if len(cfg.Channels) > digStart {
+		digitalNames = append([]string(nil), cfg.Channels[digStart:]...)
 	}
 
 	if o != want {
@@ -631,6 +672,8 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		FrameBytes:               len(raw),
 		Stat:                     stat,
 		StatDetail:               decodeStat(stat),
+		Phasors:                  namedPhasors,
+		Analogs:                  namedAnalogs,
 		VA:                       va,
 		VB:                       vb,
 		VC:                       vc,
@@ -654,6 +697,7 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		TotalPowerImag:           va.Imag*ia.Real - va.Real*ia.Imag,
 		Digital:                  digital,
 		Digitals:                 digitals,
+		DigitalNames:             digitalNames,
 	}, nil
 }
 
