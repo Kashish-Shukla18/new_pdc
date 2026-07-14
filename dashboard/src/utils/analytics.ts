@@ -1,22 +1,21 @@
+import { ANGLE_PAIR_COLORS } from './analyticsColors'
 import type {
   AnalyticsKpi,
   AnalyticsRecommendation,
   AnglePair,
-  IslandingRow,
-  OscillationMode,
-  VoltageBus,
 } from '../types/analytics'
 import type { ConnectivityRow, ConversationEvent, PMUWithMeta } from '../types/dashboard'
 import { round } from './format'
 import { packetLossOf, pmuKey } from './pmu'
 
-/** Phase-to-neutral RMS from stimulator.py (132 kV system). */
-const NOMINAL_PHASE_VOLTAGE = 132_000 / Math.sqrt(3)
+function fnomOf(pmu: PMUWithMeta, fallback = 60) {
+  return pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : fallback
+}
 
-/** Primary inter-area mode injected by the simulator (Hz). */
-const SIMULATOR_MODE_HZ = 0.05
-
-const ANGLE_PAIR_COLORS = ['#ff5d6c', '#f4b740', '#3da9fc', '#a07cff', '#27d3a2', '#ff719a']
+function fleetFnom(pmus: PMUWithMeta[], fallback = 60) {
+  const values = pmus.map((p) => p.fnomHz).filter((v): v is number => !!v && v > 0)
+  return values.length ? values[0] : fallback
+}
 
 export function pairLabel(a: PMUWithMeta, b: PMUWithMeta) {
   if (a.meta.region !== b.meta.region && a.meta.region !== 'Unknown' && b.meta.region !== 'Unknown') {
@@ -74,123 +73,76 @@ export function anglePairColors(pairs: AnglePair[]) {
   }))
 }
 
-export function computeOscillationModes(pmus: PMUWithMeta[]): OscillationMode[] {
-  return pmus
-    .filter((pmu) => pmu.connected)
-    .map((pmu) => {
-      const rocof = Math.abs(pmu.lastReading?.rocof ?? 0)
-      const freqDev = Math.abs((pmu.lastReading?.frequency ?? 50) - 50)
-      const freq = round(SIMULATOR_MODE_HZ + freqDev * 0.4 + rocof * 1.5, 3)
-      const damping = round(Math.max(2, Math.min(16, 14 - rocof * 220 - freqDev * 40)), 1)
-      return {
-        freq,
-        damping,
-        pmu: pmu.name,
-        label: `${freq.toFixed(2)} Hz · ζ ${damping.toFixed(1)}%`,
-      }
-    })
-}
-
-export function computeIslandingRows(pmus: PMUWithMeta[]): IslandingRow[] {
-  return pmus.map((pmu) => {
-    const angle = Math.abs(pmu.lastPhasor?.va?.angleDeg ?? 0)
-    const rocof = Math.abs(pmu.lastReading?.rocof ?? 0)
-    const loss = packetLossOf(pmu)
-
-    let risk: IslandingRow['risk'] = 'Low'
-    if (!pmu.connected || angle > 25 || rocof > 0.06) risk = 'High'
-    else if (loss > 1 || angle > 15 || rocof > 0.03) risk = 'Medium'
-
-    const status = !pmu.connected ? 'Offline' : loss > 1 ? 'Degraded' : 'Online'
-    return {
-      name: `${pmu.meta.region !== 'Unknown' ? pmu.meta.region : pmu.name} corridor`,
-      risk,
-      detail: `Angle ${round(angle, 2)}° · ROCOF ${round(rocof, 3)} Hz/s · ${status}`,
-    }
-  })
-}
-
-export function computeVoltageProfile(pmus: PMUWithMeta[]): VoltageBus[] {
-  return pmus.map((pmu) => {
-    const magnitude = pmu.lastPhasor?.va?.magnitude ?? 0
-    const pu = magnitude > 0 ? magnitude / NOMINAL_PHASE_VOLTAGE : 0
-    let tone: VoltageBus['tone'] = 'ok'
-    if (pu > 0 && pu < 0.97) tone = 'bad'
-    else if (pu > 1.02) tone = 'warn'
-    else if (!pmu.connected || pu === 0) tone = 'warn'
-
-    const label = pmu.meta.substation !== pmu.name ? pmu.meta.substation : pmu.name.replace(/^PMU-/, '')
-    return {
-      name: label.length > 12 ? label.slice(0, 11) + '…' : label,
-      pu: round(pu || 0, 3),
-      tone,
-    }
-  })
-}
-
 export function computeAnalyticsKpis(
   pmus: PMUWithMeta[],
   anglePairs: AnglePair[],
   recommendations: AnalyticsRecommendation[],
 ): AnalyticsKpi[] {
   const online = pmus.filter((pmu) => pmu.connected)
-  const angles = online.map((pmu) => pmu.lastPhasor?.va?.angleDeg ?? 0)
   const maxPair = anglePairs[0]
-  const maxAngleDelta = maxPair?.value ?? (angles.length ? round(Math.max(...angles) - Math.min(...angles), 2) : 0)
+  const maxAngleDelta = maxPair?.value ?? 0
 
-  const freqs = online.map((pmu) => pmu.lastReading?.frequency ?? 50)
-  const avgFreq = freqs.length ? freqs.reduce((sum, value) => sum + value, 0) / freqs.length : 50
+  const nom = fleetFnom(online)
+  const freqs = online.map((pmu) => pmu.lastReading?.frequency ?? fnomOf(pmu, nom))
+  const avgFreq = freqs.length ? freqs.reduce((sum, value) => sum + value, 0) / freqs.length : nom
 
-  const rocofs = online.map((pmu) => Math.abs(pmu.lastReading?.rocof ?? 0))
-  const lowestDamping = rocofs.length
-    ? round(Math.max(2, Math.min(16, 14 - Math.max(...rocofs) * 220)), 1)
-    : 0
-  const oscillationCount = rocofs.filter((value) => value > 0.012).length
-
-  const risk =
-    maxAngleDelta > 30 || (rocofs.length && Math.max(...rocofs) > 0.06)
-      ? 'High'
-      : maxAngleDelta > 20 || (rocofs.length && Math.max(...rocofs) > 0.03)
-        ? 'Medium'
-        : 'Low'
-  const riskTone: AnalyticsKpi['tone'] = risk === 'High' ? 'bad' : risk === 'Medium' ? 'warn' : 'ok'
+  let worstDf = 0
+  let worstDfPMU = '—'
+  let maxRocof = 0
+  let maxRocofPMU = '—'
+  for (const pmu of online) {
+    const fnom = fnomOf(pmu, nom)
+    const df =
+      typeof pmu.lastReading?.frequencyDev === 'number'
+        ? pmu.lastReading.frequencyDev
+        : (pmu.lastReading?.frequency ?? fnom) - fnom
+    if (Math.abs(df) >= Math.abs(worstDf)) {
+      worstDf = df
+      worstDfPMU = pmu.name
+    }
+    const rocof = Math.abs(pmu.lastReading?.rocof ?? 0)
+    if (rocof >= maxRocof) {
+      maxRocof = rocof
+      maxRocofPMU = pmu.name
+    }
+  }
 
   return [
     {
       label: 'Max angle Δ',
-      value: `${round(maxAngleDelta, 1)}°`,
-      sub: maxPair ? maxPair.name : 'across simulator lanes',
-      tone: maxAngleDelta > 20 ? 'warn' : 'ok',
+      value: online.length < 2 ? '—' : `${round(maxAngleDelta, 1)}°`,
+      sub: online.length < 2 ? 'needs ≥2 online PMUs' : maxPair ? maxPair.name : 'inter-PMU VA',
+      tone: online.length < 2 ? 'neutral' : maxAngleDelta > 20 ? 'warn' : 'ok',
     },
     {
-      label: 'System frequency',
+      label: 'Avg frequency',
       value: `${round(avgFreq, 3)} Hz`,
-      sub: 'average of active streams',
+      sub: online.length ? `${online.length} online · FNOM ${nom} Hz` : 'no online streams',
       tone: 'ok',
     },
     {
-      label: 'Lowest damping',
-      value: `${lowestDamping}%`,
-      sub: `${SIMULATOR_MODE_HZ} Hz inter-area mode`,
-      tone: lowestDamping < 5 ? 'bad' : lowestDamping < 8 ? 'warn' : 'ok',
+      label: 'Worst Δf',
+      value: online.length ? `${worstDf >= 0 ? '+' : ''}${round(worstDf, 4)} Hz` : '—',
+      sub: online.length ? worstDfPMU : 'no online streams',
+      tone: Math.abs(worstDf) > 0.05 ? 'warn' : 'ok',
     },
     {
-      label: 'Active oscillations',
-      value: `${oscillationCount}`,
-      sub: 'streams with elevated ROCOF',
-      tone: oscillationCount > 0 ? 'warn' : 'ok',
+      label: 'Max |ROCOF|',
+      value: online.length ? `${round(maxRocof, 4)} Hz/s` : '—',
+      sub: online.length ? maxRocofPMU : 'no online streams',
+      tone: maxRocof > 0.1 ? 'warn' : 'neutral',
     },
     {
-      label: 'Islanding risk',
-      value: risk,
-      sub: risk === 'Low' ? 'all corridors stable' : 'derived from angle and ROCOF',
-      tone: riskTone,
+      label: 'Online / total',
+      value: `${online.length} / ${pmus.length}`,
+      sub: 'streams receiving frames',
+      tone: online.length < pmus.length ? 'warn' : 'ok',
     },
     {
       label: 'Open advisories',
       value: `${recommendations.length}`,
-      sub: 'operator recommendations',
-      tone: 'accent',
+      sub: 'from live telemetry',
+      tone: recommendations.length ? 'accent' : 'ok',
     },
   ]
 }
@@ -207,39 +159,43 @@ export function computeAnalyticsRecs(
   if (worstAngle && worstAngle.value > 25) {
     recs.push({
       sev: worstAngle.value > 30 ? 'bad' : 'warn',
-      title: `Reduce corridor stress on ${worstAngle.name}`,
-      desc: `Angle separation ${round(worstAngle.value, 1)}° exceeds advisory margin.`,
+      title: `Large angle separation: ${worstAngle.name}`,
+      desc: `Inter-PMU VA angle Δ = ${round(worstAngle.value, 1)}° (from live phasors).`,
     })
   }
 
   pmus.forEach((pmu) => {
     if (!pmu.connected) return
+
+    const fnom = fnomOf(pmu)
+    const freq = pmu.lastReading?.frequency ?? fnom
+    const df =
+      typeof pmu.lastReading?.frequencyDev === 'number'
+        ? pmu.lastReading.frequencyDev
+        : freq - fnom
     const rocof = Math.abs(pmu.lastReading?.rocof ?? 0)
-    const freq = pmu.lastReading?.frequency ?? 50
-    if (rocof > 0.012) {
+
+    if (Math.abs(df) > 0.05) {
       recs.push({
-        sev: rocof > 0.04 ? 'warn' : 'info',
-        title: `Investigate ${SIMULATOR_MODE_HZ} Hz inter-area oscillation on ${pmu.name}`,
-        desc: `ROCOF ${round(rocof, 3)} Hz/s with frequency ${round(freq, 3)} Hz indicates modal activity.`,
+        sev: Math.abs(df) > 0.1 ? 'warn' : 'info',
+        title: `Frequency deviation on ${pmu.name}`,
+        desc: `f = ${round(freq, 3)} Hz · Δf = ${df >= 0 ? '+' : ''}${round(df, 4)} Hz vs CFG FNOM ${fnom} Hz.`,
       })
     }
 
-    const magnitude = pmu.lastPhasor?.va?.magnitude ?? 0
-    const pu = magnitude > 0 ? magnitude / NOMINAL_PHASE_VOLTAGE : 1
-    if (pu > 0 && pu < 0.97) {
+    if (rocof > 0.05) {
       recs.push({
-        sev: 'warn',
-        title: `Reactive support at ${pmu.meta.substation || pmu.name}`,
-        desc: `Bus voltage at ${round(pu, 3)} pu — review local VAr reserves.`,
+        sev: rocof > 0.1 ? 'warn' : 'info',
+        title: `Elevated ROCOF on ${pmu.name}`,
+        desc: `|ROCOF| = ${round(rocof, 4)} Hz/s from DATA frame DFREQ.`,
       })
     }
 
-    const angle = Math.abs(pmu.lastPhasor?.va?.angleDeg ?? 0)
-    if (angle > 20) {
+    if (pmu.statDataError || pmu.lastReading?.statDataError) {
       recs.push({
-        sev: 'warn',
-        title: `High voltage angle on ${pmu.name}`,
-        desc: `VA angle ${round(angle, 2)}° is elevated; monitor corridor stability against peer simulators.`,
+        sev: 'bad',
+        title: `STAT data error on ${pmu.name}`,
+        desc: 'Latest STAT word reports a data-error condition.',
       })
     }
   })
@@ -248,34 +204,34 @@ export function computeAnalyticsRecs(
     if (!row.connected) {
       recs.push({
         sev: 'bad',
-        title: `Recover ${row.name} stream`,
-        desc: 'No live frames. Validate receiver connection and restart the simulator lane.',
+        title: `Offline: ${row.name}`,
+        desc: 'No recent DATA frames. Check reachability and PDC receiver link.',
+      })
+    } else if (packetLossOf(row) > 1) {
+      recs.push({
+        sev: 'warn',
+        title: `Quality rejects on ${row.name}`,
+        desc: `Reject rate ≈ ${round(packetLossOf(row), 2)}% of frames (qualityRejects / totalFrames).`,
       })
     }
   })
 
-  events.slice(0, 3).forEach((evt) => {
+  events.slice(0, 5).forEach((evt) => {
     const lowered = `${evt.status} ${evt.message}`.toLowerCase()
-    if (!lowered.includes('error') && !lowered.includes('trip') && !lowered.includes('reject')) return
+    if (!lowered.includes('error') && !lowered.includes('reject') && !lowered.includes('timeout')) return
     recs.push({
       sev: lowered.includes('error') ? 'bad' : 'info',
-      title: `${evt.stage} on ${evt.pmu}`,
+      title: `${evt.stage} · ${evt.pmu}`,
       desc: evt.message,
     })
   })
 
-  if (!recs.length) {
-    recs.push({
-      sev: 'info',
-      title: 'All simulator lanes stable',
-      desc: 'PMU simulators are tracking nominal frequency with healthy stream quality.',
-    })
-  }
-
   const seen = new Set<string>()
-  return recs.filter((rec) => {
-    if (seen.has(rec.title)) return false
-    seen.add(rec.title)
-    return true
-  }).slice(0, 6)
+  return recs
+    .filter((rec) => {
+      if (seen.has(rec.title)) return false
+      seen.add(rec.title)
+      return true
+    })
+    .slice(0, 8)
 }
