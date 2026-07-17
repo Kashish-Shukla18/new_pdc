@@ -38,8 +38,8 @@ function DashboardShell() {
       <div className="console-shell">
         <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
-        <main className="main">
-          <div className="app-shell">
+        <main className={`main ${activeTab === 'docs' ? 'main--docs' : ''}`}>
+          <div className={`app-shell ${activeTab === 'docs' ? 'app-shell--docs' : ''}`}>
             <PageHeader />
             <PageRouter activeTab={activeTab} />
           </div>

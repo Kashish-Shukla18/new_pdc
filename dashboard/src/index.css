@@ -417,6 +417,12 @@ body {
   overflow: auto;
 }
 
+.main--docs {
+  height: calc(100dvh - var(--header-height, 66px));
+  min-height: 0;
+  overflow: hidden;
+}
+
 .page-title {
   display: flex;
   align-items: flex-end;
@@ -472,6 +478,18 @@ select {
   max-width: none;
   margin: 0;
   padding: 20px 24px 56px;
+}
+
+.app-shell--docs {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  padding-bottom: 20px;
+}
+
+.app-shell--docs > .page-title {
+  flex: none;
 }
 
 /* ─── Top Bar ────────────────────────────────────────────── */
@@ -2888,11 +2906,15 @@ tbody tr.row-click {
 
 .docs-page {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 1.25rem;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .docs-intro {
+  flex: none;
   padding: 1.35rem 1.5rem;
 }
 
@@ -2924,17 +2946,20 @@ tbody tr.row-click {
 
 .docs-layout {
   display: grid;
+  flex: 1;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
   gap: 1.25rem;
-  align-items: start;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .docs-nav {
-  position: sticky;
-  top: 1rem;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
   padding: 1rem 0.85rem 1rem;
-  max-height: calc(100vh - 6rem);
-  overflow: auto;
+  overflow: hidden;
 }
 
 .docs-nav-head {
@@ -2986,6 +3011,11 @@ tbody tr.row-click {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.2rem;
+  scrollbar-gutter: stable;
 }
 
 .docs-nav-item {
@@ -3046,11 +3076,40 @@ tbody tr.row-click {
   flex-direction: column;
   gap: 1.1rem;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.35rem;
+  scrollbar-gutter: stable;
 }
 
 .docs-section {
   padding: 1.25rem 1.35rem 1.4rem;
-  scroll-margin-top: 1.25rem;
+  scroll-margin-top: 0;
+}
+
+.docs-nav-list,
+.docs-content {
+  scrollbar-color: rgba(77, 200, 240, 0.45) rgba(4, 12, 20, 0.4);
+  scrollbar-width: thin;
+}
+
+.docs-nav-list::-webkit-scrollbar,
+.docs-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.docs-nav-list::-webkit-scrollbar-track,
+.docs-content::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(4, 12, 20, 0.4);
+}
+
+.docs-nav-list::-webkit-scrollbar-thumb,
+.docs-content::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(4, 12, 20, 0.4);
+  border-radius: 999px;
+  background: rgba(77, 200, 240, 0.45);
 }
 
 .docs-section-head {
@@ -3167,10 +3226,10 @@ tbody tr.row-click {
 @media (max-width: 1100px) {
   .docs-layout {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(150px, 28vh) minmax(0, 1fr);
   }
 
   .docs-nav {
-    position: static;
     max-height: none;
   }
 
