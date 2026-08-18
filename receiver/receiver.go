@@ -313,12 +313,20 @@ func decodeCFG2Details(pmuName string, raw []byte) {
 
 // FrameHandler is called for every data frame received from the PMU.
 // raw contains the complete, CRC-verified C37.118 frame bytes.
+// Used only in direct mode (no raw Kafka ingress).
 type FrameHandler func(pmuName string, raw []byte)
+
+// RawFramePublisher publishes CRC-verified frames to the raw Kafka topic.
+// Implementations must be safe for concurrent use from multiple PMU receivers.
+type RawFramePublisher interface {
+	Publish(ctx context.Context, pmuName, frameType string, idCode uint16, raw []byte) error
+}
 
 // Receiver manages a persistent, auto-reconnecting TCP connection to one PMU.
 type Receiver struct {
 	cfg     config.PMUConfig
 	handler FrameHandler
+	rawPub  RawFramePublisher
 	sem     chan struct{}
 }
 
@@ -335,8 +343,15 @@ func frameHandlerMaxInflight() int {
 }
 
 // New creates a Receiver for the given PMU configuration.
-func New(cfg config.PMUConfig, handler FrameHandler) *Receiver {
-	return &Receiver{cfg: cfg, handler: handler, sem: make(chan struct{}, frameHandlerMaxInflight())}
+// If rawPub is non-nil, frames are published to Kafka (ingress mode) and handler is unused.
+// If rawPub is nil, data frames are dispatched to handler (direct mode).
+func New(cfg config.PMUConfig, handler FrameHandler, rawPub RawFramePublisher) *Receiver {
+	return &Receiver{
+		cfg:     cfg,
+		handler: handler,
+		rawPub:  rawPub,
+		sem:     make(chan struct{}, frameHandlerMaxInflight()),
+	}
 }
 
 // Run connects to the PMU and streams data frames until ctx is cancelled.
@@ -412,6 +427,9 @@ func (r *Receiver) connect(ctx context.Context) error {
 			monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok",
 				fmt.Sprintf("received HEADER frame (%d bytes)", len(hdrRaw)))
 		}
+		if err := r.publishRaw(ctx, "hdr", hdrRaw); err != nil {
+			return fmt.Errorf("publish HDR to kafka: %w", err)
+		}
 	}
 
 	// ── Step 2: request Config-2 frame ───────────────────────────────────────
@@ -440,6 +458,9 @@ func (r *Receiver) connect(ctx context.Context) error {
 		if profile.IDCode != 0 && r.cfg.IDCode != 0 && profile.IDCode != r.cfg.IDCode {
 			log.Printf("[%s] warning: CFG2 idcode=%d != configured idcode=%d", r.cfg.Name, profile.IDCode, r.cfg.IDCode)
 		}
+	}
+	if err := r.publishRaw(ctx, "cfg2", cfg2); err != nil {
+		return fmt.Errorf("publish CFG2 to kafka: %w", err)
 	}
 
 	// ── Step 3: start data transmission ──────────────────────────────────────
@@ -479,10 +500,20 @@ func (r *Receiver) connect(ctx context.Context) error {
 			}
 			payload := append([]byte(nil), raw...)
 
-			// Non-blocking semaphore acquisition: if the handler pool is full, drop
-			// this frame and record a metric rather than stalling the TCP read loop.
-			// Stalling the read loop causes OS TCP buffers to fill, which eventually
-			// makes the PMU retransmit or disconnect.
+			if r.rawPub != nil {
+				// Ingress path: publish to Kafka with backpressure (blocks TCP read
+				// on broker slowdown instead of dropping frames).
+				if err := r.publishRaw(ctx, "data", payload); err != nil {
+					monitoring.IncQueuePublishErrors()
+					monitoring.IncKafkaErrorForPMU(r.cfg.Name)
+					log.Printf("[%s] raw kafka publish error: %v", r.cfg.Name, err)
+					monitoring.RecordConversation(r.cfg.Name, "PDC", "KAFKA", "raw-publish", "error", err.Error())
+					return fmt.Errorf("publish data frame to kafka: %w", err)
+				}
+				continue
+			}
+
+			// Direct path: non-blocking semaphore; drop if handler pool is full.
 			select {
 			case r.sem <- struct{}{}:
 				go func(name string, frame []byte) {
@@ -497,6 +528,15 @@ func (r *Receiver) connect(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// publishRaw sends a frame to the raw Kafka topic when ingress publishing is enabled.
+func (r *Receiver) publishRaw(ctx context.Context, frameType string, raw []byte) error {
+	if r.rawPub == nil {
+		return nil
+	}
+	monitoring.IncRawFramesPublished()
+	return r.rawPub.Publish(ctx, r.cfg.Name, frameType, r.cfg.IDCode, raw)
 }
 
 // readFrameOfType reads frames until one matching wantType arrives, skipping

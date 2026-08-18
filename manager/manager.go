@@ -16,13 +16,16 @@ type PMUManager struct {
 	mu        sync.Mutex
 	receivers map[string]context.CancelFunc
 	handler   receiver.FrameHandler
+	rawPub    receiver.RawFramePublisher
 }
 
 // NewPMUManager creates a new PMUManager.
-func NewPMUManager(handler receiver.FrameHandler) *PMUManager {
+// rawPub, when non-nil, enables ingress mode (TCP → Kafka). handler is used for direct mode.
+func NewPMUManager(handler receiver.FrameHandler, rawPub receiver.RawFramePublisher) *PMUManager {
 	return &PMUManager{
 		receivers: make(map[string]context.CancelFunc),
 		handler:   handler,
+		rawPub:    rawPub,
 	}
 }
 
@@ -31,6 +34,10 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.rawPub == nil && m.handler == nil {
+		return fmt.Errorf("PMU manager has no ingress publisher or direct handler (processor-only mode?)")
+	}
+
 	if _, exists := m.receivers[cfg.Name]; exists {
 		return fmt.Errorf("PMU %s is already running", cfg.Name)
 	}
@@ -38,11 +45,16 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 	pmuCtx, cancel := context.WithCancel(ctx)
 	m.receivers[cfg.Name] = cancel
 
-	r := receiver.New(cfg, m.handler)
+	r := receiver.New(cfg, m.handler, m.rawPub)
 	go r.Run(pmuCtx)
 
-	monitoring.RecordConversation(cfg.Name, "SYSTEM", "PDC", "manager", "ok", "Started PMU receiver")
-	log.Printf("[Manager] Started PMU receiver for %s", cfg.Name)
+	mode := "direct"
+	if m.rawPub != nil {
+		mode = "ingress"
+	}
+	monitoring.RecordConversation(cfg.Name, "SYSTEM", "PDC", "manager", "ok",
+		fmt.Sprintf("Started PMU receiver (%s)", mode))
+	log.Printf("[Manager] Started PMU receiver for %s (%s)", cfg.Name, mode)
 	return nil
 }
 
