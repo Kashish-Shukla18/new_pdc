@@ -441,6 +441,7 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 		ParseMs:            monitoring.Ms(parseDur),
 		QualityMs:          monitoring.Ms(qualityDur),
 	}
+}
 
 	published := false
 	if p.publisher != nil {
@@ -486,6 +487,16 @@ func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error
 		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
 			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
 		}
+	}()
+
+	log.Printf("readings fan-out consumers started: topic=%s groups=[%s, %s]",
+		dash.Topic(), dash.Group(), sinkC.Group())
+	monitoring.RecordConversation("SYSTEM", "PDC", "KAFKA", "readings-fanout", "ok",
+		fmt.Sprintf("groups=%s,%s", dash.Group(), sinkC.Group()))
+
+	return func() {
+		_ = dash.Close()
+		_ = sinkC.Close()
 	}
 	if !r.Timestamp.IsZero() {
 		if lag := time.Since(r.Timestamp); lag >= 0 && lag < 10*time.Second {
@@ -769,3 +780,4 @@ func main() {
 	}
 	log.Println("PDC shut down cleanly")
 }
+
