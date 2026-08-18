@@ -83,18 +83,6 @@ services:
     volumes:
       - influxdb-data:/var/lib/influxdb2
 
-  # ── GRAFANA (dashboard) ────────────────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:10.2.0
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin123
-    volumes:
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      - influxdb
-
   # ── PROMETHEUS (app monitoring) ────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.47.0
@@ -105,4 +93,3 @@ services:
 
 volumes:
   influxdb-data:
-  grafana-data:
