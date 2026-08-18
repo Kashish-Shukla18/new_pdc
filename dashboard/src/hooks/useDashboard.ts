@@ -24,6 +24,7 @@ import type {
   PMUConfig,
   PMUWithMeta,
   TabId,
+  UiTiming,
 } from '../types/dashboard'
 import { ageText, round } from '../utils/format'
 import {
@@ -60,6 +61,7 @@ export function useDashboard() {
   const [editPMU, setEditPMU] = useState<EditPMUForm | null>(null)
   const [updateSaving, setUpdateSaving] = useState(false)
   const [updateError, setUpdateError] = useState('')
+  const [uiTiming, setUiTiming] = useState<UiTiming>({ fetchMs: 0, jsonMs: 0, totalMs: 0 })
 
   const openEditPMU = useCallback((name: string) => {
     const cfg = dbConfigs.find((item) => item.name === name)
@@ -160,15 +162,23 @@ export function useDashboard() {
     if (isPaused) return
 
     const refresh = async () => {
+      const t0 = performance.now()
       try {
         const [stateRes, configRes] = await Promise.all([
           fetch('/conversation/state'),
           fetch('/api/pmus'),
         ])
+        const tNet = performance.now()
 
         if (stateRes.ok) {
           const data = (await stateRes.json()) as DashboardState
+          const tJson = performance.now()
           setDashboard(data)
+          setUiTiming({
+            fetchMs: tNet - t0,
+            jsonMs: tJson - tNet,
+            totalMs: tJson - t0,
+          })
         }
         if (configRes.ok) {
           const configs = (await configRes.json()) as PMUConfig[]
@@ -508,6 +518,7 @@ export function useDashboard() {
     filteredHelp,
     navItems,
     phasorItems,
+    uiTiming,
   }
 }
 

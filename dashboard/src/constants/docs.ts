@@ -108,7 +108,7 @@ export const PAGE_DOCS: PageDoc[] = [
       },
     ],
     notes: [
-      'Latency shown on Devices/Connectivity is derived from fps/ROCOF — not ICMP RTT.',
+      'Connectivity latency is measured pipeline time (receive → dashboard) when hop samples exist.',
     ],
   },
   {
@@ -163,27 +163,34 @@ export const PAGE_DOCS: PageDoc[] = [
     id: 'connectivity',
     title: 'Connectivity',
     purpose:
-      'Per-stream quality view: loss, derived latency/jitter, availability, and short recommendations.',
+      'Per-stream quality plus measured pipeline hop times so you can see which function is slow.',
     dataSources: [
-      'Live frame counts, quality rejects, FPS, and short trends',
-      'Loss / latency / jitter calculated in the browser from that state',
+      'Live frame counts, quality rejects, FPS',
+      'Per-stage wall clocks: TCP dial, handshake, TCP read, Kafka publish/lag, parse, quality, readings publish, dashboard record, Redis/Influx, /conversation/state JSON, browser poll',
     ],
     sections: [
+      {
+        heading: 'Pipeline hop timing',
+        items: [
+          'Slowest function is the hop with the highest average among ingest/process/dashboard/sink',
+          'Connection cards: TCP dial and CFG-2 handshake (once per session)',
+          'Bars: last / avg / p95 over the last ~256 samples per stage',
+          'E2E receive → dashboard is time from TCP receive stamp to RecordReading',
+          'UI refresh is the browser fetch of /conversation/state (plus JSON parse)',
+        ],
+      },
       {
         heading: 'KPIs and chart',
         items: [
           'Healthy / Degraded / Offline counts',
-          'Average latency, jitter, loss, availability',
-          'Derived latency trend (~30 points) — relative only, not true RTT',
+          'Average latency now uses E2E receive→dashboard when hop data is present',
         ],
       },
       {
         heading: 'Matrix',
         items: [
           'Per PMU: status, loss %, latency, jitter, availability, tip',
-          'Healthy — connected, low loss/latency',
-          'Degraded — elevated loss or latency',
-          'Offline — no recent frames',
+          'Click a row for last hop times on that PMU',
         ],
       },
     ],

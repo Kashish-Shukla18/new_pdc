@@ -19,6 +19,7 @@ import (
 	"pdc/monitoring"
 	"pdc/output"
 	"pdc/parser"
+	"pdc/receiver"
 	"pdc/store"
 )
 
@@ -29,11 +30,12 @@ type pipeline struct {
 	kafkaSpool          *output.ReadingSpool
 	sinkSpool           *output.ReadingSpool
 	dropQualityRejected bool
-	traceMu             sync.Mutex
-	traceCounts         map[string]int
-	// sinkCh decouples the sink (Redis + InfluxDB) from the Kafka hot path.
-	// Frames are enqueued here and drained by sinkWorkers in the background,
-	// so a slow InfluxDB flush never blocks Kafka publishing or the frame loop.
+	// fanOutViaKafka: when true, dashboard + Redis/Influx are fed by Kafka
+	// readings consumers (separate consumer groups). HandleFrame only publishes.
+	fanOutViaKafka bool
+	traceMu        sync.Mutex
+	traceCounts    map[string]int
+	// sinkCh decouples Redis/Influx writes from the consumer hot path.
 	sinkCh chan parser.Reading
 }
 
@@ -128,6 +130,7 @@ func newPipeline(ctx context.Context) *pipeline {
 		kafkaSpool:          kafkaSpool,
 		sinkSpool:           sinkSpool,
 		dropQualityRejected: dropQualityRejected,
+		fanOutViaKafka:      publisher != nil && envBool("KAFKA_READINGS_FANOUT", true),
 		traceCounts:         make(map[string]int),
 		sinkCh:              make(chan parser.Reading, sinkBufSize),
 	}
@@ -242,7 +245,10 @@ func (p *pipeline) StartSinkWorkers(ctx context.Context) {
 		go func() {
 			for r := range p.sinkCh {
 				monitoring.DecSinkInflight()
-				if err := p.sink.Store(ctx, r); err != nil {
+				t0 := time.Now()
+				err := p.sink.Store(ctx, r)
+				monitoring.ObserveStage(r.PMUName, monitoring.StageSinkStore, time.Since(t0))
+				if err != nil {
 					monitoring.IncStoreErrors()
 					monitoring.IncSinkErrorForPMU(r.PMUName)
 					log.Printf("[%s] sink store error: %v", r.PMUName, err)
@@ -281,9 +287,45 @@ func (p *pipeline) Close() {
 }
 
 func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) {
+	p.handleFrame(ctx, pmuName, raw, ingestMeta{receivedAt: time.Now()})
+}
+
+type ingestMeta struct {
+	receivedAt time.Time
+	tcpWait    time.Duration
+	tcpCopy    time.Duration
+	tcpRead    time.Duration
+	kafkaLag   time.Duration
+}
+
+func (p *pipeline) HandleRawData(ctx context.Context, frame output.RawFrame) {
+	meta := ingestMeta{
+		receivedAt: frame.ReceivedAt,
+		tcpWait:    frame.TCPWait,
+		tcpCopy:    frame.TCPCopy,
+		tcpRead:    frame.TCPRead,
+	}
+	if meta.tcpRead == 0 {
+		meta.tcpRead = meta.tcpWait + meta.tcpCopy
+	}
+	parseGate := time.Now()
+	if meta.receivedAt.IsZero() {
+		meta.receivedAt = parseGate
+	} else if lag := parseGate.Sub(meta.receivedAt); lag >= 0 {
+		meta.kafkaLag = lag
+		monitoring.ObserveStage(frame.PMUName, monitoring.StageRawKafkaLag, lag)
+		monitoring.ObserveStage(frame.PMUName, monitoring.StageFrameToParse, lag)
+	}
+	p.handleFrame(ctx, frame.PMUName, frame.Payload, meta)
+}
+
+func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, meta ingestMeta) {
 	monitoring.IncFramesReceived()
 
+	parseStart := time.Now()
 	reading, err := parser.ParseDataFrame(pmuName, raw)
+	parseDur := time.Since(parseStart)
+	monitoring.ObserveStage(pmuName, monitoring.StageParse, parseDur)
 	if err != nil {
 		monitoring.IncParseErrors()
 		log.Printf("[%s] parse error: %v", pmuName, err)
@@ -291,7 +333,6 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 		return
 	}
 	monitoring.IncFramesParsed()
-	monitoring.RecordReading(reading)
 
 	if traceIndex, ok := p.nextTraceIndex(pmuName); ok {
 		log.Printf("[%s] ================================================================================", pmuName)
@@ -324,10 +365,10 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 		// Phasors (raw + derived)
 		log.Printf("[%s] > PHASOR MEASUREMENTS (Rectangular -> Polar)", pmuName)
 
-		fmtPhasor := func(name string, p parser.Phasor) {
+		fmtPhasor := func(name string, ph parser.Phasor) {
 			log.Printf("[%s]   %s:", pmuName, name)
-			log.Printf("[%s]     Rectangular: R=%.4f V/A, I=%.4f V/A", pmuName, p.Real, p.Imag)
-			log.Printf("[%s]     Polar:       Mag=%.4f V/A RMS, Phase=%.4f deg (%.6f rad)", pmuName, p.Magnitude, p.PhaseDegrees, p.PhaseRadians)
+			log.Printf("[%s]     Rectangular: R=%.4f V/A, I=%.4f V/A", pmuName, ph.Real, ph.Imag)
+			log.Printf("[%s]     Polar:       Mag=%.4f V/A RMS, Phase=%.4f deg (%.6f rad)", pmuName, ph.Magnitude, ph.PhaseDegrees, ph.PhaseRadians)
 		}
 
 		fmtPhasor("Voltage Phase A (VA)", reading.VA)
@@ -372,63 +413,206 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 		log.Printf("[%s] ================================================================================", pmuName)
 	}
 
-	if err := p.checker.Validate(reading); err != nil {
+	qualityStart := time.Now()
+	qerr := p.checker.Validate(reading)
+	qualityDur := time.Since(qualityStart)
+	monitoring.ObserveStage(pmuName, monitoring.StageQuality, qualityDur)
+	if qerr != nil {
 		monitoring.IncQualityRejected()
 		monitoring.IncQualityRejectForPMU(pmuName)
-		log.Printf("[%s] quality reject: %v", pmuName, err)
-		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", err.Error())
+		log.Printf("[%s] quality reject: %v", pmuName, qerr)
+		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", qerr.Error())
 		if p.dropQualityRejected {
 			return
 		}
 		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "warn", "continuing despite quality reject to avoid data loss")
 	}
 
-	if err := p.publisher.Publish(ctx, reading); err != nil {
-		monitoring.IncQueuePublishErrors()
-		monitoring.IncKafkaErrorForPMU(pmuName)
-		log.Printf("[%s] kafka publish error: %v", pmuName, err)
-		monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "publish", "error", err.Error())
-		if p.kafkaSpool != nil {
-			if spoolErr := p.kafkaSpool.Append(reading); spoolErr != nil {
-				log.Printf("[%s] kafka spool append error: %v", pmuName, spoolErr)
-				monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "spool", "error", spoolErr.Error())
-			} else {
-				monitoring.IncSpoolQueued()
-				monitoring.IncSpoolQueuedForPMU(pmuName)
-				monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "spool", "queued", "publish failed; buffered to disk")
-			}
-		}
+	if meta.receivedAt.IsZero() {
+		meta.receivedAt = time.Now()
+	}
+	reading.Trace = parser.LatencyTrace{
+		ReceivedAtUnixNano: meta.receivedAt.UnixNano(),
+		TcpWaitMs:          monitoring.Ms(meta.tcpWait),
+		TcpCopyMs:          monitoring.Ms(meta.tcpCopy),
+		TcpReadMs:          monitoring.Ms(meta.tcpRead),
+		KafkaLagMs:         monitoring.Ms(meta.kafkaLag),
+		FrameToParseMs:     monitoring.Ms(meta.kafkaLag),
+		ParseMs:            monitoring.Ms(parseDur),
+		QualityMs:          monitoring.Ms(qualityDur),
 	}
 
-	// Enqueue to sink channel (non-blocking): if channel is full, spool directly
-	// rather than blocking Kafka or the frame goroutine.
-	if p.sink != nil {
-		select {
-		case p.sinkCh <- reading:
-			monitoring.IncSinkInflight()
-		default:
-			monitoring.IncStoreErrors()
-			monitoring.IncSinkErrorForPMU(pmuName)
-			log.Printf("[%s] sink channel full – spooling directly", pmuName)
-			monitoring.RecordConversation(pmuName, "PDC", "SINK", "overload", "warn", "sink channel full; spooled")
-			if p.sinkSpool != nil {
-				if spoolErr := p.sinkSpool.Append(reading); spoolErr != nil {
-					log.Printf("[%s] sink spool append error: %v", pmuName, spoolErr)
+	published := false
+	if p.publisher != nil {
+		pubStart := time.Now()
+		if err := p.publisher.Publish(ctx, reading); err != nil {
+			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
+			monitoring.IncQueuePublishErrors()
+			monitoring.IncKafkaErrorForPMU(pmuName)
+			log.Printf("[%s] kafka publish error: %v", pmuName, err)
+			monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "publish", "error", err.Error())
+			if p.kafkaSpool != nil {
+				if spoolErr := p.kafkaSpool.Append(reading); spoolErr != nil {
+					log.Printf("[%s] kafka spool append error: %v", pmuName, spoolErr)
+					monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "spool", "error", spoolErr.Error())
 				} else {
 					monitoring.IncSpoolQueued()
 					monitoring.IncSpoolQueuedForPMU(pmuName)
+					monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "spool", "queued", "publish failed; buffered to disk")
 				}
 			}
+		} else {
+			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
+			published = true
 		}
 	}
 
-	monitoring.ObserveLatency(time.Since(reading.Timestamp))
+	// Fan-out via Kafka consumers when publish succeeded. On publish failure / no
+	// publisher, deliver locally so dashboard + sink stay alive.
+	if p.fanOutViaKafka && published {
+		return
+	}
+	p.deliverLocal(reading)
+}
+
+// OnDashboardReading feeds the live SSE dashboard from the pdc-dashboard consumer group.
+func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error {
+	monitoring.IncReadingsConsumed()
+	t0 := time.Now()
+	monitoring.RecordReading(r)
+	monitoring.ObserveStage(r.PMUName, monitoring.StageDashboardRecord, time.Since(t0))
+	if r.Trace.ReceivedAtUnixNano > 0 {
+		recv := time.Unix(0, r.Trace.ReceivedAtUnixNano)
+		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
+			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
+		}
+	}
+	if !r.Timestamp.IsZero() {
+		if lag := time.Since(r.Timestamp); lag >= 0 && lag < 10*time.Second {
+			monitoring.ObserveStage(r.PMUName, monitoring.StageE2EPMUToDash, lag)
+		}
+	}
+	return nil
+}
+
+// OnSinkReading enqueues Redis/Influx work from the pdc-sink consumer group.
+func (p *pipeline) OnSinkReading(_ context.Context, r parser.Reading) error {
+	monitoring.IncReadingsConsumed()
+	p.enqueueSink(r)
+	monitoring.ObserveLatency(time.Since(r.Timestamp))
+	return nil
+}
+
+func (p *pipeline) deliverLocal(r parser.Reading) {
+	t0 := time.Now()
+	monitoring.RecordReading(r)
+	monitoring.ObserveStage(r.PMUName, monitoring.StageDashboardRecord, time.Since(t0))
+	if r.Trace.ReceivedAtUnixNano > 0 {
+		recv := time.Unix(0, r.Trace.ReceivedAtUnixNano)
+		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
+			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
+		}
+	}
+	p.enqueueSink(r)
+	monitoring.ObserveLatency(time.Since(r.Timestamp))
+}
+
+func (p *pipeline) enqueueSink(r parser.Reading) {
+	if p.sink == nil {
+		return
+	}
+	select {
+	case p.sinkCh <- r:
+		monitoring.IncSinkInflight()
+	default:
+		monitoring.IncStoreErrors()
+		monitoring.IncSinkErrorForPMU(r.PMUName)
+		log.Printf("[%s] sink channel full – spooling directly", r.PMUName)
+		monitoring.RecordConversation(r.PMUName, "PDC", "SINK", "overload", "warn", "sink channel full; spooled")
+		if p.sinkSpool != nil {
+			if spoolErr := p.sinkSpool.Append(r); spoolErr != nil {
+				log.Printf("[%s] sink spool append error: %v", r.PMUName, spoolErr)
+			} else {
+				monitoring.IncSpoolQueued()
+				monitoring.IncSpoolQueuedForPMU(r.PMUName)
+			}
+		}
+	}
+}
+
+// StartReadingsConsumers starts independent Kafka consumer groups for dashboard and sink fan-out.
+func (p *pipeline) StartReadingsConsumers(ctx context.Context) (cleanup func()) {
+	noop := func() {}
+	if p == nil || !p.fanOutViaKafka || p.publisher == nil {
+		log.Printf("readings kafka fan-out disabled (local dashboard+sink delivery)")
+		return noop
+	}
+
+	dash := output.NewReadingsConsumerFromEnv("KAFKA_DASHBOARD_GROUP", "pdc-dashboard")
+	sinkC := output.NewReadingsConsumerFromEnv("KAFKA_SINK_GROUP", "pdc-sink")
+	if dash == nil || sinkC == nil {
+		log.Printf("readings consumers unavailable – falling back to local delivery")
+		p.fanOutViaKafka = false
+		return noop
+	}
+
+	go func() {
+		if err := dash.Run(ctx, p.OnDashboardReading); err != nil && ctx.Err() == nil {
+			log.Printf("dashboard readings consumer stopped: %v", err)
+		}
+	}()
+	go func() {
+		if err := sinkC.Run(ctx, p.OnSinkReading); err != nil && ctx.Err() == nil {
+			log.Printf("sink readings consumer stopped: %v", err)
+		}
+	}()
+
+	log.Printf("readings fan-out consumers started: topic=%s groups=[%s, %s]",
+		dash.Topic(), dash.Group(), sinkC.Group())
+	monitoring.RecordConversation("SYSTEM", "PDC", "KAFKA", "readings-fanout", "ok",
+		fmt.Sprintf("groups=%s,%s", dash.Group(), sinkC.Group()))
+
+	return func() {
+		_ = dash.Close()
+		_ = sinkC.Close()
+	}
+}
+
+// HydrateFromRedis seeds the in-memory dashboard bus from Redis :latest keys.
+// This recovers live UI state after restart and supports shared state across instances.
+func (p *pipeline) HydrateFromRedis(ctx context.Context) {
+	if p == nil || p.sink == nil {
+		return
+	}
+	readings, err := p.sink.ListLatestReadings(ctx)
+	if err != nil {
+		log.Printf("redis hydrate warning: %v", err)
+		monitoring.RecordConversation("SYSTEM", "PDC", "REDIS", "hydrate", "warn", err.Error())
+		return
+	}
+	for _, r := range readings {
+		monitoring.RecordReading(r)
+	}
+	log.Printf("redis live-state hydrate: loaded %d latest reading(s)", len(readings))
+	if len(readings) > 0 {
+		monitoring.RecordConversation("SYSTEM", "PDC", "REDIS", "hydrate", "ok",
+			fmt.Sprintf("loaded %d latest reading(s)", len(readings)))
+	}
 }
 
 func main() {
 	metricsAddr := flag.String("metrics-addr", ":2112", "prometheus metrics listen address")
 	apiAddr := flag.String("api-addr", ":8081", "REST API listen address")
+	modeFlag := flag.String("mode", envOrFallback("PDC_MODE", "all"),
+		"run mode: all (ingress+processor via Kafka), ingress (TCP→raw Kafka), processor (raw Kafka→parse/sink), direct (TCP→parse, bypass raw Kafka)")
 	flag.Parse()
+
+	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
+	switch mode {
+	case "all", "ingress", "processor", "direct":
+	default:
+		log.Fatalf("invalid -mode %q (want all|ingress|processor|direct)", mode)
+	}
 
 	dbStore, err := store.NewStore()
 	if err != nil {
@@ -441,33 +625,147 @@ func main() {
 
 	monitoring.StartServer(ctx, *metricsAddr)
 	log.Printf("prometheus metrics listening on %s/metrics", *metricsAddr)
+	log.Printf("PDC mode=%s", mode)
 
-	pl := newPipeline(ctx)
-	defer pl.Close()
-	pl.StartReplay(ctx)
-	pl.StartSinkWorkers(ctx)
+	runProcessor := mode == "all" || mode == "processor" || mode == "direct"
+	runIngress := mode == "all" || mode == "ingress" || mode == "direct"
 
-	monitoring.RecordConversation("SYSTEM", "PDC", "SYSTEM", "startup", "ok", "pipeline started")
-
-	pmuManager := manager.NewPMUManager(func(pmuName string, raw []byte) {
-		pl.HandleFrame(ctx, pmuName, raw)
-	})
-
-	api.StartServer(*apiAddr, dbStore, pmuManager)
-	log.Printf("REST API listening on %s", *apiAddr)
-
-	pmus, err := dbStore.GetAllPMUs(ctx)
-	if err != nil {
-		log.Printf("failed to load PMUs from DB: %v", err)
-	} else {
-		for _, pmu := range pmus {
-			if err := pmuManager.StartPMU(ctx, pmu); err != nil {
-				log.Printf("failed to start PMU %s: %v", pmu.Name, err)
+	// Persist CFG2 profiles so DATA can be parsed after a processor restart
+	// without waiting for ingress to re-handshake and republish CFG2.
+	profileDir := ""
+	if envBool("CFG2_PROFILE_PERSIST", true) {
+		profileDir = envOrFallback("CFG2_PROFILE_DIR", "data/profiles")
+	}
+	parser.ConfigureProfileStore(profileDir)
+	if profileDir != "" {
+		n, err := parser.LoadPersistedProfiles(profileDir)
+		if err != nil {
+			log.Printf("cfg2 profile hydrate warning: %v", err)
+		} else {
+			log.Printf("cfg2 profile store: dir=%s hydrated=%d", profileDir, n)
+			if n > 0 {
+				monitoring.RecordConversation("SYSTEM", "PDC", "CFG2", "hydrate", "ok",
+					fmt.Sprintf("loaded %d persisted profile(s) from %s", n, profileDir))
 			}
 		}
+	} else {
+		log.Printf("cfg2 profile persistence disabled")
+	}
+
+	var pl *pipeline
+	var rawPub *output.RawFramePublisher
+	var rawConsumer *output.RawFrameConsumer
+
+	if runProcessor {
+		pl = newPipeline(ctx)
+		defer pl.Close()
+		pl.HydrateFromRedis(ctx)
+		pl.StartReplay(ctx)
+		pl.StartSinkWorkers(ctx)
+		cleanupReadings := pl.StartReadingsConsumers(ctx)
+		defer cleanupReadings()
+		monitoring.RecordConversation("SYSTEM", "PDC", "SYSTEM", "startup", "ok",
+			fmt.Sprintf("processor pipeline started (mode=%s fanout_kafka=%t)", mode, pl.fanOutViaKafka))
+	}
+
+	if mode == "all" || mode == "ingress" {
+		rawPub = output.NewRawFramePublisherFromEnv()
+		if rawPub == nil {
+			log.Fatalf("mode=%s requires Kafka brokers (set KAFKA_BROKERS)", mode)
+		}
+		defer func() { _ = rawPub.Close() }()
+	}
+
+	if mode == "all" || mode == "processor" {
+		rawConsumer = output.NewRawFrameConsumerFromEnv()
+		if rawConsumer == nil {
+			log.Fatalf("mode=%s requires Kafka brokers (set KAFKA_BROKERS)", mode)
+		}
+		defer func() { _ = rawConsumer.Close() }()
+
+		headerTexts := sync.Map{} // pmuName -> header text from HDR frames
+		go func() {
+			err := rawConsumer.Run(ctx, func(frameCtx context.Context, frame output.RawFrame) error {
+				monitoring.IncRawFramesConsumed()
+				switch frame.FrameType {
+				case output.FrameTypeHDR:
+					text, perr := parser.ParseHeaderFrame(frame.Payload)
+					if perr != nil {
+						log.Printf("[%s] raw HDR parse error: %v", frame.PMUName, perr)
+						return nil
+					}
+					headerTexts.Store(frame.PMUName, text)
+					monitoring.RecordConversation(frame.PMUName, "KAFKA", "PDC", "raw-hdr", "ok",
+						fmt.Sprintf("consumed HEADER (%d bytes)", len(frame.Payload)))
+					return nil
+				case output.FrameTypeCFG2:
+					profile, perr := parser.ParseCFG2Frame(frame.Payload)
+					if perr != nil {
+						monitoring.IncParseErrors()
+						log.Printf("[%s] raw CFG2 parse error: %v", frame.PMUName, perr)
+						return perr
+					}
+					if v, ok := headerTexts.Load(frame.PMUName); ok {
+						if s, ok := v.(string); ok {
+							profile.HeaderText = s
+						}
+					}
+					parser.SetProfile(frame.PMUName, profile)
+					monitoring.RecordConversation(frame.PMUName, "KAFKA", "PDC", "raw-cfg2", "ok",
+						fmt.Sprintf("registered CFG2 station=%q rate=%d", profile.Station, profile.DataRate))
+					return nil
+				case output.FrameTypeData, "":
+					pl.HandleRawData(frameCtx, frame)
+					return nil
+				default:
+					log.Printf("[%s] ignoring unknown raw frame type %q", frame.PMUName, frame.FrameType)
+					return nil
+				}
+			})
+			if err != nil && ctx.Err() == nil {
+				log.Printf("raw kafka consumer stopped: %v", err)
+			}
+		}()
+		log.Printf("raw kafka consumer started (topic=%s group=%s)",
+			envOrFallback("KAFKA_RAW_TOPIC", "pmu.raw.frames"),
+			envOrFallback("KAFKA_RAW_GROUP", "pdc-processor"))
+	}
+
+	var pmuManager *manager.PMUManager
+	if runIngress {
+		var directHandler receiver.FrameHandler
+		var ingressPub receiver.RawFramePublisher
+		if mode == "direct" {
+			directHandler = func(pmuName string, raw []byte) {
+				pl.HandleFrame(ctx, pmuName, raw)
+			}
+		} else {
+			ingressPub = rawPub
+		}
+		pmuManager = manager.NewPMUManager(directHandler, ingressPub)
+		api.StartServer(*apiAddr, dbStore, pmuManager)
+		log.Printf("REST API listening on %s", *apiAddr)
+
+		pmus, err := dbStore.GetAllPMUs(ctx)
+		if err != nil {
+			log.Printf("failed to load PMUs from DB: %v", err)
+		} else {
+			for _, pmu := range pmus {
+				if err := pmuManager.StartPMU(ctx, pmu); err != nil {
+					log.Printf("failed to start PMU %s: %v", pmu.Name, err)
+				}
+			}
+		}
+	} else {
+		// Processor-only: still expose API for PMU CRUD, but no live TCP receivers.
+		pmuManager = manager.NewPMUManager(nil, nil)
+		api.StartServer(*apiAddr, dbStore, pmuManager)
+		log.Printf("REST API listening on %s (processor-only; PMU TCP owned by ingress)", *apiAddr)
 	}
 
 	<-ctx.Done()
-	pmuManager.StopAll()
+	if pmuManager != nil {
+		pmuManager.StopAll()
+	}
 	log.Println("PDC shut down cleanly")
 }

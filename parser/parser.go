@@ -63,12 +63,12 @@ type NamedAnalog struct {
 // Reading is the parsed payload from one C37.118 data frame.
 type Reading struct {
 	// ─ Identity & Timing
-	PMUName       string    `json:"pmu_name"`
-	SyncWord      uint16    `json:"sync_word"`
-	FrameType     string    `json:"frame_type"`
-	FrameSize     int       `json:"frame_size"`
-	IDCode        uint16    `json:"idcode"`
-	SOC           uint32    `json:"soc"`
+	PMUName       string         `json:"pmu_name"`
+	SyncWord      uint16         `json:"sync_word"`
+	FrameType     string         `json:"frame_type"`
+	FrameSize     int            `json:"frame_size"`
+	IDCode        uint16         `json:"idcode"`
+	SOC           uint32         `json:"soc"`
 	FracSecRaw    uint32         `json:"fracsec_raw"`
 	TimeQuality   uint8          `json:"time_quality"` // FRACSEC high byte (raw MSG_TQ)
 	MsgTQ         MsgTimeQuality `json:"msg_tq"`
@@ -121,6 +121,23 @@ type Reading struct {
 
 	// ─ Analog & Digital
 	Digital uint16 `json:"digital"`
+
+	// ─ Pipeline hop times (omitted from most storage views; used for latency UI)
+	Trace LatencyTrace `json:"trace,omitempty"`
+}
+
+// LatencyTrace carries hop timings so the dashboard can show which function is slow
+// even when ingress and processor run in different processes.
+type LatencyTrace struct {
+	ReceivedAtUnixNano int64   `json:"received_at_ns,omitempty"`
+	TcpWaitMs          float64 `json:"tcp_wait_ms,omitempty"`
+	TcpCopyMs          float64 `json:"tcp_copy_ms,omitempty"`
+	TcpReadMs          float64 `json:"tcp_read_ms,omitempty"`
+	KafkaLagMs         float64 `json:"kafka_lag_ms,omitempty"`
+	FrameToParseMs     float64 `json:"frame_to_parse_ms,omitempty"`
+	ParseMs            float64 `json:"parse_ms,omitempty"`
+	QualityMs          float64 `json:"quality_ms,omitempty"`
+	ReadingsPublishMs  float64 `json:"readings_pub_ms,omitempty"`
 }
 
 // decodeStat unpacks STAT per IEEE C37.118.2-2011 Table 7.
