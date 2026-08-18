@@ -13,7 +13,9 @@ interface HeaderProps {
 export function Header({ onMenuToggle, sidebarOpen = false }: HeaderProps) {
   const headerRef = useRef<HTMLElement>(null)
   const clockLabel = useClock()
-  const { frameRate, systemTone, systemMessage, isPaused, setIsPaused, streamOnline, pmus } = useDashboardContext()
+  const { frameRate, systemTone, systemMessage, isPaused, setIsPaused, streamOnline, pmus, dashboard, uiTiming } = useDashboardContext()
+  const e2e = dashboard.latency?.stages.find((s) => s.id === 'e2e_recv_to_dashboard')
+  const slowest = dashboard.latency?.slowestLabel
 
   useEffect(() => {
     const header = headerRef.current
@@ -68,6 +70,21 @@ export function Header({ onMenuToggle, sidebarOpen = false }: HeaderProps) {
         <div className="header-pill accent">
           <span className="mono">{round(frameRate)} fps</span>
         </div>
+        {e2e && e2e.count > 0 && (
+          <div className={`header-pill ${e2e.avgMs > 80 ? 'system-state warn' : ''}`}>
+            <span className="mono">{round(e2e.avgMs, 1)} ms e2e</span>
+          </div>
+        )}
+        {slowest && (
+          <div className="header-pill" title="Slowest pipeline function (avg)">
+            <span>{slowest}</span>
+          </div>
+        )}
+        {uiTiming.totalMs > 0 && (
+          <div className="header-pill" title="Dashboard poll + JSON parse">
+            <span className="mono">UI {round(uiTiming.totalMs, 0)} ms</span>
+          </div>
+        )}
         <div className={`header-pill ${streamOnline && !isPaused ? 'live' : ''}`}>
           <span className={`dot ${streamOnline && !isPaused ? '' : 'warn'}`} />
           <span>{streamOnline && !isPaused ? 'Live' : 'Standby'}</span>

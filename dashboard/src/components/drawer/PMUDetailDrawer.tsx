@@ -26,6 +26,19 @@ export function PMUDetailDrawer() {
           <p><strong>Frames:</strong> {drawerPMU.totalFrames}</p>
           <p><strong>Approx FPS:</strong> {round(drawerPMU.approxFps, 2)}</p>
           <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
+          {drawerPMU.lastHops && Object.keys(drawerPMU.lastHops).length > 0 && (
+            <div className="drawer-hops">
+              <p><strong>Last hop times</strong></p>
+              {Object.entries(drawerPMU.lastHops)
+                .sort((a, b) => b[1] - a[1])
+                .map(([stage, ms]) => (
+                  <p key={stage} className="drawer-hop-row">
+                    <span>{stage}</span>
+                    <span className="mono">{round(ms, ms < 1 ? 2 : 1)} ms</span>
+                  </p>
+                ))}
+            </div>
+          )}
           {drawerPMU.lastError && <p><strong>Last error:</strong> {drawerPMU.lastError}</p>}
           <button
             type="button"

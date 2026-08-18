@@ -25,19 +25,19 @@ type ConversationEvent struct {
 }
 
 type TrendPoint struct {
-	TS             int64   `json:"ts"`
-	Frequency      float64 `json:"frequency"`
-	FrequencyDev   float64 `json:"frequencyDev"` // Hz relative to CFG FNOM
-	MW             float64 `json:"mw"`
-	MVAR           float64 `json:"mvar"`
-	ROCOF          float64 `json:"rocof"`
-	StatDataError  bool    `json:"statDataError"`
-	VA             float64 `json:"va"`
-	VB             float64 `json:"vb"`
-	VC             float64 `json:"vc"`
-	IA             float64 `json:"ia"`
-	IB             float64 `json:"ib"`
-	IC             float64 `json:"ic"`
+	TS            int64   `json:"ts"`
+	Frequency     float64 `json:"frequency"`
+	FrequencyDev  float64 `json:"frequencyDev"` // Hz relative to CFG FNOM
+	MW            float64 `json:"mw"`
+	MVAR          float64 `json:"mvar"`
+	ROCOF         float64 `json:"rocof"`
+	StatDataError bool    `json:"statDataError"`
+	VA            float64 `json:"va"`
+	VB            float64 `json:"vb"`
+	VC            float64 `json:"vc"`
+	IA            float64 `json:"ia"`
+	IB            float64 `json:"ib"`
+	IC            float64 `json:"ic"`
 }
 
 type PhasorVector struct {
@@ -55,17 +55,17 @@ type PhasorSnapshot struct {
 
 // FrameStamp is timing/STAT from the latest parsed DATA frame (wire values).
 type FrameStamp struct {
-	SOC          uint32             `json:"soc"`
-	FracSecRaw   uint32             `json:"fracSecRaw"`
-	FracSecCount uint32             `json:"fracSecCount"`
-	TimeQuality  uint8              `json:"timeQuality"`
+	SOC          uint32                `json:"soc"`
+	FracSecRaw   uint32                `json:"fracSecRaw"`
+	FracSecCount uint32                `json:"fracSecCount"`
+	TimeQuality  uint8                 `json:"timeQuality"`
 	MsgTQ        parser.MsgTimeQuality `json:"msgTq"`
-	Stat         uint16             `json:"stat"`
-	StatDetail   parser.STATDecoded `json:"statDetail"`
-	IDCode       uint16             `json:"idCode"`
-	SyncWord     uint16             `json:"syncWord"`
-	Digital      uint16             `json:"digital"`
-	Digitals     []uint16           `json:"digitals,omitempty"`
+	Stat         uint16                `json:"stat"`
+	StatDetail   parser.STATDecoded    `json:"statDetail"`
+	IDCode       uint16                `json:"idCode"`
+	SyncWord     uint16                `json:"syncWord"`
+	Digital      uint16                `json:"digital"`
+	Digitals     []uint16              `json:"digitals,omitempty"`
 }
 
 type NamedPhasorView struct {
@@ -95,52 +95,54 @@ type ChannelSnapshot struct {
 
 // CFGSummary is a compact view of the CFG-2 profile used by the parser.
 type CFGSummary struct {
-	Available  bool     `json:"available"`
-	SyncWord   uint16   `json:"syncWord"`
-	IDCode     uint16   `json:"idCode"`
-	Station    string   `json:"station"`
-	FnomHz     int      `json:"fnomHz"`
-	DataRate   int16    `json:"dataRate"`
-	Format     uint16   `json:"format"`
-	Polar      bool     `json:"polar"`
-	PhFloat    bool     `json:"phFloat"`
-	AnFloat    bool     `json:"anFloat"`
-	FreqFloat  bool     `json:"freqFloat"`
-	Phasors    []string `json:"phasors"`
-	Analogs    []string `json:"analogs"`
-	DigitalWords int    `json:"digitalWords"`
-	CfgCnt     uint16   `json:"cfgCnt"`
-	HeaderText string   `json:"headerText,omitempty"`
+	Available    bool     `json:"available"`
+	SyncWord     uint16   `json:"syncWord"`
+	IDCode       uint16   `json:"idCode"`
+	Station      string   `json:"station"`
+	FnomHz       int      `json:"fnomHz"`
+	DataRate     int16    `json:"dataRate"`
+	Format       uint16   `json:"format"`
+	Polar        bool     `json:"polar"`
+	PhFloat      bool     `json:"phFloat"`
+	AnFloat      bool     `json:"anFloat"`
+	FreqFloat    bool     `json:"freqFloat"`
+	Phasors      []string `json:"phasors"`
+	Analogs      []string `json:"analogs"`
+	DigitalWords int      `json:"digitalWords"`
+	CfgCnt       uint16   `json:"cfgCnt"`
+	HeaderText   string   `json:"headerText,omitempty"`
 }
 
 type PMUState struct {
-	Name           string         `json:"name"`
-	Connected      bool           `json:"connected"`
-	ConnectionText string         `json:"connectionText"`
-	LastEventTime  time.Time      `json:"lastEventTime"`
-	LastFrameTime  time.Time      `json:"lastFrameTime"`
-	LastHandshake  time.Time      `json:"lastHandshake"`
-	LastError      string         `json:"lastError"`
-	TotalFrames    int64          `json:"totalFrames"`
-	ApproxFPS      float64        `json:"approxFps"`
-	QualityRejects int64          `json:"qualityRejects"`
-	KafkaErrors    int64          `json:"kafkaErrors"`
-	SinkErrors     int64          `json:"sinkErrors"`
-	SpoolQueued    int64          `json:"spoolQueued"`
-	LastReading    TrendPoint       `json:"lastReading"`
-	LastPhasor     PhasorSnapshot   `json:"lastPhasor"`
-	LastChannels   ChannelSnapshot  `json:"lastChannels"`
-	LastFrame      FrameStamp       `json:"lastFrame"`
-	CFG            CFGSummary       `json:"cfg"`
-	Trends         []TrendPoint     `json:"trends"`
-	FnomHz         int              `json:"fnomHz"`
-	StatDataError  bool             `json:"statDataError"`
+	Name           string             `json:"name"`
+	Connected      bool               `json:"connected"`
+	ConnectionText string             `json:"connectionText"`
+	LastEventTime  time.Time          `json:"lastEventTime"`
+	LastFrameTime  time.Time          `json:"lastFrameTime"`
+	LastHandshake  time.Time          `json:"lastHandshake"`
+	LastError      string             `json:"lastError"`
+	TotalFrames    int64              `json:"totalFrames"`
+	ApproxFPS      float64            `json:"approxFps"`
+	QualityRejects int64              `json:"qualityRejects"`
+	KafkaErrors    int64              `json:"kafkaErrors"`
+	SinkErrors     int64              `json:"sinkErrors"`
+	SpoolQueued    int64              `json:"spoolQueued"`
+	LastReading    TrendPoint         `json:"lastReading"`
+	LastPhasor     PhasorSnapshot     `json:"lastPhasor"`
+	LastChannels   ChannelSnapshot    `json:"lastChannels"`
+	LastFrame      FrameStamp         `json:"lastFrame"`
+	CFG            CFGSummary         `json:"cfg"`
+	Trends         []TrendPoint       `json:"trends"`
+	FnomHz         int                `json:"fnomHz"`
+	StatDataError  bool               `json:"statDataError"`
+	LastHops       map[string]float64 `json:"lastHops,omitempty"`
 }
 
 type DashboardState struct {
-	NowUTC     time.Time  `json:"nowUtc"`
-	PMUs       []PMUState `json:"pmus"`
-	EventCount int        `json:"eventCount"`
+	NowUTC     time.Time       `json:"nowUtc"`
+	PMUs       []PMUState      `json:"pmus"`
+	EventCount int             `json:"eventCount"`
+	Latency    PipelineLatency `json:"latency"`
 }
 
 type pmuRuntime struct {
@@ -257,7 +259,6 @@ func getOrCreatePMU(name string) *pmuRuntime {
 
 func RecordReading(r parser.Reading) {
 	conversationBus.mu.Lock()
-	defer conversationBus.mu.Unlock()
 
 	st := getOrCreatePMU(r.PMUName)
 	now := time.Now().UTC()
@@ -362,6 +363,9 @@ func RecordReading(r parser.Reading) {
 		st.trends = st.trends[:maxTrendPoints-1]
 	}
 	st.trends = append(st.trends, t)
+	conversationBus.mu.Unlock()
+
+	ApplyTraceHops(r.PMUName, r.Trace)
 }
 
 func IncQualityRejectForPMU(pmu string) {
@@ -470,6 +474,7 @@ func registerConversationHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/conversation/events", handleConversationEvents)
 	mux.HandleFunc("/conversation/recent", handleConversationRecent)
 	mux.HandleFunc("/conversation/state", handleConversationState)
+	mux.HandleFunc("/conversation/latency", handleConversationLatency)
 }
 
 func handleConversationPage(w http.ResponseWriter, _ *http.Request) {
@@ -484,9 +489,16 @@ func handleConversationRecent(w http.ResponseWriter, _ *http.Request) {
 }
 
 func handleConversationState(w http.ResponseWriter, _ *http.Request) {
+	t0 := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(snapshotDashboard())
+	ObserveStage("SYSTEM", StageStateSnapshot, time.Since(t0))
+}
+
+func handleConversationLatency(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(SnapshotPipelineLatency())
 }
 
 func handleConversationEvents(w http.ResponseWriter, r *http.Request) {
@@ -603,6 +615,13 @@ func snapshotDashboard() DashboardState {
 		})
 	}
 
+	hops := copyAllLastHops()
+	for i := range pmus {
+		if h := hops[pmus[i].Name]; len(h) > 0 {
+			pmus[i].LastHops = h
+		}
+	}
+
 	sort.Slice(pmus, func(i, j int) bool {
 		return pmus[i].Name < pmus[j].Name
 	})
@@ -611,6 +630,7 @@ func snapshotDashboard() DashboardState {
 		NowUTC:     now,
 		PMUs:       pmus,
 		EventCount: len(conversationBus.events),
+		Latency:    SnapshotPipelineLatency(),
 	}
 }
 

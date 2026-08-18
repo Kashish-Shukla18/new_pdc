@@ -87,33 +87,52 @@ func buildCMDFrame(idcode uint16, cmd uint16) []byte {
 }
 
 // readFrame reads one complete C37.118 frame from r, returning the raw bytes.
-// It reads the fixed 4-byte header first to learn FRAMESIZE, then reads the rest.
 func readFrame(r io.Reader) ([]byte, error) {
+	tf, err := readFrameTimed(r)
+	return tf.raw, err
+}
+
+type timedFrame struct {
+	raw  []byte
+	wait time.Duration // blocking until first header byte (PMU inter-sample gap)
+	copy time.Duration // first byte through CRC-verified complete frame
+}
+
+func (t timedFrame) total() time.Duration { return t.wait + t.copy }
+
+// readFrameTimed is readFrame with wait-vs-copy split.
+// wait is time until the socket delivers the first byte; copy is the rest.
+func readFrameTimed(r io.Reader) (timedFrame, error) {
+	start := time.Now()
 	hdr := make([]byte, 4)
-	if _, err := io.ReadFull(r, hdr); err != nil {
-		return nil, fmt.Errorf("read frame header: %w", err)
+	if _, err := io.ReadFull(r, hdr[:1]); err != nil {
+		return timedFrame{}, fmt.Errorf("read frame header: %w", err)
+	}
+	firstByte := time.Now()
+	if _, err := io.ReadFull(r, hdr[1:]); err != nil {
+		return timedFrame{}, fmt.Errorf("read frame header: %w", err)
 	}
 	if hdr[0] != syncByte {
-		return nil, fmt.Errorf("invalid SYNC byte: 0x%02X", hdr[0])
+		return timedFrame{}, fmt.Errorf("invalid SYNC byte: 0x%02X", hdr[0])
 	}
 	frameSize := int(binary.BigEndian.Uint16(hdr[2:]))
 	if frameSize < 16 {
-		return nil, fmt.Errorf("frame size too small: %d (min 16)", frameSize)
+		return timedFrame{}, fmt.Errorf("frame size too small: %d (min 16)", frameSize)
 	}
 
 	buf := make([]byte, frameSize)
 	copy(buf, hdr)
 	if _, err := io.ReadFull(r, buf[4:]); err != nil {
-		return nil, fmt.Errorf("read frame body: %w", err)
+		return timedFrame{}, fmt.Errorf("read frame body: %w", err)
 	}
+	done := time.Now()
 
-	// Verify CRC.
 	want := binary.BigEndian.Uint16(buf[frameSize-2:])
 	got := crc16(buf[:frameSize-2])
 	if want != got {
-		return nil, fmt.Errorf("CRC mismatch: want 0x%04X got 0x%04X", want, got)
+		return timedFrame{}, fmt.Errorf("CRC mismatch: want 0x%04X got 0x%04X", want, got)
 	}
-	return buf, nil
+	return timedFrame{raw: buf, wait: firstByte.Sub(start), copy: done.Sub(firstByte)}, nil
 }
 
 // frameType returns the frame type field (SYNC bits 6-4).
@@ -319,7 +338,7 @@ type FrameHandler func(pmuName string, raw []byte)
 // RawFramePublisher publishes CRC-verified frames to the raw Kafka topic.
 // Implementations must be safe for concurrent use from multiple PMU receivers.
 type RawFramePublisher interface {
-	Publish(ctx context.Context, pmuName, frameType string, idCode uint16, raw []byte) error
+	Publish(ctx context.Context, pmuName, frameType string, idCode uint16, raw []byte, tcpWait, tcpCopy time.Duration) error
 }
 
 // Receiver manages a persistent, auto-reconnecting TCP connection to one PMU.
@@ -386,14 +405,23 @@ func (r *Receiver) connect(ctx context.Context) error {
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "info", fmt.Sprintf("dial %s (%s)", addr, proto))
 
 	dialer := &net.Dialer{Timeout: timeout}
+	dialStart := time.Now()
 	conn, err := dialer.DialContext(ctx, proto, addr)
+	dialDur := time.Since(dialStart)
 	if err != nil {
+		monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
 		return fmt.Errorf("dial %s %s: %w", proto, addr, err)
 	}
 	defer conn.Close()
 
-	log.Printf("[%s] connected to %s", r.cfg.Name, addr)
-	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok", fmt.Sprintf("connected to %s", addr))
+	configureStreamConn(conn)
+
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
+	log.Printf("[%s] connected to %s in %s", r.cfg.Name, addr, monitoring.FormatMs(dialDur))
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
+		fmt.Sprintf("connected to %s in %s", addr, monitoring.FormatMs(dialDur)))
+
+	handshakeStart := time.Now()
 
 	// Stop any residual data stream from a prior session before config exchange.
 	_ = r.sendCMD(conn, cmdDataOff)
@@ -408,24 +436,33 @@ func (r *Receiver) connect(ctx context.Context) error {
 	log.Printf("[%s] sent CMD_SEND_HDR", r.cfg.Name)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "handshake", "ok", "sent CMD_SEND_HDR")
 
-	hdrDeadline := 3 * time.Second
+	hdrDeadline := hdrWaitTimeout()
 	if timeout > 0 && timeout < hdrDeadline {
 		hdrDeadline = timeout
 	}
+	hdrWaitStart := time.Now()
 	if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
-		log.Printf("[%s] header frame not received (%v) – continuing with CFG2", r.cfg.Name, err)
+		hdrDur := time.Since(hdrWaitStart)
+		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
+		log.Printf("[%s] optional HEADER not received after %s (%v) – continuing with CFG2 (one-time setup, not per-frame)",
+			r.cfg.Name, monitoring.FormatMs(hdrDur), err)
 		monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "warn",
-			fmt.Sprintf("HDR not received: %v", err))
+			fmt.Sprintf("HDR not received in %s: %v", monitoring.FormatMs(hdrDur), err))
 	} else {
+		hdrDur := time.Since(hdrWaitStart)
+		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
 		logFrameTrace(r.cfg.Name, "handshake step 1 rx", hdrRaw)
 		text, perr := parser.ParseHeaderFrame(hdrRaw)
 		if perr != nil {
 			log.Printf("[%s] header frame parse error: %v", r.cfg.Name, perr)
 		} else {
 			headerText = text
-			log.Printf("[%s] HEADER frame (%d bytes):\n%s", r.cfg.Name, len(hdrRaw), text)
+			log.Printf("[%s] HEADER frame (%d bytes) in %s:\n%s", r.cfg.Name, len(hdrRaw), monitoring.FormatMs(hdrDur), text)
 			monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok",
-				fmt.Sprintf("received HEADER frame (%d bytes)", len(hdrRaw)))
+				fmt.Sprintf("received HEADER frame (%d bytes) in %s", len(hdrRaw), monitoring.FormatMs(hdrDur)))
+		}
+		if err := r.publishRaw(ctx, "hdr", hdrRaw, 0, 0); err != nil {
+			return fmt.Errorf("publish HDR to kafka: %w", err)
 		}
 		if err := r.publishRaw(ctx, "hdr", hdrRaw); err != nil {
 			return fmt.Errorf("publish HDR to kafka: %w", err)
@@ -440,14 +477,18 @@ func (r *Receiver) connect(ctx context.Context) error {
 	log.Printf("[%s] sent CMD_SEND_CFG2", r.cfg.Name)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "handshake", "ok", "sent CMD_SEND_CFG2")
 
+	cfgWaitStart := time.Now()
 	cfg2, err := readFrameOfType(conn, frameTypeCfg2, timeout)
 	if err != nil {
 		return fmt.Errorf("read CFG2 frame: %w", err)
 	}
+	cfgDur := time.Since(cfgWaitStart)
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
 	logFrameTrace(r.cfg.Name, "handshake step 2 rx", cfg2)
 	decodeCFG2Details(r.cfg.Name, cfg2)
-	log.Printf("[%s] received CFG2 frame (%d bytes)", r.cfg.Name, len(cfg2))
-	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok", fmt.Sprintf("received CFG2 frame (%d bytes)", len(cfg2)))
+	log.Printf("[%s] received CFG2 frame (%d bytes) in %s", r.cfg.Name, len(cfg2), monitoring.FormatMs(cfgDur))
+	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok",
+		fmt.Sprintf("received CFG2 frame (%d bytes) in %s", len(cfg2), monitoring.FormatMs(cfgDur)))
 	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
 		return fmt.Errorf("parse CFG2: %w", err)
 	} else {
@@ -459,7 +500,7 @@ func (r *Receiver) connect(ctx context.Context) error {
 			log.Printf("[%s] warning: CFG2 idcode=%d != configured idcode=%d", r.cfg.Name, profile.IDCode, r.cfg.IDCode)
 		}
 	}
-	if err := r.publishRaw(ctx, "cfg2", cfg2); err != nil {
+	if err := r.publishRaw(ctx, "cfg2", cfg2, 0, 0); err != nil {
 		return fmt.Errorf("publish CFG2 to kafka: %w", err)
 	}
 
@@ -468,15 +509,18 @@ func (r *Receiver) connect(ctx context.Context) error {
 	if err := r.sendCMD(conn, cmdDataOn); err != nil {
 		return fmt.Errorf("send CMD_DATA_ON: %w", err)
 	}
-	log.Printf("[%s] sent CMD_DATA_ON – streaming data", r.cfg.Name)
-	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok", "sent CMD_DATA_ON")
+	handshakeDur := time.Since(handshakeStart)
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, handshakeDur)
+	log.Printf("[%s] sent CMD_DATA_ON – streaming data (handshake %s, one-time setup)", r.cfg.Name, monitoring.FormatMs(handshakeDur))
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok",
+		fmt.Sprintf("sent CMD_DATA_ON (handshake %s, one-time)", monitoring.FormatMs(handshakeDur)))
 
 	dataFrames := 0
+	var lastComplete time.Time
 
 	// ── Step 4: stream data frames ────────────────────────────────────────────
 	for {
 		if ctx.Err() != nil {
-			// Politely stop data before closing.
 			_ = r.sendCMD(conn, cmdDataOff)
 			return nil
 		}
@@ -485,25 +529,32 @@ func (r *Receiver) connect(ctx context.Context) error {
 			return fmt.Errorf("set read deadline: %w", err)
 		}
 
-		raw, err := readFrame(conn)
+		tf, err := readFrameTimed(conn)
+		completeAt := time.Now()
 		if err != nil {
 			return fmt.Errorf("read data frame: %w", err)
 		}
 
-		if frameType(raw) == frameTypeData {
+		if frameType(tf.raw) == frameTypeData {
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPRead, tf.total())
+			if !lastComplete.IsZero() {
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPInterarrival, completeAt.Sub(lastComplete))
+			}
+			lastComplete = completeAt
+
 			dataFrames++
 			if dataFrames <= 3 {
-				logFrameTrace(r.cfg.Name, fmt.Sprintf("stream rx #%d", dataFrames), raw)
+				logFrameTrace(r.cfg.Name, fmt.Sprintf("stream rx #%d wait=%s copy=%s", dataFrames, monitoring.FormatMs(tf.wait), monitoring.FormatMs(tf.copy)), tf.raw)
 			}
 			if dataFrames%50 == 0 {
 				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "stream", "ok", fmt.Sprintf("received %d data frames", dataFrames))
 			}
-			payload := append([]byte(nil), raw...)
+			payload := append([]byte(nil), tf.raw...)
 
 			if r.rawPub != nil {
-				// Ingress path: publish to Kafka with backpressure (blocks TCP read
-				// on broker slowdown instead of dropping frames).
-				if err := r.publishRaw(ctx, "data", payload); err != nil {
+				if err := r.publishRaw(ctx, "data", payload, tf.wait, tf.copy); err != nil {
 					monitoring.IncQueuePublishErrors()
 					monitoring.IncKafkaErrorForPMU(r.cfg.Name)
 					log.Printf("[%s] raw kafka publish error: %v", r.cfg.Name, err)
@@ -513,7 +564,6 @@ func (r *Receiver) connect(ctx context.Context) error {
 				continue
 			}
 
-			// Direct path: non-blocking semaphore; drop if handler pool is full.
 			select {
 			case r.sem <- struct{}{}:
 				go func(name string, frame []byte) {
@@ -531,12 +581,34 @@ func (r *Receiver) connect(ctx context.Context) error {
 }
 
 // publishRaw sends a frame to the raw Kafka topic when ingress publishing is enabled.
-func (r *Receiver) publishRaw(ctx context.Context, frameType string, raw []byte) error {
+func (r *Receiver) publishRaw(ctx context.Context, frameType string, raw []byte, tcpWait, tcpCopy time.Duration) error {
 	if r.rawPub == nil {
 		return nil
 	}
 	monitoring.IncRawFramesPublished()
-	return r.rawPub.Publish(ctx, r.cfg.Name, frameType, r.cfg.IDCode, raw)
+	return r.rawPub.Publish(ctx, r.cfg.Name, frameType, r.cfg.IDCode, raw, tcpWait, tcpCopy)
+}
+
+func hdrWaitTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("C37118_HDR_WAIT"))
+	if v == "" {
+		return 200 * time.Millisecond
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 200 * time.Millisecond
+	}
+	return d
+}
+
+func configureStreamConn(conn net.Conn) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tcp.SetNoDelay(true)
+	_ = tcp.SetReadBuffer(256 * 1024)
+	_ = tcp.SetWriteBuffer(64 * 1024)
 }
 
 // readFrameOfType reads frames until one matching wantType arrives, skipping

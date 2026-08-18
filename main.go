@@ -245,7 +245,10 @@ func (p *pipeline) StartSinkWorkers(ctx context.Context) {
 		go func() {
 			for r := range p.sinkCh {
 				monitoring.DecSinkInflight()
-				if err := p.sink.Store(ctx, r); err != nil {
+				t0 := time.Now()
+				err := p.sink.Store(ctx, r)
+				monitoring.ObserveStage(r.PMUName, monitoring.StageSinkStore, time.Since(t0))
+				if err != nil {
 					monitoring.IncStoreErrors()
 					monitoring.IncSinkErrorForPMU(r.PMUName)
 					log.Printf("[%s] sink store error: %v", r.PMUName, err)
@@ -284,9 +287,45 @@ func (p *pipeline) Close() {
 }
 
 func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) {
+	p.handleFrame(ctx, pmuName, raw, ingestMeta{receivedAt: time.Now()})
+}
+
+type ingestMeta struct {
+	receivedAt time.Time
+	tcpWait    time.Duration
+	tcpCopy    time.Duration
+	tcpRead    time.Duration
+	kafkaLag   time.Duration
+}
+
+func (p *pipeline) HandleRawData(ctx context.Context, frame output.RawFrame) {
+	meta := ingestMeta{
+		receivedAt: frame.ReceivedAt,
+		tcpWait:    frame.TCPWait,
+		tcpCopy:    frame.TCPCopy,
+		tcpRead:    frame.TCPRead,
+	}
+	if meta.tcpRead == 0 {
+		meta.tcpRead = meta.tcpWait + meta.tcpCopy
+	}
+	parseGate := time.Now()
+	if meta.receivedAt.IsZero() {
+		meta.receivedAt = parseGate
+	} else if lag := parseGate.Sub(meta.receivedAt); lag >= 0 {
+		meta.kafkaLag = lag
+		monitoring.ObserveStage(frame.PMUName, monitoring.StageRawKafkaLag, lag)
+		monitoring.ObserveStage(frame.PMUName, monitoring.StageFrameToParse, lag)
+	}
+	p.handleFrame(ctx, frame.PMUName, frame.Payload, meta)
+}
+
+func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, meta ingestMeta) {
 	monitoring.IncFramesReceived()
 
+	parseStart := time.Now()
 	reading, err := parser.ParseDataFrame(pmuName, raw)
+	parseDur := time.Since(parseStart)
+	monitoring.ObserveStage(pmuName, monitoring.StageParse, parseDur)
 	if err != nil {
 		monitoring.IncParseErrors()
 		log.Printf("[%s] parse error: %v", pmuName, err)
@@ -374,20 +413,41 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 		log.Printf("[%s] ================================================================================", pmuName)
 	}
 
-	if err := p.checker.Validate(reading); err != nil {
+	qualityStart := time.Now()
+	qerr := p.checker.Validate(reading)
+	qualityDur := time.Since(qualityStart)
+	monitoring.ObserveStage(pmuName, monitoring.StageQuality, qualityDur)
+	if qerr != nil {
 		monitoring.IncQualityRejected()
 		monitoring.IncQualityRejectForPMU(pmuName)
-		log.Printf("[%s] quality reject: %v", pmuName, err)
-		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", err.Error())
+		log.Printf("[%s] quality reject: %v", pmuName, qerr)
+		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", qerr.Error())
 		if p.dropQualityRejected {
 			return
 		}
 		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "warn", "continuing despite quality reject to avoid data loss")
 	}
 
+	if meta.receivedAt.IsZero() {
+		meta.receivedAt = time.Now()
+	}
+	reading.Trace = parser.LatencyTrace{
+		ReceivedAtUnixNano: meta.receivedAt.UnixNano(),
+		TcpWaitMs:          monitoring.Ms(meta.tcpWait),
+		TcpCopyMs:          monitoring.Ms(meta.tcpCopy),
+		TcpReadMs:          monitoring.Ms(meta.tcpRead),
+		KafkaLagMs:         monitoring.Ms(meta.kafkaLag),
+		FrameToParseMs:     monitoring.Ms(meta.kafkaLag),
+		ParseMs:            monitoring.Ms(parseDur),
+		QualityMs:          monitoring.Ms(qualityDur),
+	}
+}
+
 	published := false
 	if p.publisher != nil {
+		pubStart := time.Now()
 		if err := p.publisher.Publish(ctx, reading); err != nil {
+			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
 			monitoring.IncQueuePublishErrors()
 			monitoring.IncKafkaErrorForPMU(pmuName)
 			log.Printf("[%s] kafka publish error: %v", pmuName, err)
@@ -403,6 +463,7 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 				}
 			}
 		} else {
+			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
 			published = true
 		}
 	}
@@ -418,7 +479,30 @@ func (p *pipeline) HandleFrame(ctx context.Context, pmuName string, raw []byte) 
 // OnDashboardReading feeds the live SSE dashboard from the pdc-dashboard consumer group.
 func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error {
 	monitoring.IncReadingsConsumed()
+	t0 := time.Now()
 	monitoring.RecordReading(r)
+	monitoring.ObserveStage(r.PMUName, monitoring.StageDashboardRecord, time.Since(t0))
+	if r.Trace.ReceivedAtUnixNano > 0 {
+		recv := time.Unix(0, r.Trace.ReceivedAtUnixNano)
+		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
+			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
+		}
+	}()
+
+	log.Printf("readings fan-out consumers started: topic=%s groups=[%s, %s]",
+		dash.Topic(), dash.Group(), sinkC.Group())
+	monitoring.RecordConversation("SYSTEM", "PDC", "KAFKA", "readings-fanout", "ok",
+		fmt.Sprintf("groups=%s,%s", dash.Group(), sinkC.Group()))
+
+	return func() {
+		_ = dash.Close()
+		_ = sinkC.Close()
+	}
+	if !r.Timestamp.IsZero() {
+		if lag := time.Since(r.Timestamp); lag >= 0 && lag < 10*time.Second {
+			monitoring.ObserveStage(r.PMUName, monitoring.StageE2EPMUToDash, lag)
+		}
+	}
 	return nil
 }
 
@@ -431,7 +515,15 @@ func (p *pipeline) OnSinkReading(_ context.Context, r parser.Reading) error {
 }
 
 func (p *pipeline) deliverLocal(r parser.Reading) {
+	t0 := time.Now()
 	monitoring.RecordReading(r)
+	monitoring.ObserveStage(r.PMUName, monitoring.StageDashboardRecord, time.Since(t0))
+	if r.Trace.ReceivedAtUnixNano > 0 {
+		recv := time.Unix(0, r.Trace.ReceivedAtUnixNano)
+		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
+			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
+		}
+	}
 	p.enqueueSink(r)
 	monitoring.ObserveLatency(time.Since(r.Timestamp))
 }
@@ -634,7 +726,7 @@ func main() {
 						fmt.Sprintf("registered CFG2 station=%q rate=%d", profile.Station, profile.DataRate))
 					return nil
 				case output.FrameTypeData, "":
-					pl.HandleFrame(frameCtx, frame.PMUName, frame.Payload)
+					pl.HandleRawData(frameCtx, frame)
 					return nil
 				default:
 					log.Printf("[%s] ignoring unknown raw frame type %q", frame.PMUName, frame.FrameType)
