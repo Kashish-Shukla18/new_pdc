@@ -42,6 +42,10 @@ export function packetLossOf(pmu: LivePMUState) {
 }
 
 export function latencyOf(pmu: LivePMUState) {
+  const e2e = pmu.lastHops?.e2e_recv_to_dashboard
+  if (typeof e2e === 'number' && Number.isFinite(e2e) && e2e >= 0) {
+    return e2e
+  }
   if (!pmu.connected) return 999
   const base = 1000 / Math.max(1, pmu.approxFps)
   const rocofDrift = Math.abs(pmu.lastReading?.rocof ?? 0) * 350
@@ -95,6 +99,7 @@ export function buildOfflinePMU(name: string, meta: PMUMeta): PMUWithMeta {
     trends: [],
     fnomHz: 0,
     statDataError: false,
+    lastHops: {},
     meta,
   }
 }

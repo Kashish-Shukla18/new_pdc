@@ -84,8 +84,8 @@ func IncRawFramesPublished() { rawFramesPublished.Inc() }
 func IncRawFramesConsumed()  { rawFramesConsumed.Inc() }
 func IncReadingsConsumed()   { readingsConsumed.Inc() }
 func IncFramesParsed()       { framesParsed.Inc() }
-func IncSinkInflight()    { sinkInflight.Inc() }
-func DecSinkInflight()    { sinkInflight.Dec() }
+func IncSinkInflight()       { sinkInflight.Inc() }
+func DecSinkInflight()       { sinkInflight.Dec() }
 
 func IncParseErrors() { parseErrors.Inc() }
 
@@ -112,6 +112,7 @@ func StartServer(ctx context.Context, addr string) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	registerConversationHandlers(mux)
+	StartLatencyReporter(ctx.Done())
 
 	srv := &http.Server{Addr: addr, Handler: mux}
 

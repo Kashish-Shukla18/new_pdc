@@ -6,9 +6,12 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+
+	"pdc/monitoring"
 )
 
 const (
@@ -16,6 +19,9 @@ const (
 	rawHeaderFrameType = "frame_type"
 	rawHeaderIDCode    = "idcode"
 	rawHeaderRecvAt    = "received_at_unix_nano"
+	rawHeaderTCPReadNs = "tcp_read_ns"
+	rawHeaderTCPWaitNs = "tcp_wait_ns"
+	rawHeaderTCPCopyNs = "tcp_copy_ns"
 
 	FrameTypeData = "data"
 	FrameTypeCFG2 = "cfg2"
@@ -23,10 +29,16 @@ const (
 )
 
 // RawFramePublisher writes CRC-verified C37.118 frame bytes to Kafka.
+// Publish enqueues and returns; a dedicated goroutine writes to the broker so
+// the TCP read loop is not blocked by BatchTimeout / acks.
 type RawFramePublisher struct {
-	writer  *kafka.Writer
-	brokers []string
-	topic   string
+	writer    *kafka.Writer
+	brokers   []string
+	topic     string
+	ch        chan kafka.Message
+	quit      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // RawFrame is a consumed raw C37.118 frame with metadata.
@@ -35,6 +47,9 @@ type RawFrame struct {
 	FrameType  string
 	IDCode     uint16
 	ReceivedAt time.Time
+	TCPWait    time.Duration
+	TCPCopy    time.Duration
+	TCPRead    time.Duration
 	Payload    []byte
 }
 
@@ -71,13 +86,14 @@ func NewRawFramePublisherFromEnv() *RawFramePublisher {
 		}
 	}
 
-	batchTimeoutMs := envIntOr("KAFKA_RAW_BATCH_TIMEOUT_MS", envIntOr("KAFKA_BATCH_TIMEOUT_MS", 20))
+	// 1ms default: the previous 20ms BatchTimeout sat on the TCP goroutine
+	// (sync WriteMessages) and delayed parse by a full sample period.
+	batchTimeoutMs := envIntOr("KAFKA_RAW_BATCH_TIMEOUT_MS", 1)
 	batchSize := envIntOr("KAFKA_RAW_BATCH_SIZE", envIntOr("KAFKA_BATCH_SIZE", 500))
 	writeTimeoutMs := envIntOr("KAFKA_WRITE_TIMEOUT_MS", 15000)
 	readTimeoutMs := envIntOr("KAFKA_READ_TIMEOUT_MS", 15000)
 	maxAttempts := envIntOr("KAFKA_MAX_ATTEMPTS", 10)
-	// Default sync writes so a slow broker applies backpressure to the TCP
-	// read loop instead of dropping frames in the ingress.
+	queueCap := envIntOr("KAFKA_RAW_QUEUE", 256)
 	asyncMode := envBoolOr("KAFKA_RAW_ASYNC", false)
 
 	if batchTimeoutMs < 1 {
@@ -95,6 +111,9 @@ func NewRawFramePublisherFromEnv() *RawFramePublisher {
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
+	if queueCap < 8 {
+		queueCap = 8
+	}
 
 	// Hash balancer keeps all frames for one PMU on one partition (CFG before DATA).
 	w := &kafka.Writer{
@@ -110,13 +129,23 @@ func NewRawFramePublisherFromEnv() *RawFramePublisher {
 		Balancer:     &kafka.Hash{},
 	}
 
-	log.Printf("kafka raw writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d balancer=hash",
-		brokers, topic, asyncMode, batchTimeoutMs, batchSize)
+	p := &RawFramePublisher{
+		writer:  w,
+		brokers: brokers,
+		topic:   topic,
+		ch:      make(chan kafka.Message, queueCap),
+		quit:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	go p.dispatch()
 
-	return &RawFramePublisher{writer: w, brokers: brokers, topic: topic}
+	log.Printf("kafka raw writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d queue=%d balancer=hash",
+		brokers, topic, asyncMode, batchTimeoutMs, batchSize, queueCap)
+
+	return p
 }
 
-func (p *RawFramePublisher) Publish(ctx context.Context, pmuName, frameType string, idCode uint16, raw []byte) error {
+func (p *RawFramePublisher) Publish(ctx context.Context, pmuName, frameType string, idCode uint16, raw []byte, tcpWait, tcpCopy time.Duration) error {
 	if p == nil || p.writer == nil {
 		return nil
 	}
@@ -125,39 +154,87 @@ func (p *RawFramePublisher) Publish(ctx context.Context, pmuName, frameType stri
 	}
 
 	now := time.Now()
+	tcpRead := tcpWait + tcpCopy
+	headers := []kafka.Header{
+		{Key: rawHeaderPMUName, Value: []byte(pmuName)},
+		{Key: rawHeaderFrameType, Value: []byte(frameType)},
+		{Key: rawHeaderIDCode, Value: []byte(strconv.FormatUint(uint64(idCode), 10))},
+		{Key: rawHeaderRecvAt, Value: []byte(strconv.FormatInt(now.UnixNano(), 10))},
+	}
+	if tcpWait > 0 {
+		headers = append(headers, kafka.Header{Key: rawHeaderTCPWaitNs, Value: []byte(strconv.FormatInt(tcpWait.Nanoseconds(), 10))})
+	}
+	if tcpCopy > 0 {
+		headers = append(headers, kafka.Header{Key: rawHeaderTCPCopyNs, Value: []byte(strconv.FormatInt(tcpCopy.Nanoseconds(), 10))})
+	}
+	if tcpRead > 0 {
+		headers = append(headers, kafka.Header{Key: rawHeaderTCPReadNs, Value: []byte(strconv.FormatInt(tcpRead.Nanoseconds(), 10))})
+	}
 	msg := kafka.Message{
-		Key:   []byte(pmuName),
-		Value: append([]byte(nil), raw...),
-		Time:  now,
-		Headers: []kafka.Header{
-			{Key: rawHeaderPMUName, Value: []byte(pmuName)},
-			{Key: rawHeaderFrameType, Value: []byte(frameType)},
-			{Key: rawHeaderIDCode, Value: []byte(strconv.FormatUint(uint64(idCode), 10))},
-			{Key: rawHeaderRecvAt, Value: []byte(strconv.FormatInt(now.UnixNano(), 10))},
-		},
+		Key:     []byte(pmuName),
+		Value:   append([]byte(nil), raw...),
+		Time:    now,
+		Headers: headers,
 	}
 
-	if err := p.writer.WriteMessages(ctx, msg); err != nil {
+	t0 := time.Now()
+	select {
+	case <-p.quit:
+		return fmt.Errorf("kafka raw publisher closed")
+	case <-ctx.Done():
+		return ctx.Err()
+	case p.ch <- msg:
+		monitoring.ObserveStage(pmuName, monitoring.StageRawKafkaEnqueue, time.Since(t0))
+		return nil
+	}
+}
+
+func (p *RawFramePublisher) dispatch() {
+	defer close(p.done)
+	ctx := context.Background()
+	for msg := range p.ch {
+		pmu := string(msg.Key)
+		t0 := time.Now()
+		err := p.writer.WriteMessages(ctx, msg)
+		monitoring.ObserveStage(pmu, monitoring.StageRawKafkaPublish, time.Since(t0))
+		if err == nil {
+			continue
+		}
 		if isUnknownTopicError(err) {
 			partitions := envIntOr("KAFKA_RAW_TOPIC_PARTITIONS", envIntOr("KAFKA_TOPIC_PARTITIONS", 6))
 			replicationFactor := envIntOr("KAFKA_TOPIC_REPLICATION_FACTOR", 1)
 			_ = ensureTopic(ctx, p.brokers[0], p.topic, partitions, replicationFactor)
+			retryStart := time.Now()
 			if retryErr := p.writer.WriteMessages(ctx, msg); retryErr == nil {
-				return nil
+				monitoring.ObserveStage(pmu, monitoring.StageRawKafkaPublish, time.Since(retryStart))
+				continue
 			} else {
-				return fmt.Errorf("kafka raw write retry after topic ensure: %w", retryErr)
+				err = retryErr
 			}
 		}
-		return fmt.Errorf("kafka raw write: %w", err)
+		log.Printf("[raw-kafka] write error pmu=%s: %v", pmu, err)
+		monitoring.IncQueuePublishErrors()
+		if pmu != "" {
+			monitoring.IncKafkaErrorForPMU(pmu)
+		}
 	}
-	return nil
 }
 
 func (p *RawFramePublisher) Close() error {
-	if p == nil || p.writer == nil {
+	if p == nil {
 		return nil
 	}
-	return p.writer.Close()
+	p.closeOnce.Do(func() {
+		close(p.quit)
+		if p.ch != nil {
+			close(p.ch)
+			<-p.done
+		}
+		if p.writer != nil {
+			_ = p.writer.Close()
+		}
+	})
+	return nil
 }
 
 func NewRawFrameConsumerFromEnv() *RawFrameConsumer {
@@ -271,6 +348,18 @@ func decodeRawFrame(msg kafka.Message) RawFrame {
 		case rawHeaderRecvAt:
 			if n, err := strconv.ParseInt(string(h.Value), 10, 64); err == nil && n > 0 {
 				frame.ReceivedAt = time.Unix(0, n)
+			}
+		case rawHeaderTCPReadNs:
+			if n, err := strconv.ParseInt(string(h.Value), 10, 64); err == nil && n > 0 {
+				frame.TCPRead = time.Duration(n)
+			}
+		case rawHeaderTCPWaitNs:
+			if n, err := strconv.ParseInt(string(h.Value), 10, 64); err == nil && n > 0 {
+				frame.TCPWait = time.Duration(n)
+			}
+		case rawHeaderTCPCopyNs:
+			if n, err := strconv.ParseInt(string(h.Value), 10, 64); err == nil && n > 0 {
+				frame.TCPCopy = time.Duration(n)
 			}
 		}
 	}

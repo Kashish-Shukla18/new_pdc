@@ -134,12 +134,38 @@ export type LivePMUState = {
   trends: TrendPoint[]
   fnomHz?: number
   statDataError?: boolean
+  lastHops?: Record<string, number>
+}
+
+export type LatencyStage = {
+  id: string
+  label: string
+  group: 'connection' | 'ingest' | 'process' | 'dashboard' | 'sink' | 'e2e' | string
+  lastMs: number
+  avgMs: number
+  p95Ms: number
+  maxMs: number
+  count: number
+}
+
+export type PipelineLatency = {
+  slowestStage: string
+  slowestLabel: string
+  slowestAvgMs: number
+  stages: LatencyStage[]
+}
+
+export type UiTiming = {
+  fetchMs: number
+  jsonMs: number
+  totalMs: number
 }
 
 export type DashboardState = {
   nowUtc: string
   pmus: LivePMUState[]
   eventCount: number
+  latency?: PipelineLatency
 }
 
 export type ConversationEvent = {

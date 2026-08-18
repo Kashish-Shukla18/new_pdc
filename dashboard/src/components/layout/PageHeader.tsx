@@ -7,6 +7,11 @@ const PAGE_COPY: Partial<Record<string, { title: string; subtitle: string }>> = 
     subtitle:
       'Analytics — voltage angle differences, oscillation detection, islanding risk, and operator advisories',
   },
+  connectivity: {
+    title: 'Connectivity & pipeline latency',
+    subtitle:
+      'Measured time in each hop: TCP dial, handshake, Kafka, parse, dashboard JSON, and UI refresh',
+  },
 }
 
 export function PageHeader() {
