@@ -1,6 +1,8 @@
 # PDC React Dashboard
 
-Operator dashboard for the PDC synchrophasor platform. Replaces Grafana with a purpose-built React UI for live PMU monitoring, device management, and analytics.
+Operator dashboard for the PDC synchrophasor platform. Purpose-built React UI for live PMU monitoring, device management, and analytics.
+
+Live data is fed by the Go PDC **`pdc-dashboard`** Kafka consumer group (SSE / conversation API on `:2112`). PMU CRUD goes through the REST API on `:8081`.
 
 ## Stack
 
@@ -27,18 +29,19 @@ The Vite dev server proxies backend routes to the Go PDC service:
 |------------|---------|
 | `/conversation/*` | `http://127.0.0.1:2112` |
 | `/metrics` | `http://127.0.0.1:2112` |
-| `/api/*` | `http://127.0.0.1:8080` |
+| `/api/*` | `http://127.0.0.1:8081` |
 
-Start PDC before the dashboard:
+Start the supporting stack and PDC first (from repo root):
 
-```bash
-# from repo root
-go run . -metrics-addr :2112 -api-addr :8080
+```powershell
+docker compose up -d
+go build -o pdc.exe .
+.\pdc.exe -mode=all -metrics-addr :2112 -api-addr :8081
 ```
 
 ## Pages
 
-- **Overview** — KPIs, frequency chart, simulator map, alerts
+- **Overview** — KPIs, frequency chart, map, alerts
 - **Devices** — inventory table, filters, distribution charts
 - **Data Frames** — live frame data, frequency & ROCOF chart
 - **Connectivity** — RTT chart, connectivity matrix, recommendations

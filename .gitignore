@@ -46,4 +46,6 @@ Thumbs.db
 # Local generated data and spool files
 data/spool/*.jsonl
 data/spool/*.tmp
+data/profiles/*.json
+data/profiles/*.tmp
 

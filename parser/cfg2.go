@@ -60,12 +60,7 @@ type Profile struct {
 
 var profileRegistry sync.Map // map[string]Profile
 
-// SetProfile stores the CFG2-derived layout for a PMU.
-func SetProfile(pmuName string, p Profile) {
-	profileRegistry.Store(pmuName, p)
-}
-
-// GetProfile returns the CFG2 layout if the receiver registered one.
+// GetProfile returns the CFG2 layout if one was registered (handshake or disk hydrate).
 func GetProfile(pmuName string) (Profile, bool) {
 	v, ok := profileRegistry.Load(pmuName)
 	if !ok {

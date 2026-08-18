@@ -197,10 +197,10 @@ func NewPublisherFromEnv() *Publisher {
 		ReadTimeout:  time.Duration(readTimeoutMs) * time.Millisecond,
 		MaxAttempts:  maxAttempts,
 		Async:        asyncMode,
-		Balancer:     &kafka.LeastBytes{},
+		Balancer:     &kafka.Hash{},
 	}
 
-	log.Printf("kafka writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d",
+	log.Printf("kafka writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d balancer=hash",
 		brokers, topic, asyncMode, batchTimeoutMs, batchSize)
 
 	return &Publisher{writer: w, brokers: brokers, topic: topic}

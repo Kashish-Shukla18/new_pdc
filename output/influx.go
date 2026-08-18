@@ -2,6 +2,7 @@ package output
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -241,8 +242,11 @@ func (s *Sink) toInfluxPoint(r parser.Reading) *write.Point {
 
 // Store writes one reading to both Redis and InfluxDB.
 //
-// Redis writes are pipelined (3 ops → 1 round-trip).
-// InfluxDB writes are queued to the non-blocking batching API; no blocking occurs.
+// Redis:
+//   - :latest holds the full JSON Reading (shared live state for dashboard / multi-instance)
+//   - :timeline holds compact points for a short rolling window (size-bounded)
+//
+// InfluxDB writes are queued to the non-blocking batching API.
 // Returns an error only if the Redis pipeline fails — InfluxDB errors are reported
 // asynchronously through the drainInfluxErrors goroutine.
 func (s *Sink) Store(ctx context.Context, r parser.Reading) error {
@@ -250,7 +254,13 @@ func (s *Sink) Store(ctx context.Context, r parser.Reading) error {
 		return nil
 	}
 
-	jsonLine := fmt.Sprintf(
+	latestPayload, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("marshal reading for redis: %w", err)
+	}
+
+	// Compact timeline member — enough for quick charts without huge sorted-set growth.
+	timelineLine := fmt.Sprintf(
 		`{"ts":"%s","freq":%.6f,"rocof":%.6f,"mw":%.6f,"mvar":%.6f,"stat":%d,"digital":%d}`,
 		r.Timestamp.Format(time.RFC3339Nano),
 		r.Frequency,
@@ -262,20 +272,93 @@ func (s *Sink) Store(ctx context.Context, r parser.Reading) error {
 	)
 	ms := float64(r.Timestamp.UnixNano()) / float64(time.Millisecond)
 
-	// ── Redis: pipeline ZAdd + Expire + Set in one round-trip ──────────────────
 	pipe := s.redis.Pipeline()
-	pipe.ZAdd(ctx, s.keyTimeline(r.PMUName), redis.Z{Score: ms, Member: jsonLine})
+	pipe.ZAdd(ctx, s.keyTimeline(r.PMUName), redis.Z{Score: ms, Member: timelineLine})
 	pipe.Expire(ctx, s.keyTimeline(r.PMUName), s.redisTTL)
-	pipe.Set(ctx, s.keyLatest(r.PMUName), jsonLine, s.redisTTL)
+	pipe.Set(ctx, s.keyLatest(r.PMUName), latestPayload, s.redisTTL)
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("redis pipeline: %w", err)
 	}
 
-	// ── InfluxDB: non-blocking enqueue; SDK batches and retries internally ─────
 	s.influxWrite.WritePoint(s.toInfluxPoint(r))
-
 	return nil
+}
+
+// GetLatestReading returns the full latest Reading for one PMU from Redis.
+func (s *Sink) GetLatestReading(ctx context.Context, pmuName string) (parser.Reading, bool, error) {
+	if s == nil || s.redis == nil {
+		return parser.Reading{}, false, nil
+	}
+	raw, err := s.redis.Get(ctx, s.keyLatest(pmuName)).Bytes()
+	if err == redis.Nil {
+		return parser.Reading{}, false, nil
+	}
+	if err != nil {
+		return parser.Reading{}, false, fmt.Errorf("redis get latest %s: %w", pmuName, err)
+	}
+	var r parser.Reading
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return parser.Reading{}, false, fmt.Errorf("unmarshal latest %s: %w", pmuName, err)
+	}
+	if r.PMUName == "" {
+		r.PMUName = pmuName
+	}
+	return r, true, nil
+}
+
+// ListLatestReadings scans Redis for all :latest keys and returns full Readings.
+// Used to hydrate the live dashboard after restart / for multi-instance shared state.
+func (s *Sink) ListLatestReadings(ctx context.Context) ([]parser.Reading, error) {
+	if s == nil || s.redis == nil {
+		return nil, nil
+	}
+
+	pattern := fmt.Sprintf("%s:*:latest", s.redisKeyPrefx)
+	var (
+		cursor uint64
+		out    []parser.Reading
+	)
+	for {
+		keys, next, err := s.redis.Scan(ctx, cursor, pattern, 64).Result()
+		if err != nil {
+			return out, fmt.Errorf("redis scan %s: %w", pattern, err)
+		}
+		for _, key := range keys {
+			raw, err := s.redis.Get(ctx, key).Bytes()
+			if err == redis.Nil {
+				continue
+			}
+			if err != nil {
+				log.Printf("redis get %s: %v", key, err)
+				continue
+			}
+			var r parser.Reading
+			if err := json.Unmarshal(raw, &r); err != nil {
+				// Older compact timeline-style payloads are not full Readings — skip.
+				log.Printf("redis latest unmarshal skip %s: %v", key, err)
+				continue
+			}
+			if r.PMUName == "" {
+				r.PMUName = pmuNameFromLatestKey(key, s.redisKeyPrefx)
+			}
+			if r.PMUName != "" {
+				out = append(out, r)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
+func pmuNameFromLatestKey(key, prefix string) string {
+	// expected: <prefix>:<pmu>:latest
+	trim := strings.TrimPrefix(key, prefix+":")
+	trim = strings.TrimSuffix(trim, ":latest")
+	return strings.TrimSpace(trim)
 }
 
 // Flush forces the InfluxDB batch to be written immediately.
