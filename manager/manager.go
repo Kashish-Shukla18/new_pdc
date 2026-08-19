@@ -49,7 +49,9 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 	go r.Run(pmuCtx)
 
 	mode := "direct"
-	if m.rawPub != nil {
+	if m.rawPub != nil && m.handler != nil {
+		mode = "live+kafka"
+	} else if m.rawPub != nil {
 		mode = "ingress"
 	}
 	monitoring.RecordConversation(cfg.Name, "SYSTEM", "PDC", "manager", "ok",

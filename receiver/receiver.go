@@ -362,8 +362,9 @@ func frameHandlerMaxInflight() int {
 }
 
 // New creates a Receiver for the given PMU configuration.
-// If rawPub is non-nil, frames are published to Kafka (ingress mode) and handler is unused.
-// If rawPub is nil, data frames are dispatched to handler (direct mode).
+// handler, when set, parses/displays in-process (live path).
+// rawPub, when set, also publishes CRC-verified frames to Kafka (durability).
+// Both may be set together in mode=all so Kafka is not on the live hot path.
 func New(cfg config.PMUConfig, handler FrameHandler, rawPub RawFramePublisher) *Receiver {
 	return &Receiver{
 		cfg:     cfg,
@@ -552,35 +553,40 @@ func (r *Receiver) connect(ctx context.Context) error {
 				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "stream", "ok", fmt.Sprintf("received %d data frames", dataFrames))
 			}
 			payload := append([]byte(nil), tf.raw...)
-
-			if r.rawPub != nil {
-				if err := r.publishRaw(ctx, "data", payload, tf.wait, tf.copy); err != nil {
-					monitoring.IncQueuePublishErrors()
-					monitoring.IncKafkaErrorForPMU(r.cfg.Name)
-					log.Printf("[%s] raw kafka publish error: %v", r.cfg.Name, err)
-					monitoring.RecordConversation(r.cfg.Name, "PDC", "KAFKA", "raw-publish", "error", err.Error())
-					return fmt.Errorf("publish data frame to kafka: %w", err)
-				}
-				continue
-			}
-
-			select {
-			case r.sem <- struct{}{}:
-				go func(name string, frame []byte) {
-					defer func() { <-r.sem }()
-					r.handler(name, frame)
-				}(r.cfg.Name, payload)
-			default:
-				monitoring.IncFramesDropped()
-				log.Printf("[%s] frame dropped: handler pool full (inflight=%d)", r.cfg.Name, len(r.sem))
-				monitoring.RecordConversation(r.cfg.Name, "PDC", "PDC", "overload", "warn",
-					fmt.Sprintf("frame dropped – handler pool full (inflight=%d/%d)", len(r.sem), cap(r.sem)))
-			}
+			r.dispatchDataFrame(ctx, payload, tf.wait, tf.copy)
 		}
 	}
 }
 
 // publishRaw sends a frame to the raw Kafka topic when ingress publishing is enabled.
+func (r *Receiver) dispatchDataFrame(ctx context.Context, payload []byte, tcpWait, tcpCopy time.Duration) {
+	if r.handler != nil {
+		select {
+		case r.sem <- struct{}{}:
+			frame := append([]byte(nil), payload...)
+			go func(name string, frame []byte) {
+				defer func() { <-r.sem }()
+				r.handler(name, frame)
+			}(r.cfg.Name, frame)
+		default:
+			monitoring.IncFramesDropped()
+			log.Printf("[%s] frame dropped: handler pool full (inflight=%d)", r.cfg.Name, len(r.sem))
+			monitoring.RecordConversation(r.cfg.Name, "PDC", "PDC", "overload", "warn",
+				fmt.Sprintf("frame dropped – handler pool full (inflight=%d/%d)", len(r.sem), cap(r.sem)))
+		}
+	}
+
+	if r.rawPub == nil {
+		return
+	}
+	if err := r.publishRaw(ctx, "data", payload, tcpWait, tcpCopy); err != nil {
+		monitoring.IncQueuePublishErrors()
+		monitoring.IncKafkaErrorForPMU(r.cfg.Name)
+		log.Printf("[%s] raw kafka publish error: %v", r.cfg.Name, err)
+		monitoring.RecordConversation(r.cfg.Name, "PDC", "KAFKA", "raw-publish", "error", err.Error())
+	}
+}
+
 func (r *Receiver) publishRaw(ctx context.Context, frameType string, raw []byte, tcpWait, tcpCopy time.Duration) error {
 	if r.rawPub == nil {
 		return nil

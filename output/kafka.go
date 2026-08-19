@@ -160,7 +160,7 @@ func NewPublisherFromEnv() *Publisher {
 	// BatchTimeout: how long the writer waits to fill a batch before flushing.
 	// Higher values reduce per-message overhead; default 50ms is a good balance
 	// for PMU workloads (50fps × N PMUs produces many small messages rapidly).
-	batchTimeoutMs := envIntOr("KAFKA_BATCH_TIMEOUT_MS", 50)
+	batchTimeoutMs := envIntOr("KAFKA_BATCH_TIMEOUT_MS", 1)
 	// BatchSize: max messages per batch; 500 is safe for 50fps × 10 PMUs.
 	batchSize := envIntOr("KAFKA_BATCH_SIZE", 500)
 	writeTimeoutMs := envIntOr("KAFKA_WRITE_TIMEOUT_MS", 15000)

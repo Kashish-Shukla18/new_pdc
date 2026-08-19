@@ -35,7 +35,9 @@ const (
 	StageStateSnapshot   = "dashboard_state_json"
 	StageSinkStore       = "sink_store"
 	StageE2ERecvToDash   = "e2e_recv_to_dashboard"
-	StageE2EPMUToDash    = "e2e_pmu_to_dashboard"
+	StageClockSkewPMU    = "clock_skew_pmu"
+	StageE2EPMUToDash    = "e2e_pmu_to_dashboard_raw"
+	StageE2EPMUCorrected = "e2e_pmu_to_dashboard"
 )
 
 const latencyWindow = 256
@@ -66,7 +68,9 @@ var stageOrder = []stageSpec{
 	{StageStateSnapshot, "Dashboard /state JSON", "dashboard"},
 	{StageSinkStore, "Redis + Influx store", "sink"},
 	{StageE2ERecvToDash, "E2E TCP-complete → dashboard", "e2e"},
-	{StageE2EPMUToDash, "E2E PMU clock → dashboard (includes skew)", "e2e"},
+	{StageClockSkewPMU, "PMU clock skew (receive − SOC)", "clock"},
+	{StageE2EPMUToDash, "E2E PMU SOC → dashboard (raw, includes skew)", "clock"},
+	{StageE2EPMUCorrected, "E2E PMU → dashboard (skew corrected)", "e2e"},
 }
 
 var stageByID = func() map[string]stageSpec {
@@ -336,8 +340,8 @@ func pickSlowest(stages []StageLatency) (id, label string, avg float64) {
 			continue
 		}
 		// Connection = one-time setup. idle = waiting for the next PMU sample.
-		// e2e includes clock skew (pmu) or is a sum of other hops.
-		if st.Group == "connection" || st.Group == "e2e" || st.Group == "idle" {
+		// clock = PMU vs PDC wall clock. e2e = end-to-end delivery metrics.
+		if st.Group == "connection" || st.Group == "e2e" || st.Group == "idle" || st.Group == "clock" {
 			continue
 		}
 		if st.AvgMs >= avg {
@@ -353,7 +357,7 @@ func pickSlowest(stages []StageLatency) (id, label string, avg float64) {
 // line from per-frame ingest so handshake_total is never mistaken for fps delay.
 func FormatLatencySummary() string {
 	snap := SnapshotPipelineLatency()
-	var conn, idle, hops []string
+	var conn, idle, clock, hops []string
 	for _, st := range snap.Stages {
 		if st.Count == 0 {
 			continue
@@ -364,11 +368,13 @@ func FormatLatencySummary() string {
 			conn = append(conn, part)
 		case "idle":
 			idle = append(idle, part)
+		case "clock":
+			clock = append(clock, part)
 		default:
 			hops = append(hops, part)
 		}
 	}
-	if len(conn) == 0 && len(idle) == 0 && len(hops) == 0 {
+	if len(conn) == 0 && len(idle) == 0 && len(clock) == 0 && len(hops) == 0 {
 		return "[latency] no samples yet"
 	}
 	slow := "n/a"
@@ -379,6 +385,11 @@ func FormatLatencySummary() string {
 	if len(conn) > 0 {
 		b.WriteString("[latency] connection (one-time, not per-frame): ")
 		b.WriteString(strings.Join(conn, " "))
+		b.WriteByte('\n')
+	}
+	if len(clock) > 0 {
+		b.WriteString("[latency] PMU clock skew (not pipeline delay): ")
+		b.WriteString(strings.Join(clock, " "))
 		b.WriteByte('\n')
 	}
 	if len(idle) > 0 {
