@@ -37,7 +37,7 @@ func NewReadingsConsumerFromEnv(groupEnvKey, groupDefault string) *ReadingsConsu
 
 	minBytes := envIntOr("KAFKA_READINGS_MIN_BYTES", 1)
 	maxBytes := envIntOr("KAFKA_READINGS_MAX_BYTES", 10_000_000)
-	maxWaitMs := envIntOr("KAFKA_READINGS_MAX_WAIT_MS", 50)
+	maxWaitMs := envIntOr("KAFKA_READINGS_MAX_WAIT_MS", 5)
 	queueCapacity := envIntOr("KAFKA_READINGS_QUEUE_CAPACITY", 1024)
 
 	if minBytes < 1 {
