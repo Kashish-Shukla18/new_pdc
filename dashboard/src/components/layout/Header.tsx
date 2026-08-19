@@ -14,7 +14,9 @@ export function Header({ onMenuToggle, sidebarOpen = false }: HeaderProps) {
   const headerRef = useRef<HTMLElement>(null)
   const clockLabel = useClock()
   const { frameRate, systemTone, systemMessage, isPaused, setIsPaused, streamOnline, pmus, dashboard, uiTiming } = useDashboardContext()
-  const e2e = dashboard.latency?.stages.find((s) => s.id === 'e2e_recv_to_dashboard')
+  const e2e = dashboard.latency?.stages.find((s) => s.id === 'e2e_pmu_to_dashboard')
+    ?? dashboard.latency?.stages.find((s) => s.id === 'e2e_recv_to_dashboard')
+  const clockSkew = dashboard.latency?.stages.find((s) => s.id === 'clock_skew_pmu')
   const slowest = dashboard.latency?.slowestLabel
 
   useEffect(() => {
@@ -71,8 +73,13 @@ export function Header({ onMenuToggle, sidebarOpen = false }: HeaderProps) {
           <span className="mono">{round(frameRate)} fps</span>
         </div>
         {e2e && e2e.count > 0 && (
-          <div className={`header-pill ${e2e.avgMs > 80 ? 'system-state warn' : ''}`}>
+          <div className={`header-pill ${e2e.avgMs > 80 ? 'system-state warn' : ''}`} title="Skew-corrected PMU → dashboard">
             <span className="mono">{round(e2e.avgMs, 1)} ms e2e</span>
+          </div>
+        )}
+        {clockSkew && clockSkew.count > 0 && clockSkew.avgMs > 100 && (
+          <div className="header-pill system-state warn" title="PMU clock lags PDC wall clock — not pipeline delay">
+            <span className="mono">skew {round(clockSkew.avgMs, 0)} ms</span>
           </div>
         )}
         {slowest && (

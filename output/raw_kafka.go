@@ -249,7 +249,7 @@ func NewRawFrameConsumerFromEnv() *RawFrameConsumer {
 
 	minBytes := envIntOr("KAFKA_RAW_MIN_BYTES", 1)
 	maxBytes := envIntOr("KAFKA_RAW_MAX_BYTES", 10_000_000)
-	maxWaitMs := envIntOr("KAFKA_RAW_MAX_WAIT_MS", 50)
+	maxWaitMs := envIntOr("KAFKA_RAW_MAX_WAIT_MS", 5)
 	queueCapacity := envIntOr("KAFKA_RAW_QUEUE_CAPACITY", 1024)
 
 	if minBytes < 1 {

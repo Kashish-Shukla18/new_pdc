@@ -123,6 +123,7 @@ func newPipeline(ctx context.Context) *pipeline {
 		sinkBufSize = 256
 	}
 
+	fanOutViaKafka := publisher != nil && envBool("KAFKA_READINGS_FANOUT", true)
 	return &pipeline{
 		checker:             checker,
 		publisher:           publisher,
@@ -130,7 +131,7 @@ func newPipeline(ctx context.Context) *pipeline {
 		kafkaSpool:          kafkaSpool,
 		sinkSpool:           sinkSpool,
 		dropQualityRejected: dropQualityRejected,
-		fanOutViaKafka:      publisher != nil && envBool("KAFKA_READINGS_FANOUT", true),
+		fanOutViaKafka:      fanOutViaKafka,
 		traceCounts:         make(map[string]int),
 		sinkCh:              make(chan parser.Reading, sinkBufSize),
 	}
@@ -441,8 +442,38 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 		ParseMs:            monitoring.Ms(parseDur),
 		QualityMs:          monitoring.Ms(qualityDur),
 	}
+	if !meta.receivedAt.IsZero() && !reading.Timestamp.IsZero() {
+		monitoring.UpdateClockOffset(pmuName, meta.receivedAt, reading.Timestamp)
+	}
 
-	published := false
+	if p.fanOutViaKafka {
+		// Split processor: dashboard/sink come from Kafka consumer groups.
+		if p.publisher != nil {
+			pubStart := time.Now()
+			if err := p.publisher.Publish(ctx, reading); err != nil {
+				monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
+				monitoring.IncQueuePublishErrors()
+				monitoring.IncKafkaErrorForPMU(pmuName)
+				log.Printf("[%s] kafka publish error: %v", pmuName, err)
+				monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "publish", "error", err.Error())
+				if p.kafkaSpool != nil {
+					if spoolErr := p.kafkaSpool.Append(reading); spoolErr != nil {
+						log.Printf("[%s] kafka spool append error: %v", pmuName, spoolErr)
+					} else {
+						monitoring.IncSpoolQueued()
+						monitoring.IncSpoolQueuedForPMU(pmuName)
+					}
+				}
+				p.deliverLocal(reading)
+				return
+			}
+			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
+		}
+		return
+	}
+
+	// Live path: dashboard + sink in this process, then Kafka for durability.
+	p.deliverLocal(reading)
 	if p.publisher != nil {
 		pubStart := time.Now()
 		if err := p.publisher.Publish(ctx, reading); err != nil {
@@ -450,29 +481,18 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 			monitoring.IncQueuePublishErrors()
 			monitoring.IncKafkaErrorForPMU(pmuName)
 			log.Printf("[%s] kafka publish error: %v", pmuName, err)
-			monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "publish", "error", err.Error())
 			if p.kafkaSpool != nil {
 				if spoolErr := p.kafkaSpool.Append(reading); spoolErr != nil {
 					log.Printf("[%s] kafka spool append error: %v", pmuName, spoolErr)
-					monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "spool", "error", spoolErr.Error())
 				} else {
 					monitoring.IncSpoolQueued()
 					monitoring.IncSpoolQueuedForPMU(pmuName)
-					monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "spool", "queued", "publish failed; buffered to disk")
 				}
 			}
-		} else {
-			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
-			published = true
+			return
 		}
+		monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
 	}
-
-	// Fan-out via Kafka consumers when publish succeeded. On publish failure / no
-	// publisher, deliver locally so dashboard + sink stay alive.
-	if p.fanOutViaKafka && published {
-		return
-	}
-	p.deliverLocal(reading)
 }
 
 // OnDashboardReading feeds the live SSE dashboard from the pdc-dashboard consumer group.
@@ -486,11 +506,9 @@ func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error
 		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
 			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
 		}
-	}
-	if !r.Timestamp.IsZero() {
-		if lag := time.Since(r.Timestamp); lag >= 0 && lag < 10*time.Second {
-			monitoring.ObserveStage(r.PMUName, monitoring.StageE2EPMUToDash, lag)
-		}
+		monitoring.ObservePMUClockMetrics(r.PMUName, recv, r.Timestamp)
+	} else if !r.Timestamp.IsZero() {
+		monitoring.ObservePMUClockMetrics(r.PMUName, time.Time{}, r.Timestamp)
 	}
 	return nil
 }
@@ -499,7 +517,7 @@ func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error
 func (p *pipeline) OnSinkReading(_ context.Context, r parser.Reading) error {
 	monitoring.IncReadingsConsumed()
 	p.enqueueSink(r)
-	monitoring.ObserveLatency(time.Since(r.Timestamp))
+	monitoring.ObserveLatency(monitoring.CorrectedPMULag(r.PMUName, r.Timestamp))
 	return nil
 }
 
@@ -512,9 +530,12 @@ func (p *pipeline) deliverLocal(r parser.Reading) {
 		if lag := time.Since(recv); lag >= 0 && lag < 5*time.Minute {
 			monitoring.ObserveStage(r.PMUName, monitoring.StageE2ERecvToDash, lag)
 		}
+		monitoring.ObservePMUClockMetrics(r.PMUName, recv, r.Timestamp)
+	} else if !r.Timestamp.IsZero() {
+		monitoring.ObservePMUClockMetrics(r.PMUName, time.Time{}, r.Timestamp)
 	}
 	p.enqueueSink(r)
-	monitoring.ObserveLatency(time.Since(r.Timestamp))
+	monitoring.ObserveLatency(monitoring.CorrectedPMULag(r.PMUName, r.Timestamp))
 }
 
 func (p *pipeline) enqueueSink(r parser.Reading) {
@@ -659,6 +680,11 @@ func main() {
 	if runProcessor {
 		pl = newPipeline(ctx)
 		defer pl.Close()
+		// Same-process live path: parse → dashboard/sink without Kafka round-trips.
+		// Kafka remains for durability and split processor/ingress deployments.
+		if mode == "all" || mode == "direct" {
+			pl.fanOutViaKafka = envBool("KAFKA_READINGS_FANOUT", false)
+		}
 		pl.HydrateFromRedis(ctx)
 		pl.StartReplay(ctx)
 		pl.StartSinkWorkers(ctx)
@@ -676,7 +702,7 @@ func main() {
 		defer func() { _ = rawPub.Close() }()
 	}
 
-	if mode == "all" || mode == "processor" {
+	if mode == "processor" {
 		rawConsumer = output.NewRawFrameConsumerFromEnv()
 		if rawConsumer == nil {
 			log.Fatalf("mode=%s requires Kafka brokers (set KAFKA_BROKERS)", mode)
@@ -735,11 +761,12 @@ func main() {
 	if runIngress {
 		var directHandler receiver.FrameHandler
 		var ingressPub receiver.RawFramePublisher
-		if mode == "direct" {
+		if mode == "direct" || mode == "all" {
 			directHandler = func(pmuName string, raw []byte) {
 				pl.HandleFrame(ctx, pmuName, raw)
 			}
-		} else {
+		}
+		if mode != "direct" {
 			ingressPub = rawPub
 		}
 		pmuManager = manager.NewPMUManager(directHandler, ingressPub)

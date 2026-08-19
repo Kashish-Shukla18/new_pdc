@@ -10,22 +10,15 @@ type Props = {
 const FRAME_GROUPS = new Set(['ingest', 'process', 'dashboard', 'sink', 'e2e'])
 
 const PMU_HOP_COLS: { id: string; label: string }[] = [
-  { id: 'tcp_dial', label: 'Dial' },
-  { id: 'handshake_hdr', label: 'HDR wait' },
-  { id: 'handshake_total', label: 'Handshake' },
+  { id: 'clock_skew_pmu', label: 'Clock skew' },
+  { id: 'e2e_pmu_to_dashboard', label: 'E2E corr' },
+  { id: 'e2e_pmu_to_dashboard_raw', label: 'E2E raw' },
+  { id: 'e2e_recv_to_dashboard', label: 'E2E recv' },
   { id: 'tcp_wait', label: 'TCP wait' },
   { id: 'tcp_copy', label: 'TCP copy' },
-  { id: 'tcp_read', label: 'TCP total' },
-  { id: 'raw_kafka_enqueue', label: 'K enqueue' },
-  { id: 'raw_kafka_publish', label: 'K write' },
-  { id: 'raw_kafka_lag', label: 'K lag' },
   { id: 'frame_to_parse', label: 'To parse' },
   { id: 'parse', label: 'Parse' },
-  { id: 'quality', label: 'Quality' },
-  { id: 'readings_publish', label: 'Readings pub' },
   { id: 'dashboard_record', label: 'Dash record' },
-  { id: 'sink_store', label: 'Sink' },
-  { id: 'e2e_recv_to_dashboard', label: 'E2E' },
 ]
 
 function barWidth(value: number, max: number) {
@@ -36,6 +29,7 @@ function barWidth(value: number, max: number) {
 export function PipelineLatencyPanel({ latency, uiTiming, pmus }: Props) {
   const stages = latency?.stages ?? []
   const connStages = stages.filter((s) => s.group === 'connection' && s.count > 0)
+  const clockStages = stages.filter((s) => s.group === 'clock' && s.count > 0)
   const waitStages = stages.filter((s) => s.group === 'idle' && s.count > 0)
   const frameStages = stages.filter((s) => FRAME_GROUPS.has(s.group) && s.count > 0)
 
@@ -83,6 +77,25 @@ export function PipelineLatencyPanel({ latency, uiTiming, pmus }: Props) {
           </div>
         )}
       </div>
+
+      {clockStages.length > 0 && (
+        <div className="pipeline-conn">
+          {clockStages.map((stage) => (
+            <article
+              key={stage.id}
+              className={`pipeline-conn-card ${stage.id === 'clock_skew_pmu' ? 'warn' : ''}`}
+            >
+              <p>{stage.label}</p>
+              <strong>{formatHopMs(stage.avgMs)}</strong>
+              <span>
+                {stage.id === 'clock_skew_pmu'
+                  ? 'PMU SOC vs PDC wall clock — sync NTP on PMU if high'
+                  : 'raw includes skew above'}
+              </span>
+            </article>
+          ))}
+        </div>
+      )}
 
       {waitStages.length > 0 && (
         <div className="pipeline-conn">
@@ -165,11 +178,13 @@ export function PipelineLatencyPanel({ latency, uiTiming, pmus }: Props) {
                   {PMU_HOP_COLS.map((col) => {
                     const ms = pmu.lastHops?.[col.id]
                     const group =
-                      col.id.startsWith('handshake') || col.id === 'tcp_dial'
-                        ? 'connection'
-                        : col.id === 'tcp_wait' || col.id === 'tcp_read' || col.id === 'tcp_interarrival'
-                          ? 'idle'
-                          : 'ingest'
+                      col.id.startsWith('clock') || col.id.includes('skew') || col.id.endsWith('_raw')
+                        ? 'clock'
+                        : col.id.startsWith('handshake') || col.id === 'tcp_dial'
+                          ? 'connection'
+                          : col.id === 'tcp_wait' || col.id === 'tcp_read'
+                            ? 'idle'
+                            : 'ingest'
                     return (
                       <td key={col.id} className={`hop-cell ${hopTone(ms ?? 0, group)}`}>
                         {formatHopMs(ms)}
