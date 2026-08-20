@@ -70,3 +70,21 @@ func TestHdrWaitTimeoutDefault(t *testing.T) {
 		t.Fatalf("override=%s", d)
 	}
 }
+
+func TestParseFrameBytes_ValidCMD(t *testing.T) {
+	frame := buildCMDFrame(1, cmdDataOn)
+	got, err := parseFrameBytes(frame, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.raw, frame) {
+		t.Fatalf("mismatch")
+	}
+}
+
+func TestParseFrameBytes_RejectsTruncated(t *testing.T) {
+	frame := buildCMDFrame(1, cmdDataOn)
+	if _, err := parseFrameBytes(frame[:10], 0, 0); err == nil {
+		t.Fatal("expected error for truncated datagram")
+	}
+}

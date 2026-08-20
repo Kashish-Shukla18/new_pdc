@@ -162,10 +162,16 @@ type pmuRuntime struct {
 	trends        []TrendPoint
 	fnomHz        int
 	statDataError bool
+	approxFPS     float64
+	fpsWindowStart time.Time
+	fpsWindowCount int
+	lastTrendAt   time.Time
 }
 
 const maxConversationEvents = 1000
-const maxTrendPoints = 600
+const maxTrendPoints = 180 // ~18s at 10 Hz dashboard sample rate
+const dashboardTrendExport = 120
+const trendMinInterval = 100 * time.Millisecond // keep charts smooth without 50–60 Hz SVG load
 
 // trendPhasorMags maps CFG channel names onto VA–IC magnitudes for trend series.
 func trendPhasorMags(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
@@ -358,11 +364,25 @@ func RecordReading(r parser.Reading) {
 		Digitals:     append([]uint16(nil), r.Digitals...),
 	}
 
-	if len(st.trends) == maxTrendPoints {
-		copy(st.trends, st.trends[1:])
-		st.trends = st.trends[:maxTrendPoints-1]
+	if st.fpsWindowStart.IsZero() {
+		st.fpsWindowStart = now
 	}
-	st.trends = append(st.trends, t)
+	st.fpsWindowCount++
+	if elapsed := now.Sub(st.fpsWindowStart); elapsed >= 2*time.Second {
+		st.approxFPS = float64(st.fpsWindowCount) / elapsed.Seconds()
+		st.fpsWindowStart = now
+		st.fpsWindowCount = 0
+	}
+
+	// Downsample dashboard trends (~10 Hz) so fleet charts stay smooth at 100s of PMUs.
+	if st.lastTrendAt.IsZero() || now.Sub(st.lastTrendAt) >= trendMinInterval {
+		st.lastTrendAt = now
+		if len(st.trends) == maxTrendPoints {
+			copy(st.trends, st.trends[1:])
+			st.trends = st.trends[:maxTrendPoints-1]
+		}
+		st.trends = append(st.trends, t)
+	}
 	conversationBus.mu.Unlock()
 
 	ApplyTraceHops(r.PMUName, r.Trace)
@@ -573,9 +593,9 @@ func snapshotDashboard() DashboardState {
 			connText = "handshake done, waiting for data"
 		}
 
-		fps := 0.0
 		n := len(st.trends)
-		if n >= 2 {
+		fps := st.approxFPS
+		if fps <= 0 && n >= 2 {
 			durSec := float64(st.trends[n-1].TS-st.trends[0].TS) / 1000.0
 			if durSec > 0 {
 				fps = math.Min(500.0, float64(n-1)/durSec)
@@ -587,8 +607,14 @@ func snapshotDashboard() DashboardState {
 			last = st.trends[n-1]
 		}
 
-		trendCopy := make([]TrendPoint, n)
-		copy(trendCopy, st.trends)
+		exportN := n
+		if exportN > dashboardTrendExport {
+			exportN = dashboardTrendExport
+		}
+		trendCopy := make([]TrendPoint, exportN)
+		if exportN > 0 {
+			copy(trendCopy, st.trends[n-exportN:])
+		}
 
 		pmus = append(pmus, PMUState{
 			Name:           st.name,

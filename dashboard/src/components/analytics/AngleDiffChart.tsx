@@ -61,7 +61,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
               {coloredPairs.map((pair) => (
                 <Line
                   key={pair.key}
-                  type="monotone"
+                  type="linear"
                   dataKey={pair.key}
                   name={pair.name}
                   stroke={pair.color}

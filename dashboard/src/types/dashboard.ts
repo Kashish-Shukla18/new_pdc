@@ -193,6 +193,8 @@ export type PMUConfig = {
   name: string
   ip: string
   port: number
+  /** For UDP unicast: TCP control port (Connection Tester "Local TCP Port"). */
+  tcp_port?: number
   idcode: number
   region: string
   protocol: string

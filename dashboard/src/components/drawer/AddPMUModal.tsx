@@ -38,15 +38,42 @@ export function AddPMUModal() {
               />
             </div>
             <div>
-              <label style={{ display: 'block', marginBottom: '4px' }}>Port</label>
+              <label style={{ display: 'block', marginBottom: '4px' }}>Protocol</label>
+              <select
+                value={newPMU.protocol}
+                onChange={(e) => setNewPMU({ ...newPMU, protocol: e.target.value })}
+                style={{ width: '100%', padding: '8px' }}
+              >
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '4px' }}>
+                {newPMU.protocol === 'udp' ? 'UDP listen port' : 'Port'}
+              </label>
               <input
                 type="number"
                 required
                 value={newPMU.port}
-                onChange={(e) => setNewPMU({ ...newPMU, port: parseInt(e.target.value) })}
+                onChange={(e) => setNewPMU({ ...newPMU, port: parseInt(e.target.value, 10) || 0 })}
                 style={{ width: '100%', padding: '8px' }}
               />
             </div>
+            {newPMU.protocol === 'udp' && (
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px' }}>TCP control port</label>
+                <input
+                  type="number"
+                  value={newPMU.tcp_port ?? 0}
+                  onChange={(e) =>
+                    setNewPMU({ ...newPMU, tcp_port: parseInt(e.target.value, 10) || 0 })
+                  }
+                  style={{ width: '100%', padding: '8px' }}
+                  placeholder="Local TCP Port from tester"
+                />
+              </div>
+            )}
             <div>
               <label style={{ display: 'block', marginBottom: '4px' }}>ID Code</label>
               <input
@@ -86,17 +113,6 @@ export function AddPMUModal() {
                 onChange={(e) => setNewPMU({ ...newPMU, lon: parseFloat(e.target.value) || 0 })}
                 style={{ width: '100%', padding: '8px' }}
               />
-            </div>
-            <div>
-              <label style={{ display: 'block', marginBottom: '4px' }}>Protocol</label>
-              <select
-                value={newPMU.protocol}
-                onChange={(e) => setNewPMU({ ...newPMU, protocol: e.target.value })}
-                style={{ width: '100%', padding: '8px' }}
-              >
-                <option value="tcp">TCP</option>
-                <option value="udp">UDP</option>
-              </select>
             </div>
             <button type="submit" className="btn primary" style={{ marginTop: '10px' }}>
               Connect PMU

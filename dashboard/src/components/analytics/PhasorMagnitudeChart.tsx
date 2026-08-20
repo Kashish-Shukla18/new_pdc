@@ -13,7 +13,7 @@ import { PHASOR_I_COLORS, PHASOR_V_COLORS } from '../../utils/analyticsColors'
 import { CHART_TOOLTIP_STYLE } from '../../utils/chartTooltip'
 import { formatTS, round } from '../../utils/format'
 
-export const PHASOR_TREND_WINDOW = 120
+export const PHASOR_TREND_WINDOW = 90
 
 type Props = {
   trends: TrendPoint[]
@@ -83,11 +83,11 @@ export function PhasorMagnitudeChart({ trends, kind, pmuName }: Props) {
               {series.map((s) => (
                 <Line
                   key={s.key}
-                  type="monotone"
+                  type="linear"
                   dataKey={s.key}
                   name={s.label}
                   stroke={s.color}
-                  strokeWidth={1.7}
+                  strokeWidth={1.75}
                   dot={false}
                   isAnimationActive={false}
                   connectNulls
