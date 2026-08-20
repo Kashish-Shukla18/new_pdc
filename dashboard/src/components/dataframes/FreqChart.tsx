@@ -45,13 +45,14 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
             <Legend wrapperStyle={{ fontSize: 10 }} />
             <ReferenceLine y={fnomHz} stroke="#7dd3a7" strokeDasharray="4 4" label={`FNOM ${fnomHz}`} />
             <Line
-              type="monotone"
+              type="linear"
               dataKey="frequency"
               name="Freq (Hz)"
               stroke="#4de0ff"
               dot={false}
-              strokeWidth={1.5}
+              strokeWidth={1.75}
               isAnimationActive={false}
+              connectNulls
             />
           </LineChart>
         </ResponsiveContainer>

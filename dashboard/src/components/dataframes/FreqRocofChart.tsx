@@ -53,23 +53,25 @@ export const FreqRocofChart = memo(function FreqRocofChart({ data }: Props) {
             <Legend wrapperStyle={{ fontSize: 10 }} />
             <Line
               yAxisId="left"
-              type="monotone"
+              type="linear"
               dataKey="frequency"
               name="Freq (Hz)"
               stroke="#4de0ff"
               dot={false}
-              strokeWidth={1.5}
+              strokeWidth={1.75}
               isAnimationActive={false}
+              connectNulls
             />
             <Line
               yAxisId="right"
-              type="monotone"
+              type="linear"
               dataKey="rocof"
               name="ROCOF (Hz/s)"
               stroke="#ffd166"
               dot={false}
-              strokeWidth={1.5}
+              strokeWidth={1.75}
               isAnimationActive={false}
+              connectNulls
             />
           </LineChart>
         </ResponsiveContainer>

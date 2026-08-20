@@ -100,9 +100,52 @@ type timedFrame struct {
 
 func (t timedFrame) total() time.Duration { return t.wait + t.copy }
 
+// parseFrameBytes validates a complete C37.118 frame already in memory (UDP datagram).
+func parseFrameBytes(pkt []byte, wait, copyDur time.Duration) (timedFrame, error) {
+	if len(pkt) < 16 {
+		return timedFrame{}, fmt.Errorf("datagram too short: %d (min 16)", len(pkt))
+	}
+	if pkt[0] != syncByte {
+		return timedFrame{}, fmt.Errorf("invalid SYNC byte: 0x%02X", pkt[0])
+	}
+	frameSize := int(binary.BigEndian.Uint16(pkt[2:]))
+	if frameSize < 16 {
+		return timedFrame{}, fmt.Errorf("frame size too small: %d (min 16)", frameSize)
+	}
+	if len(pkt) < frameSize {
+		return timedFrame{}, fmt.Errorf("datagram truncated: have %d want %d", len(pkt), frameSize)
+	}
+	buf := append([]byte(nil), pkt[:frameSize]...)
+	want := binary.BigEndian.Uint16(buf[frameSize-2:])
+	got := crc16(buf[:frameSize-2])
+	if want != got {
+		return timedFrame{}, fmt.Errorf("CRC mismatch: want 0x%04X got 0x%04X", want, got)
+	}
+	return timedFrame{raw: buf, wait: wait, copy: copyDur}, nil
+}
+
+// readUDPFrameTimed reads one full datagram then parses it as a single C37.118 frame.
+func readUDPFrameTimed(conn net.Conn) (timedFrame, error) {
+	buf := make([]byte, 65535)
+	start := time.Now()
+	n, err := conn.Read(buf)
+	first := time.Now()
+	if err != nil {
+		return timedFrame{}, fmt.Errorf("read udp datagram: %w", err)
+	}
+	return parseFrameBytes(buf[:n], first.Sub(start), time.Since(first))
+}
+
 // readFrameTimed is readFrame with wait-vs-copy split.
 // wait is time until the socket delivers the first byte; copy is the rest.
+// UDP must read one datagram at a time — piecemeal ReadFull drops the rest of the packet.
 func readFrameTimed(r io.Reader) (timedFrame, error) {
+	if conn, ok := r.(net.Conn); ok {
+		if _, isUDP := conn.(*net.UDPConn); isUDP {
+			return readUDPFrameTimed(conn)
+		}
+	}
+
 	start := time.Now()
 	hdr := make([]byte, 4)
 	if _, err := io.ReadFull(r, hdr[:1]); err != nil {
@@ -398,6 +441,213 @@ func (r *Receiver) Run(ctx context.Context) {
 // connect performs the full C37.118 connection handshake and reads data frames
 // until an error occurs or ctx is cancelled.
 func (r *Receiver) connect(ctx context.Context) error {
+	if r.cfg.NetworkProtocol() == "udp" {
+		return r.connectUDP(ctx)
+	}
+	return r.connectTCP(ctx)
+}
+
+// connectUDP receives spontaneous / unicast UDP DATA.
+// Port = local UDP listen port (matches "Remote UDP Port" in PMU Connection Tester).
+// TCPPort = optional TCP command port (matches "Local TCP Port") for CFG2 + DATA_ON.
+func (r *Receiver) connectUDP(ctx context.Context) error {
+	timeout := r.cfg.Timeout()
+	listenAddr := &net.UDPAddr{IP: net.IPv4zero, Port: r.cfg.Port}
+	pc, err := net.ListenUDP("udp4", listenAddr)
+	if err != nil {
+		return fmt.Errorf("udp listen :%d: %w", r.cfg.Port, err)
+	}
+	defer pc.Close()
+	_ = pc.SetReadBuffer(256 * 1024)
+
+	log.Printf("[%s] UDP listening on %s (unicast DATA); source filter=%s",
+		r.cfg.Name, pc.LocalAddr(), r.cfg.IP)
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
+		fmt.Sprintf("udp listen %s", pc.LocalAddr()))
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, 0)
+
+	tcpPort := r.cfg.TCPPort
+	var tcpConn net.Conn
+	if tcpPort > 0 {
+		tcpAddr := fmt.Sprintf("%s:%d", r.cfg.IP, tcpPort)
+		dialer := &net.Dialer{Timeout: timeout}
+		dialStart := time.Now()
+		tcpConn, err = dialer.DialContext(ctx, "tcp", tcpAddr)
+		dialDur := time.Since(dialStart)
+		monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
+		if err != nil {
+			return fmt.Errorf("tcp dial %s for UDP CFG: %w", tcpAddr, err)
+		}
+		defer tcpConn.Close()
+		configureStreamConn(tcpConn)
+		log.Printf("[%s] UDP mode: TCP control connected to %s in %s",
+			r.cfg.Name, tcpAddr, monitoring.FormatMs(dialDur))
+
+		if err := r.handshakeCFG(ctx, tcpConn, timeout); err != nil {
+			return err
+		}
+		if err := r.sendCMD(tcpConn, cmdDataOn); err != nil {
+			return fmt.Errorf("send CMD_DATA_ON: %w", err)
+		}
+		log.Printf("[%s] sent CMD_DATA_ON on TCP – expecting DATA on UDP :%d", r.cfg.Name, r.cfg.Port)
+		monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok",
+			fmt.Sprintf("DATA_ON via TCP :%d; listening UDP :%d", tcpPort, r.cfg.Port))
+
+		// Drain TCP so the peer is not blocked if it also emits DATA there.
+		go drainTCPQuiet(tcpConn)
+	} else if _, ok := parser.GetProfile(r.cfg.Name); !ok {
+		return fmt.Errorf("udp listen :%d needs tcp_port for CFG2 (set tcp_port to Connection Tester Local TCP Port), or connect TCP once first", r.cfg.Port)
+	} else {
+		log.Printf("[%s] UDP listen :%d using existing CFG2 profile (no tcp_port)", r.cfg.Name, r.cfg.Port)
+	}
+
+	buf := make([]byte, 65535)
+	dataFrames := 0
+	var lastComplete time.Time
+	idleTimeout := timeout
+	if idleTimeout < 15*time.Second {
+		idleTimeout = 15 * time.Second
+	}
+
+	for {
+		if ctx.Err() != nil {
+			if tcpConn != nil {
+				_ = r.sendCMD(tcpConn, cmdDataOff)
+			}
+			return nil
+		}
+		_ = pc.SetReadDeadline(time.Now().Add(idleTimeout))
+		start := time.Now()
+		n, src, err := pc.ReadFromUDP(buf)
+		first := time.Now()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return fmt.Errorf("udp idle timeout on :%d (no datagrams from tester — check Remote UDP address/port and that Start is running)", r.cfg.Port)
+			}
+			return fmt.Errorf("udp read :%d: %w", r.cfg.Port, err)
+		}
+		if !udpSourceAllowed(r.cfg.IP, src) {
+			continue
+		}
+		tf, err := parseFrameBytes(buf[:n], first.Sub(start), time.Since(first))
+		if err != nil {
+			log.Printf("[%s] udp bad datagram from %s: %v", r.cfg.Name, src, err)
+			continue
+		}
+		completeAt := time.Now()
+		ft := frameType(tf.raw)
+		switch ft {
+		case frameTypeCfg2:
+			if profile, perr := parser.ParseCFG2Frame(tf.raw); perr == nil {
+				parser.SetProfile(r.cfg.Name, profile)
+				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
+			}
+			_ = r.publishRaw(ctx, "cfg2", tf.raw, 0, 0)
+		case frameTypeData:
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPRead, tf.total())
+			if !lastComplete.IsZero() {
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPInterarrival, completeAt.Sub(lastComplete))
+			}
+			lastComplete = completeAt
+			dataFrames++
+			if dataFrames <= 3 {
+				logFrameTrace(r.cfg.Name, fmt.Sprintf("udp rx #%d from=%s wait=%s", dataFrames, src, monitoring.FormatMs(tf.wait)), tf.raw)
+			}
+			payload := append([]byte(nil), tf.raw...)
+			r.dispatchDataFrame(ctx, payload, tf.wait, tf.copy)
+		default:
+			if dataFrames < 3 {
+				log.Printf("[%s] udp skip %s from %s", r.cfg.Name, frameTypeName(ft), src)
+			}
+		}
+	}
+}
+
+func udpSourceAllowed(wantIP string, src *net.UDPAddr) bool {
+	if src == nil {
+		return true
+	}
+	wantIP = strings.TrimSpace(wantIP)
+	if wantIP == "" || wantIP == "0.0.0.0" || wantIP == "::" {
+		return true
+	}
+	// Accept loopback aliases when configured as 127.0.0.1.
+	if wantIP == "127.0.0.1" || wantIP == "localhost" {
+		return src.IP.IsLoopback()
+	}
+	return src.IP.Equal(net.ParseIP(wantIP))
+}
+
+func drainTCPQuiet(conn net.Conn) {
+	buf := make([]byte, 4096)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+	}
+}
+
+// handshakeCFG runs HDR (optional) + CFG2 on a TCP control connection.
+func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time.Duration) error {
+	handshakeStart := time.Now()
+	_ = r.sendCMD(conn, cmdDataOff)
+
+	headerText := ""
+	log.Printf("[%s] handshake step 1: sending %s", r.cfg.Name, cmdName(cmdSendHdr))
+	if err := r.sendCMD(conn, cmdSendHdr); err != nil {
+		return fmt.Errorf("send HDR request: %w", err)
+	}
+	hdrDeadline := hdrWaitTimeout()
+	if timeout > 0 && timeout < hdrDeadline {
+		hdrDeadline = timeout
+	}
+	hdrWaitStart := time.Now()
+	if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
+		hdrDur := time.Since(hdrWaitStart)
+		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
+		log.Printf("[%s] optional HEADER not received after %s (%v) – continuing with CFG2",
+			r.cfg.Name, monitoring.FormatMs(hdrDur), err)
+	} else {
+		hdrDur := time.Since(hdrWaitStart)
+		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
+		if text, perr := parser.ParseHeaderFrame(hdrRaw); perr == nil {
+			headerText = text
+		}
+		_ = r.publishRaw(ctx, "hdr", hdrRaw, 0, 0)
+	}
+
+	log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
+	if err := r.sendCMD(conn, cmdSendCfg2); err != nil {
+		return fmt.Errorf("send CFG2 request: %w", err)
+	}
+	cfgWaitStart := time.Now()
+	cfg2, err := readFrameOfType(conn, frameTypeCfg2, timeout)
+	if err != nil {
+		return fmt.Errorf("read CFG2 frame: %w", err)
+	}
+	cfgDur := time.Since(cfgWaitStart)
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
+	logFrameTrace(r.cfg.Name, "handshake CFG2", cfg2)
+	decodeCFG2Details(r.cfg.Name, cfg2)
+	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
+		return fmt.Errorf("parse CFG2: %w", err)
+	} else {
+		profile.HeaderText = headerText
+		parser.SetProfile(r.cfg.Name, profile)
+		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
+	}
+	if err := r.publishRaw(ctx, "cfg2", cfg2, 0, 0); err != nil {
+		return fmt.Errorf("publish CFG2 to kafka: %w", err)
+	}
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, time.Since(handshakeStart))
+	return nil
+}
+
+func (r *Receiver) connectTCP(ctx context.Context) error {
 	addr := r.cfg.Addr()
 	proto := r.cfg.NetworkProtocol()
 	timeout := r.cfg.Timeout()
@@ -422,101 +672,20 @@ func (r *Receiver) connect(ctx context.Context) error {
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
 		fmt.Sprintf("connected to %s in %s", addr, monitoring.FormatMs(dialDur)))
 
-	handshakeStart := time.Now()
-
-	// Stop any residual data stream from a prior session before config exchange.
-	_ = r.sendCMD(conn, cmdDataOff)
-
-	headerText := ""
-
-	// ── Step 1: request Header frame (optional — many PMUs omit or ignore) ───
-	log.Printf("[%s] handshake step 1: sending %s", r.cfg.Name, cmdName(cmdSendHdr))
-	if err := r.sendCMD(conn, cmdSendHdr); err != nil {
-		return fmt.Errorf("send HDR request: %w", err)
-	}
-	log.Printf("[%s] sent CMD_SEND_HDR", r.cfg.Name)
-	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "handshake", "ok", "sent CMD_SEND_HDR")
-
-	hdrDeadline := hdrWaitTimeout()
-	if timeout > 0 && timeout < hdrDeadline {
-		hdrDeadline = timeout
-	}
-	hdrWaitStart := time.Now()
-	if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
-		hdrDur := time.Since(hdrWaitStart)
-		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
-		log.Printf("[%s] optional HEADER not received after %s (%v) – continuing with CFG2 (one-time setup, not per-frame)",
-			r.cfg.Name, monitoring.FormatMs(hdrDur), err)
-		monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "warn",
-			fmt.Sprintf("HDR not received in %s: %v", monitoring.FormatMs(hdrDur), err))
-	} else {
-		hdrDur := time.Since(hdrWaitStart)
-		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
-		logFrameTrace(r.cfg.Name, "handshake step 1 rx", hdrRaw)
-		text, perr := parser.ParseHeaderFrame(hdrRaw)
-		if perr != nil {
-			log.Printf("[%s] header frame parse error: %v", r.cfg.Name, perr)
-		} else {
-			headerText = text
-			log.Printf("[%s] HEADER frame (%d bytes) in %s:\n%s", r.cfg.Name, len(hdrRaw), monitoring.FormatMs(hdrDur), text)
-			monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok",
-				fmt.Sprintf("received HEADER frame (%d bytes) in %s", len(hdrRaw), monitoring.FormatMs(hdrDur)))
-		}
-		if err := r.publishRaw(ctx, "hdr", hdrRaw, 0, 0); err != nil {
-			return fmt.Errorf("publish HDR to kafka: %w", err)
-		}
+	if err := r.handshakeCFG(ctx, conn, timeout); err != nil {
+		return err
 	}
 
-	// ── Step 2: request Config-2 frame ───────────────────────────────────────
-	log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
-	if err := r.sendCMD(conn, cmdSendCfg2); err != nil {
-		return fmt.Errorf("send CFG2 request: %w", err)
-	}
-	log.Printf("[%s] sent CMD_SEND_CFG2", r.cfg.Name)
-	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "handshake", "ok", "sent CMD_SEND_CFG2")
-
-	cfgWaitStart := time.Now()
-	cfg2, err := readFrameOfType(conn, frameTypeCfg2, timeout)
-	if err != nil {
-		return fmt.Errorf("read CFG2 frame: %w", err)
-	}
-	cfgDur := time.Since(cfgWaitStart)
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
-	logFrameTrace(r.cfg.Name, "handshake step 2 rx", cfg2)
-	decodeCFG2Details(r.cfg.Name, cfg2)
-	log.Printf("[%s] received CFG2 frame (%d bytes) in %s", r.cfg.Name, len(cfg2), monitoring.FormatMs(cfgDur))
-	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "handshake", "ok",
-		fmt.Sprintf("received CFG2 frame (%d bytes) in %s", len(cfg2), monitoring.FormatMs(cfgDur)))
-	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
-		return fmt.Errorf("parse CFG2: %w", err)
-	} else {
-		profile.HeaderText = headerText
-		parser.SetProfile(r.cfg.Name, profile)
-		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d fnom=%dHz polar=%v ph=%d an=%d dg=%d cfgcnt=%d header=%q",
-			r.cfg.Name, profile.Station, profile.DataRate, profile.FnomHz, profile.Polar, profile.Phnmr, profile.Annmr, profile.Dgnmr, profile.CfgCnt, profile.HeaderText)
-		if profile.IDCode != 0 && r.cfg.IDCode != 0 && profile.IDCode != r.cfg.IDCode {
-			log.Printf("[%s] warning: CFG2 idcode=%d != configured idcode=%d", r.cfg.Name, profile.IDCode, r.cfg.IDCode)
-		}
-	}
-	if err := r.publishRaw(ctx, "cfg2", cfg2, 0, 0); err != nil {
-		return fmt.Errorf("publish CFG2 to kafka: %w", err)
-	}
-
-	// ── Step 3: start data transmission ──────────────────────────────────────
 	log.Printf("[%s] handshake step 3: sending %s", r.cfg.Name, cmdName(cmdDataOn))
 	if err := r.sendCMD(conn, cmdDataOn); err != nil {
 		return fmt.Errorf("send CMD_DATA_ON: %w", err)
 	}
-	handshakeDur := time.Since(handshakeStart)
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, handshakeDur)
-	log.Printf("[%s] sent CMD_DATA_ON – streaming data (handshake %s, one-time setup)", r.cfg.Name, monitoring.FormatMs(handshakeDur))
-	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok",
-		fmt.Sprintf("sent CMD_DATA_ON (handshake %s, one-time)", monitoring.FormatMs(handshakeDur)))
+	log.Printf("[%s] sent CMD_DATA_ON – streaming data", r.cfg.Name)
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok", "sent CMD_DATA_ON")
 
 	dataFrames := 0
 	var lastComplete time.Time
 
-	// ── Step 4: stream data frames ────────────────────────────────────────────
 	for {
 		if ctx.Err() != nil {
 			_ = r.sendCMD(conn, cmdDataOff)
@@ -530,6 +699,9 @@ func (r *Receiver) connect(ctx context.Context) error {
 		tf, err := readFrameTimed(conn)
 		completeAt := time.Now()
 		if err != nil {
+			if strings.Contains(err.Error(), "EOF") {
+				return fmt.Errorf("read data frame: %w (peer closed — close other PDC / Connection Tester DATA client)", err)
+			}
 			return fmt.Errorf("read data frame: %w", err)
 		}
 

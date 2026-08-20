@@ -62,6 +62,7 @@ func (s *Store) SavePMU(ctx context.Context, cfg config.PMUConfig) error {
 		map[string]interface{}{
 			"ip":            cfg.IP,
 			"port":          cfg.Port,
+			"tcp_port":      cfg.TCPPort,
 			"idcode":        int(cfg.IDCode),
 			"protocol":      cfg.Protocol,
 			"timeout_sec":   cfg.TimeoutSec,
@@ -130,13 +131,19 @@ func (s *Store) GetAllPMUs(ctx context.Context) ([]config.PMUConfig, error) {
 		protocol, _ := rec.ValueByKey("protocol").(string)
 		region, _ := rec.ValueByKey("region").(string)
 
-		var port, idcode, timeout, reconnect int64
+		var port, idcode, timeout, reconnect, tcpPort int64
 		var lat, lon float64
 
 		if v := rec.ValueByKey("port"); v != nil {
 			switch val := v.(type) {
 			case int64: port = val
 			case float64: port = int64(val)
+			}
+		}
+		if v := rec.ValueByKey("tcp_port"); v != nil {
+			switch val := v.(type) {
+			case int64: tcpPort = val
+			case float64: tcpPort = int64(val)
 			}
 		}
 		if v := rec.ValueByKey("idcode"); v != nil {
@@ -174,6 +181,7 @@ func (s *Store) GetAllPMUs(ctx context.Context) ([]config.PMUConfig, error) {
 			Name:         name,
 			IP:           ip,
 			Port:         int(port),
+			TCPPort:      int(tcpPort),
 			IDCode:       uint16(idcode),
 			Protocol:     protocol,
 			TimeoutSec:   int(timeout),

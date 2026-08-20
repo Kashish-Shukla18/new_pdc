@@ -54,7 +54,7 @@ export function EditDevicePage() {
             </label>
 
             <label className="field">
-              <span>Port</span>
+              <span>{editPMU.protocol === 'udp' ? 'UDP listen port' : 'Port'}</span>
               <input
                 type="number"
                 required
@@ -64,6 +64,22 @@ export function EditDevicePage() {
                 onChange={(e) => setEditPMU({ ...editPMU, port: parseInt(e.target.value, 10) || 0 })}
               />
             </label>
+
+            {editPMU.protocol === 'udp' && (
+              <label className="field">
+                <span>TCP control port</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={65535}
+                  value={editPMU.tcp_port ?? 0}
+                  onChange={(e) =>
+                    setEditPMU({ ...editPMU, tcp_port: parseInt(e.target.value, 10) || 0 })
+                  }
+                  placeholder="Connection Tester Local TCP Port"
+                />
+              </label>
+            )}
 
             <label className="field">
               <span>ID code</span>

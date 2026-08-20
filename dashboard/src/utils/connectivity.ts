@@ -4,11 +4,13 @@ import { round } from './format'
 import { availabilityOf, jitterOf, latencyOf, packetLossOf, pmuKey, toneFromStatus } from './pmu'
 
 export const RTT_CHART_COLORS = ['#ff5d6c', '#f4b740', '#a07cff', '#3da9fc', '#27d3a2', '#7ee0ff']
-export const RTT_WINDOW = 30
+/** Rolling samples for the latency chart (~1 Hz poll → ~1 min). */
+export const RTT_WINDOW = 60
 
 function statusLabel(pmu: PMUWithMeta, loss: number, latency: number): ConnectivityRow['statusLabel'] {
   if (!pmu.connected) return 'Offline'
-  if (loss > 1.5 || latency > 100) return 'Degraded'
+  const latBad = Number.isFinite(latency) && latency > 50
+  if (loss > 1.5 || latBad) return 'Degraded'
   return 'Healthy'
 }
 
@@ -20,8 +22,8 @@ function tableRecommendation(
 ): string {
   if (!connected) return 'Restart stream / check link'
   if (loss > 2) return 'QoS / MPLS reclass'
-  if (latency > 120) return 'Re-route shorter LSP'
-  if (jitter > 10) return 'Check upstream jitter source'
+  if (Number.isFinite(latency) && latency > 50) return 'Check path delay'
+  if (jitter > 10) return 'Check jitter source'
   return 'Healthy'
 }
 
@@ -41,7 +43,7 @@ export function buildConnectivityRow(pmu: PMUWithMeta): ConnectivityRow {
   let recommendation = 'Healthy'
   if (!pmu.connected) recommendation = 'Restart stream and verify source link'
   else if (loss > 2) recommendation = 'Inspect quality gate and packet path'
-  else if (latency > 120) recommendation = 'Review network route and queueing'
+  else if (Number.isFinite(latency) && latency > 50) recommendation = 'Review network route and queueing'
 
   return {
     ...pmu,
@@ -74,46 +76,35 @@ export function computeConnectivityKpis(rows: ConnectivityRow[]): ConnectivityKp
   const offline = rows.filter((row) => !row.connected).length
   const highLoss = rows.filter((row) => row.loss > 1.5).length
   const healthy = rows.filter((row) => row.connected)
-  const avgLat = healthy.length
-    ? healthy.reduce((sum, row) => sum + row.latency, 0) / healthy.length
+  const measured = healthy.filter((row) => Number.isFinite(row.latency) && row.latency < 900)
+  const avgLat = measured.length
+    ? measured.reduce((sum, row) => sum + row.latency, 0) / measured.length
     : 0
 
   return [
     {
-      label: 'Active issues',
-      value: String(issues),
-      subtext: 'across all streams',
-      tone: issues > 0 ? 'warn' : 'ok',
-    },
-    {
-      label: 'Offline streams',
-      value: String(offline),
-      subtext: 'no frames > 30 s',
-      tone: offline > 0 ? 'bad' : 'ok',
-    },
-    {
-      label: 'High loss (>1.5%)',
-      value: String(highLoss),
-      subtext: 'packet loss threshold',
-      tone: highLoss > 0 ? 'warn' : 'ok',
+      label: 'Link issues',
+      value: `${issues}`,
+      subtext: `${offline} offline · ${highLoss} high loss`,
+      tone: issues ? 'warn' : 'ok',
     },
     {
       label: 'Avg latency',
-      value: `${round(avgLat, 0)} ms`,
-      subtext: 'across all healthy streams',
-      tone: 'accent',
+      value: measured.length ? `${round(avgLat, 2)} ms` : '—',
+      subtext: 'Frame received → dashboard',
+      tone: avgLat > 50 ? 'warn' : 'ok',
     },
     {
-      label: 'Redundancy active',
-      value: '87%',
-      subtext: 'streams using HSR/PRP',
-      tone: 'ok',
+      label: 'Online streams',
+      value: `${healthy.length}/${rows.length}`,
+      subtext: 'Connected now',
+      tone: offline ? 'warn' : 'ok',
     },
     {
-      label: 'Open tickets',
-      value: '4',
-      subtext: 'with NOC',
-      tone: 'warn',
+      label: 'High loss',
+      value: `${highLoss}`,
+      subtext: '> 1.5% quality rejects',
+      tone: highLoss ? 'bad' : 'ok',
     },
   ]
 }
@@ -121,96 +112,84 @@ export function computeConnectivityKpis(rows: ConnectivityRow[]): ConnectivityKp
 export function computeConnectivityRecs(rows: ConnectivityRow[]): ConnectivityRec[] {
   const recs: ConnectivityRec[] = []
 
-  rows
-    .filter((row) => !row.connected)
-    .slice(0, 3)
-    .forEach((row) => {
-      recs.push({
-        sev: 'bad',
-        title: `Restart stream — ${row.name}`,
-        desc: `Offline > 30 s. Verify OPGW link to ${row.meta.substation}; ping ${row.meta.primaryIp}; failover to ${row.meta.redundantIp}`,
-      })
+  for (const row of rows.filter((r) => !r.connected).slice(0, 4)) {
+    recs.push({
+      sev: 'bad',
+      title: `Offline — ${row.name}`,
+      desc: 'No recent frames. Check IP/port, protocol, and that only one DATA client is connected.',
     })
+  }
 
-  rows
-    .filter((row) => row.loss > 2)
-    .slice(0, 3)
-    .forEach((row) => {
-      recs.push({
-        sev: 'warn',
-        title: `Investigate packet loss — ${row.name}`,
-        desc: `Loss ${row.loss.toFixed(1)}% on primary path. Suggested: check MPLS QoS class on ${row.meta.primaryIp}`,
-      })
+  for (const row of rows.filter((r) => r.connected && r.loss > 2).slice(0, 3)) {
+    recs.push({
+      sev: 'warn',
+      title: `Packet loss — ${row.name}`,
+      desc: `Quality rejects ${round(row.loss, 2)}%. Inspect STAT / network path.`,
     })
+  }
 
-  rows
-    .filter((row) => row.connected && row.latency > 120)
-    .slice(0, 2)
-    .forEach((row) => {
-      recs.push({
-        sev: 'warn',
-        title: `High RTT — ${row.name}`,
-        desc: `Latency ${round(row.latency, 0)} ms exceeds 100 ms target. Consider re-routing via shorter MPLS LSP`,
-      })
+  for (const row of rows.filter((r) => r.connected && Number.isFinite(r.latency) && r.latency > 50).slice(0, 3)) {
+    recs.push({
+      sev: 'warn',
+      title: `High latency — ${row.name}`,
+      desc: `Receive→dashboard ${round(row.latency, 2)} ms (target under ~15 ms for local pipeline).`,
     })
+  }
 
-  recs.push({
-    sev: 'info',
-    title: 'Schedule HSR rotation drill',
-    desc: 'Half of NRLDC streams have not exercised redundant path in 90 days',
-  })
+  if (!recs.length) {
+    recs.push({
+      sev: 'info',
+      title: 'Links nominal',
+      desc: 'No offline streams or latency/loss alerts on the current snapshot.',
+    })
+  }
 
-  recs.push({
-    sev: 'info',
-    title: 'Firmware advisory — ABB RES670',
-    desc: 'ABB published security advisory PSIRT-2026-04 affecting RES670 v2.0; 5 PMUs eligible to upgrade',
-  })
-
-  return recs
+  return recs.slice(0, 8)
 }
 
-export function topRttStreams(rows: ConnectivityRow[], limit = 6): RttStream[] {
+export function topRttStreams(rows: ConnectivityRow[], limit = 8): RttStream[] {
+  // Stable name order so the chart set does not reshuffle every poll.
   return rows
     .filter((row) => row.connected)
-    .sort((a, b) => b.latency - a.latency)
+    .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, limit)
     .map((row, index) => ({
       key: pmuKey(row.name),
       name: row.name,
       color: RTT_CHART_COLORS[index % RTT_CHART_COLORS.length],
-      latency: row.latency,
+      latency: Number.isFinite(row.latency) ? row.latency : 0,
     }))
 }
 
-export function seedRttHistory(streams: RttStream[]): RttHistoryPoint[] {
-  return Array.from({ length: RTT_WINDOW }, (_, index) => {
-    const slot = index - (RTT_WINDOW - 1)
-    const point: RttHistoryPoint = {
-      slot,
-      label: `${slot}×10s`,
-    }
-    for (const stream of streams) {
-      point[stream.key] = Math.max(2, stream.latency + (Math.random() * 16 - 8))
-    }
-    return point
-  })
-}
-
+/** Append one measured latency sample; hold last value when a hop is briefly missing. */
 export function appendRttPoint(
   history: RttHistoryPoint[],
   streams: RttStream[],
   rows: ConnectivityRow[],
 ): RttHistoryPoint[] {
-  const previous = history[history.length - 1]
-  const point: RttHistoryPoint = { slot: 0, label: 'now' }
-
-  for (const stream of streams) {
-    const row = rows.find((entry) => pmuKey(entry.name) === stream.key)
-    const target = row?.latency ?? stream.latency
-    const prev = Number(previous?.[stream.key] ?? target)
-    const jittered = prev + (Math.random() * 12 - 6)
-    point[stream.key] = Math.max(2, jittered * 0.85 + target * 0.15)
+  const now = Date.now()
+  const prev = history[history.length - 1]
+  const point: RttHistoryPoint = {
+    slot: history.length,
+    label: new Date(now).toLocaleTimeString(),
+    ts: now,
   }
 
-  return [...history.slice(1), point]
+  let any = false
+  for (const stream of streams) {
+    const row = rows.find((entry) => pmuKey(entry.name) === stream.key)
+    const measured =
+      row?.connected && Number.isFinite(row.latency) && row.latency >= 0 && row.latency < 900
+        ? row.latency
+        : undefined
+    const held = typeof prev?.[stream.key] === 'number' ? Number(prev[stream.key]) : undefined
+    const value = measured ?? held
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      point[stream.key] = value
+      any = true
+    }
+  }
+
+  if (!any) return history
+  return [...history, point].slice(-RTT_WINDOW)
 }

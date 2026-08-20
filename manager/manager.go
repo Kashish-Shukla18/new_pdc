@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"pdc/config"
 	"pdc/monitoring"
@@ -63,15 +64,18 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 // StopPMU stops a running PMU receiver.
 func (m *PMUManager) StopPMU(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	cancel, exists := m.receivers[name]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("PMU %s is not running", name)
 	}
 
 	cancel()
 	delete(m.receivers, name)
+	m.mu.Unlock()
+
+	// Allow UDP/TCP sockets to leave TIME_WAIT / finish Close before re-bind.
+	time.Sleep(250 * time.Millisecond)
 
 	monitoring.RecordConversation(name, "SYSTEM", "PDC", "manager", "warn", "Stopped PMU receiver")
 	log.Printf("[Manager] Stopped PMU receiver for %s", name)

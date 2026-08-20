@@ -70,6 +70,7 @@ export function useDashboard() {
       name: cfg.name,
       ip: cfg.ip,
       port: cfg.port,
+      tcp_port: cfg.tcp_port ?? 0,
       idcode: cfg.idcode,
       region: cfg.region,
       protocol: cfg.protocol || 'tcp',
@@ -161,15 +162,11 @@ export function useDashboard() {
   useEffect(() => {
     if (isPaused) return
 
-    const refresh = async () => {
+    const refreshState = async () => {
       const t0 = performance.now()
       try {
-        const [stateRes, configRes] = await Promise.all([
-          fetch('/conversation/state'),
-          fetch('/api/pmus'),
-        ])
+        const stateRes = await fetch('/conversation/state')
         const tNet = performance.now()
-
         if (stateRes.ok) {
           const data = (await stateRes.json()) as DashboardState
           const tJson = performance.now()
@@ -180,18 +177,31 @@ export function useDashboard() {
             totalMs: tJson - t0,
           })
         }
-        if (configRes.ok) {
-          const configs = (await configRes.json()) as PMUConfig[]
-          setDbConfigs(configs)
-        }
       } catch {
         // Keep last good snapshot visible.
       }
     }
 
-    void refresh()
-    const timer = window.setInterval(refresh, 1000)
-    return () => window.clearInterval(timer)
+    const refreshConfigs = async () => {
+      try {
+        const configRes = await fetch('/api/pmus')
+        if (configRes.ok) {
+          const configs = (await configRes.json()) as PMUConfig[]
+          setDbConfigs(configs)
+        }
+      } catch {
+        // Keep last configs.
+      }
+    }
+
+    void refreshState()
+    void refreshConfigs()
+    const stateTimer = window.setInterval(refreshState, 1000)
+    const configTimer = window.setInterval(refreshConfigs, 10000)
+    return () => {
+      window.clearInterval(stateTimer)
+      window.clearInterval(configTimer)
+    }
   }, [isPaused])
 
   useEffect(() => {
@@ -264,11 +274,13 @@ export function useDashboard() {
     }))
   }, [pmus])
 
+  // Fleet charts merge only what Overview selects; keep a light default for other consumers.
   const mergedTrend = useMemo(() => {
     const rows = new Map<number, Record<string, number>>()
-    for (const pmu of pmus) {
+    const chartPMUs = pmus.slice(0, 8)
+    for (const pmu of chartPMUs) {
       const key = pmuKey(pmu.name)
-      const trend = pmu.trends.slice(-120)
+      const trend = pmu.trends.slice(-90)
       const fnom = pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : 60
       for (const point of trend) {
         const row = rows.get(point.ts) ?? { ts: point.ts }
