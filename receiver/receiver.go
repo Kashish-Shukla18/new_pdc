@@ -465,9 +465,6 @@ func (r *Receiver) connect(ctx context.Context) error {
 		if err := r.publishRaw(ctx, "hdr", hdrRaw, 0, 0); err != nil {
 			return fmt.Errorf("publish HDR to kafka: %w", err)
 		}
-		if err := r.publishRaw(ctx, "hdr", hdrRaw); err != nil {
-			return fmt.Errorf("publish HDR to kafka: %w", err)
-		}
 	}
 
 	// ── Step 2: request Config-2 frame ───────────────────────────────────────

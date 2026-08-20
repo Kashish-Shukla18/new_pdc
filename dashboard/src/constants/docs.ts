@@ -216,7 +216,7 @@ export const PAGE_DOCS: PageDoc[] = [
       {
         heading: 'Phasor focus',
         items: [
-          'Dropdown selects which PMU feeds V/I charts and the phasor diagram',
+          'Dropdown selects which PMU feeds V/I charts and the phasor diagrams',
         ],
       },
       {
@@ -227,9 +227,9 @@ export const PAGE_DOCS: PageDoc[] = [
         ],
       },
       {
-        heading: 'Phasor diagram and angle Δ',
+        heading: 'Phasor diagrams and angle Δ',
         items: [
-          'Polar diagram of V and I (scaled separately) with short legend',
+          'Separate voltage and current polar diagrams (A yellow, B red, C blue)',
           'Inter-PMU VA angle Δ chart — empty until a second stream is online',
         ],
       },
