@@ -8,8 +8,6 @@ import {
   X,
 } from 'lucide-react'
 import {
-  Area,
-  AreaChart,
   CartesianGrid,
   Legend,
   Line,
@@ -26,8 +24,33 @@ import { CHART_COLORS, INDIA_CENTER } from '../constants'
 import { useDashboardContext } from '../context/DashboardContext'
 import { formatTS, round } from '../utils/format'
 import { packetLossOf, pmuKey } from '../utils/pmu'
+import type { PMUWithMeta } from '../types/dashboard'
 
 type FreqMode = 'absolute' | 'deviation'
+
+/** Hard cap so Recharts stays interactive with large fleets. */
+const OVERVIEW_CHART_MAX_SERIES = 8
+const OVERVIEW_TREND_POINTS = 90
+
+function mergeSelectedTrends(pmus: PMUWithMeta[]): Record<string, number>[] {
+  const rows = new Map<number, Record<string, number>>()
+  for (const pmu of pmus) {
+    const key = pmuKey(pmu.name)
+    const trend = pmu.trends.slice(-OVERVIEW_TREND_POINTS)
+    const fnom = pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : 60
+    for (const point of trend) {
+      const row = rows.get(point.ts) ?? { ts: point.ts }
+      const freqDev =
+        typeof point.frequencyDev === 'number' ? point.frequencyDev : point.frequency - fnom
+      row[`${key}__frequency`] = point.frequency
+      row[`${key}__frequencyDev`] = freqDev
+      row[`${key}__rocof`] = point.rocof
+      row.fnom = fnom
+      rows.set(point.ts, row)
+    }
+  }
+  return Array.from(rows.values()).sort((a, b) => a.ts - b.ts)
+}
 
 function MapInvalidateSize() {
   const map = useMap()
@@ -49,7 +72,6 @@ function MapInvalidateSize() {
 export function OverviewPage() {
   const {
     pmus,
-    mergedTrend,
     mapFilter,
     setMapFilter,
     liveAlerts,
@@ -65,14 +87,23 @@ export function OverviewPage() {
       const names = pmus.map((p) => p.name)
       if (!names.length) return []
       const kept = prev.filter((n) => names.includes(n))
-      return kept.length ? kept : names
+      if (kept.length) return kept.slice(0, OVERVIEW_CHART_MAX_SERIES)
+      // Default: prefer online streams, hard-capped for chart performance.
+      const online = pmus.filter((p) => p.connected).map((p) => p.name)
+      const pick = (online.length ? online : names).slice(0, OVERVIEW_CHART_MAX_SERIES)
+      return pick
     })
   }, [pmus])
 
   const plotPMUs = useMemo(
-    () => pmus.filter((p) => selectedStreams.includes(p.name)),
+    () =>
+      pmus
+        .filter((p) => selectedStreams.includes(p.name))
+        .slice(0, OVERVIEW_CHART_MAX_SERIES),
     [pmus, selectedStreams],
   )
+
+  const chartTrend = useMemo(() => mergeSelectedTrends(plotPMUs), [plotPMUs])
 
   const fleetFnom = useMemo(() => {
     const fromSelected = plotPMUs.map((p) => p.fnomHz).filter((v): v is number => !!v && v > 0)
@@ -178,6 +209,9 @@ export function OverviewPage() {
         if (prev.length === 1) return prev
         return prev.filter((n) => n !== name)
       }
+      if (prev.length >= OVERVIEW_CHART_MAX_SERIES) {
+        return [...prev.slice(1), name]
+      }
       return [...prev, name]
     })
   }
@@ -206,7 +240,10 @@ export function OverviewPage() {
         <div className="panel-head">
           <div>
             <h3>Live streams</h3>
-            <p>Selection applies to both frequency and ROCOF charts</p>
+            <p>
+              Charts plot up to {OVERVIEW_CHART_MAX_SERIES} streams for smooth rendering
+              ({selectedStreams.length}/{OVERVIEW_CHART_MAX_SERIES} selected)
+            </p>
           </div>
         </div>
         <div className="plot-chip-grid">
@@ -259,9 +296,15 @@ export function OverviewPage() {
           </div>
           <div className="chart-wrap overview-chart">
             <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
-              <AreaChart data={mergedTrend}>
+              <LineChart data={chartTrend}>
                 <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-                <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                <XAxis
+                  dataKey="ts"
+                  tickFormatter={formatTS}
+                  tick={{ fill: '#9eb0c5', fontSize: 11 }}
+                  minTickGap={32}
+                  interval="preserveStartEnd"
+                />
                 <YAxis
                   tick={{ fill: '#9eb0c5', fontSize: 11 }}
                   domain={['auto', 'auto']}
@@ -290,22 +333,20 @@ export function OverviewPage() {
                   const idx = pmus.findIndex((p) => p.name === pmu.name)
                   const color = CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length]
                   return (
-                    <Area
+                    <Line
                       key={`${pmu.name}-${freqMode}`}
-                      type="natural"
+                      type="linear"
                       dataKey={freqDataKey(pmu.name)}
                       name={pmu.name}
                       stroke={color}
-                      fill={color}
-                      fillOpacity={0.12}
                       dot={false}
-                      strokeWidth={2}
+                      strokeWidth={1.75}
                       connectNulls
                       isAnimationActive={false}
                     />
                   )
                 })}
-              </AreaChart>
+              </LineChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -319,9 +360,15 @@ export function OverviewPage() {
           </div>
           <div className="chart-wrap overview-chart">
             <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
-              <LineChart data={mergedTrend}>
+              <LineChart data={chartTrend}>
                 <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-                <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 11 }} />
+                <XAxis
+                  dataKey="ts"
+                  tickFormatter={formatTS}
+                  tick={{ fill: '#9eb0c5', fontSize: 11 }}
+                  minTickGap={32}
+                  interval="preserveStartEnd"
+                />
                 <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={['auto', 'auto']} scale="linear" width={56} />
                 <Tooltip
                   labelFormatter={(value) => formatTS(Number(value))}
@@ -335,12 +382,12 @@ export function OverviewPage() {
                   return (
                     <Line
                       key={pmu.name}
-                      type="natural"
+                      type="linear"
                       dataKey={`${pmuKey(pmu.name)}__rocof`}
                       name={pmu.name}
                       stroke={color}
                       dot={false}
-                      strokeWidth={2}
+                      strokeWidth={1.75}
                       connectNulls
                       isAnimationActive={false}
                     />

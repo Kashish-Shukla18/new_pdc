@@ -14,7 +14,8 @@ export const emptyDashboardState: DashboardState = {
 export const defaultNewPMU: NewPMUForm = {
   name: '',
   ip: '',
-  port: 4712,
+  port: 4713,
+  tcp_port: 4714,
   idcode: 1,
   region: 'FIELD',
   protocol: 'tcp',

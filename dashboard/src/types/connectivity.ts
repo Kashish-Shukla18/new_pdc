@@ -14,7 +14,8 @@ export type ConnectivityRec = {
 export type RttHistoryPoint = {
   slot: number
   label: string
-  [streamKey: string]: number | string
+  ts?: number
+  [streamKey: string]: number | string | undefined
 }
 
 export type RttStream = {

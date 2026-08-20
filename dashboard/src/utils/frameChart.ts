@@ -1,6 +1,6 @@
 import type { PMUWithMeta, TrendPoint } from '../types/dashboard'
 
-export const FRAME_TREND_WINDOW = 120
+export const FRAME_TREND_WINDOW = 90
 
 /** Seed chart history from real trend samples only — no synthetic padding. */
 export function seedFrameTrendHistory(pmu: PMUWithMeta | undefined): TrendPoint[] {

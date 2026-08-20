@@ -47,9 +47,8 @@ export function latencyOf(pmu: LivePMUState) {
     return e2e
   }
   if (!pmu.connected) return 999
-  const base = 1000 / Math.max(1, pmu.approxFps)
-  const rocofDrift = Math.abs(pmu.lastReading?.rocof ?? 0) * 350
-  return Math.max(8, base * 7 + rocofDrift)
+  // No inventing latency from FPS — missing hop → NaN (chart holds last sample).
+  return Number.NaN
 }
 
 export function jitterOf(pmu: LivePMUState) {

@@ -43,7 +43,11 @@ export function ConnectivityMatrix({ rows, onRowClick }: Props) {
                 <td><strong>{row.name}</strong></td>
                 <td>{row.meta.region}</td>
                 <td>{row.link}</td>
-                <td>{row.connected ? round(row.latency, 0) : '—'}</td>
+                <td>
+                  {row.connected && Number.isFinite(row.latency) && row.latency < 900
+                    ? round(row.latency, 2)
+                    : '—'}
+                </td>
                 <td>{row.connected ? round(row.jitter, 1) : '—'}</td>
                 <td>{row.connected ? round(row.loss, 2) : '—'}</td>
                 <td>{row.connected ? round(row.avail, 1) : '0.0'}</td>
