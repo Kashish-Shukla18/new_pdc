@@ -51,7 +51,7 @@ export const HELP_SECTIONS = [
   {
     title: 'Analytics',
     content:
-      'V/I magnitude trends, phasor diagram, inter-PMU VA angle Δ (≥2 PMUs), and advisories from live DATA.',
+      'V/I magnitude trends, separate V and I phasor diagrams, inter-PMU VA angle Δ (≥2 PMUs), and advisories from live DATA.',
   },
   {
     title: 'Documentation',
@@ -87,6 +87,6 @@ export const FAQ_ITEMS = [
   },
   {
     q: 'Why is Analytics angle Δ empty?',
-    a: 'Inter-PMU angle needs at least two online streams. V/I charts and the phasor diagram still work with one PMU.',
+    a: 'Inter-PMU angle needs at least two online streams. V/I charts and the phasor diagrams still work with one PMU.',
   },
 ]
