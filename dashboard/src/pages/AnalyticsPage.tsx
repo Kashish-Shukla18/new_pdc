@@ -43,7 +43,7 @@ export function AnalyticsPage() {
         <div className="panel-head">
           <div>
             <h3>Phasor focus</h3>
-            <p className="panel-sub">V/I charts and diagram use the selected PMU</p>
+            <p className="panel-sub">V/I charts and diagrams use the selected PMU</p>
           </div>
           <div className="panel-tools-inline">
             <select
@@ -75,7 +75,11 @@ export function AnalyticsPage() {
       </section>
 
       <section className="analytics-grid-2">
-        <PhasorDiagram phasors={displayPhasorRows} pmuName={selectedName || '—'} />
+        <PhasorDiagram kind="voltage" phasors={displayPhasorRows} pmuName={selectedName || '—'} />
+        <PhasorDiagram kind="current" phasors={displayPhasorRows} pmuName={selectedName || '—'} />
+      </section>
+
+      <section className="analytics-grid-angle">
         <AngleDiffChart history={angleHistory} pairs={chartAnglePairs} />
       </section>
 
