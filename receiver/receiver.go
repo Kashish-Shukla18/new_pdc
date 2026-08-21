@@ -699,6 +699,9 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 		tf, err := readFrameTimed(conn)
 		completeAt := time.Now()
 		if err != nil {
+			if strings.Contains(err.Error(), "CRC mismatch") {
+				monitoring.NoteFrameCRCFail(r.cfg.Name, err.Error(), nil)
+			}
 			if strings.Contains(err.Error(), "EOF") {
 				return fmt.Errorf("read data frame: %w (peer closed — close other PDC / Connection Tester DATA client)", err)
 			}
@@ -714,6 +717,7 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 			}
 			lastComplete = completeAt
 
+			monitoring.NoteFrameTCPComplete(r.cfg.Name)
 			dataFrames++
 			if dataFrames <= 3 {
 				logFrameTrace(r.cfg.Name, fmt.Sprintf("stream rx #%d wait=%s copy=%s", dataFrames, monitoring.FormatMs(tf.wait), monitoring.FormatMs(tf.copy)), tf.raw)
@@ -739,6 +743,7 @@ func (r *Receiver) dispatchDataFrame(ctx context.Context, payload []byte, tcpWai
 			}(r.cfg.Name, frame)
 		default:
 			monitoring.IncFramesDropped()
+			monitoring.NoteFrameHandlerDrop(r.cfg.Name, payload)
 			log.Printf("[%s] frame dropped: handler pool full (inflight=%d)", r.cfg.Name, len(r.sem))
 			monitoring.RecordConversation(r.cfg.Name, "PDC", "PDC", "overload", "warn",
 				fmt.Sprintf("frame dropped – handler pool full (inflight=%d/%d)", len(r.sem), cap(r.sem)))

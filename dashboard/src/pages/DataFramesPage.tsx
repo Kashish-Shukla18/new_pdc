@@ -112,7 +112,7 @@ export function DataFramesPage() {
                   <div>ANALOG ({cfg.analogs.length}): {formatList(cfg.analogs, '—')}</div>
                   <div>DIGITAL words: {cfg.digitalWords}</div>
                   {cfg.headerText ? <div>HDR: {cfg.headerText}</div> : null}
-                  <div>Live FPS: {round(selectedFramePMU.approxFps, 2)}</div>
+                  <div>Live FPS: {Math.round(selectedFramePMU.approxFps)}</div>
                 </>
               )}
             </div>

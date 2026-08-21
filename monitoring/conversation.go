@@ -3,7 +3,6 @@ package monitoring
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -268,6 +267,7 @@ func RecordReading(r parser.Reading) {
 
 	st := getOrCreatePMU(r.PMUName)
 	now := time.Now().UTC()
+	prevFrame := st.lastFrameTime
 	st.lastEventTime = now
 	st.lastFrameTime = now
 	st.totalFrames++
@@ -364,14 +364,27 @@ func RecordReading(r parser.Reading) {
 		Digitals:     append([]uint16(nil), r.Digitals...),
 	}
 
-	if st.fpsWindowStart.IsZero() {
-		st.fpsWindowStart = now
+	// FPS from active-stream windows only. Reconnect gaps must not dilute the rate
+	// (otherwise inventory shows ~2 FPS while CFG/tcp_wait say 30/60).
+	gap := time.Duration(0)
+	if !prevFrame.IsZero() {
+		gap = now.Sub(prevFrame)
 	}
-	st.fpsWindowCount++
-	if elapsed := now.Sub(st.fpsWindowStart); elapsed >= 2*time.Second {
-		st.approxFPS = float64(st.fpsWindowCount) / elapsed.Seconds()
+	if st.fpsWindowStart.IsZero() || gap > 750*time.Millisecond {
 		st.fpsWindowStart = now
-		st.fpsWindowCount = 0
+		st.fpsWindowCount = 1
+	} else {
+		st.fpsWindowCount++
+		if elapsed := now.Sub(st.fpsWindowStart); elapsed >= time.Second {
+			instant := float64(st.fpsWindowCount) / elapsed.Seconds()
+			if st.approxFPS <= 0 {
+				st.approxFPS = instant
+			} else {
+				st.approxFPS = st.approxFPS*0.35 + instant*0.65
+			}
+			st.fpsWindowStart = now
+			st.fpsWindowCount = 0
+		}
 	}
 
 	// Downsample dashboard trends (~10 Hz) so fleet charts stay smooth at 100s of PMUs.
@@ -385,6 +398,7 @@ func RecordReading(r parser.Reading) {
 	}
 	conversationBus.mu.Unlock()
 
+	NoteFrameDashboard(r.PMUName)
 	ApplyTraceHops(r.PMUName, r.Trace)
 }
 
@@ -495,6 +509,7 @@ func registerConversationHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/conversation/recent", handleConversationRecent)
 	mux.HandleFunc("/conversation/state", handleConversationState)
 	mux.HandleFunc("/conversation/latency", handleConversationLatency)
+	mux.HandleFunc("/conversation/frame-diag", handleConversationFrameDiag)
 }
 
 func handleConversationPage(w http.ResponseWriter, _ *http.Request) {
@@ -594,12 +609,14 @@ func snapshotDashboard() DashboardState {
 		}
 
 		n := len(st.trends)
+		cfg := cfgSummaryForPMU(st.name)
 		fps := st.approxFPS
-		if fps <= 0 && n >= 2 {
-			durSec := float64(st.trends[n-1].TS-st.trends[0].TS) / 1000.0
-			if durSec > 0 {
-				fps = math.Min(500.0, float64(n-1)/durSec)
-			}
+		// Never use downsampled trend spacing for FPS (that caps near ~10 Hz).
+		// Prefer measured counter; else CFG-2 DATA_RATE; else leave 0 until hops applied below.
+		if fps <= 0 && cfg.DataRate > 0 {
+			fps = float64(cfg.DataRate)
+		} else if fps <= 0 && cfg.DataRate < 0 {
+			fps = 1.0 / float64(-cfg.DataRate)
 		}
 
 		last := TrendPoint{}
@@ -634,7 +651,7 @@ func snapshotDashboard() DashboardState {
 			LastPhasor:     st.lastPhasor,
 			LastChannels:   st.lastChannels,
 			LastFrame:      st.lastFrame,
-			CFG:            cfgSummaryForPMU(st.name),
+			CFG:            cfg,
 			Trends:         trendCopy,
 			FnomHz:         st.fnomHz,
 			StatDataError:  st.statDataError,
@@ -645,6 +662,29 @@ func snapshotDashboard() DashboardState {
 	for i := range pmus {
 		if h := hops[pmus[i].Name]; len(h) > 0 {
 			pmus[i].LastHops = h
+		}
+		if !pmus[i].Connected {
+			continue
+		}
+		// Fill cold counter from inter-frame wait only. Do not overwrite a real
+		// 1s window rate with instantaneous tcp_wait (that inflated FPS vs CFG).
+		wait := 0.0
+		if h := hops[pmus[i].Name]; len(h) > 0 {
+			wait = h["tcp_wait"]
+			if wait <= 0 {
+				wait = h["tcp_interarrival"]
+			}
+		}
+		cfgRate := float64(pmus[i].CFG.DataRate)
+		if cfgRate < 0 {
+			cfgRate = 1.0 / float64(-pmus[i].CFG.DataRate)
+		}
+		if pmus[i].ApproxFPS <= 0 {
+			if wait > 1 && wait < 500 {
+				pmus[i].ApproxFPS = 1000.0 / wait
+			} else if cfgRate > 0 {
+				pmus[i].ApproxFPS = cfgRate
+			}
 		}
 	}
 

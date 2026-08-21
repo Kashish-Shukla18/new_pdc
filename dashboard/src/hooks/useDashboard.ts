@@ -12,6 +12,7 @@ import {
   computeConnectivityRecs,
   computeConnectivityRows,
 } from '../utils/connectivity'
+import { useCycleLatencyHistory } from './useCycleLatencyHistory'
 import { useRttHistory } from './useRttHistory'
 import { useFrameTrendHistory } from './useFrameTrendHistory'
 import type {
@@ -389,6 +390,7 @@ export function useDashboard() {
   const connectivityKpis = useMemo(() => computeConnectivityKpis(connectivityRows), [connectivityRows])
   const connectivityRecs = useMemo(() => computeConnectivityRecs(connectivityRows), [connectivityRows])
   const { rttHistory, rttStreams } = useRttHistory(connectivityRows, dashboard.nowUtc, isPaused)
+  const { cycleHistory, cycleLatest } = useCycleLatencyHistory(pmus, dashboard.nowUtc, isPaused)
   const frameTrendHistory = useFrameTrendHistory(
     selectedFramePMU,
     selectedFramePMUName,
@@ -521,6 +523,8 @@ export function useDashboard() {
     connectivityRecs,
     rttHistory,
     rttStreams,
+    cycleHistory,
+    cycleLatest,
     frameTrendHistory,
     anglePairs,
     chartAnglePairs,

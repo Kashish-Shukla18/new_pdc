@@ -24,7 +24,7 @@ export function PMUDetailDrawer() {
           <p><strong>Primary IP:</strong> {drawerPMU.meta.primaryIp}</p>
           <p><strong>Redundant IP:</strong> {drawerPMU.meta.redundantIp}</p>
           <p><strong>Frames:</strong> {drawerPMU.totalFrames}</p>
-          <p><strong>Approx FPS:</strong> {round(drawerPMU.approxFps, 2)}</p>
+          <p><strong>Approx FPS:</strong> {Math.round(drawerPMU.approxFps)}</p>
           <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
           {drawerPMU.lastHops && Object.keys(drawerPMU.lastHops).length > 0 && (
             <div className="drawer-hops">

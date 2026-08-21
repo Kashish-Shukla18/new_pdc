@@ -2,7 +2,9 @@ import type { PMUWithMeta } from '../../types/dashboard'
 import { round } from '../../utils/format'
 import {
   availabilityOf,
+  effectiveFps,
   latencyOf,
+  resolveTargetFps,
   statusLabel,
   toneFromStatus,
   vendorFor,
@@ -93,6 +95,8 @@ export function DeviceInventoryTable({
               const loss = packetLossOf(pmu)
               const tone = toneFromStatus(pmu.connected, loss)
               const label = statusLabel(pmu)
+              const fps = effectiveFps(pmu)
+              const target = resolveTargetFps(pmu, pmu.meta.targetFps)
               return (
                 <tr key={pmu.name} className="row-click" onClick={() => onRowClick(pmu.name)}>
                   <td>
@@ -111,8 +115,9 @@ export function DeviceInventoryTable({
                   </td>
                   <td><code className="mono-ip">{pmu.meta.primaryIp}</code></td>
                   <td>
-                    <span className={pmu.approxFps >= pmu.meta.targetFps * 0.9 ? 'fps-ok' : 'fps-warn'}>
-                      {round(pmu.approxFps, 1)}
+                    <span className={fps >= target * 0.7 ? 'fps-ok' : 'fps-warn'}>
+                      {Math.round(fps)}
+                      <span className="device-muted"> / {Math.round(target)}</span>
                     </span>
                   </td>
                   <td>
