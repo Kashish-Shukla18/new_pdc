@@ -329,11 +329,13 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 	monitoring.ObserveStage(pmuName, monitoring.StageParse, parseDur)
 	if err != nil {
 		monitoring.IncParseErrors()
+		monitoring.NoteFrameParseFail(pmuName, err.Error(), raw)
 		log.Printf("[%s] parse error: %v", pmuName, err)
 		monitoring.RecordConversation(pmuName, "PMU", "PDC", "parse", "error", err.Error())
 		return
 	}
 	monitoring.IncFramesParsed()
+	monitoring.NoteFrameParseOK(pmuName)
 
 	if traceIndex, ok := p.nextTraceIndex(pmuName); ok {
 		log.Printf("[%s] ================================================================================", pmuName)
@@ -421,12 +423,16 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 	if qerr != nil {
 		monitoring.IncQualityRejected()
 		monitoring.IncQualityRejectForPMU(pmuName)
+		monitoring.NoteFrameQualityFlag(pmuName, qerr.Error(), reading)
 		log.Printf("[%s] quality reject: %v", pmuName, qerr)
 		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", qerr.Error())
 		if p.dropQualityRejected {
+			monitoring.NoteFrameQualityDrop(pmuName, qerr.Error(), reading)
 			return
 		}
 		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "warn", "continuing despite quality reject to avoid data loss")
+	} else {
+		monitoring.NoteFrameQualityOK(pmuName)
 	}
 
 	if meta.receivedAt.IsZero() {
@@ -454,6 +460,7 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 				monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
 				monitoring.IncQueuePublishErrors()
 				monitoring.IncKafkaErrorForPMU(pmuName)
+				monitoring.NoteFrameKafkaFail(pmuName, err.Error(), reading)
 				log.Printf("[%s] kafka publish error: %v", pmuName, err)
 				monitoring.RecordConversation(pmuName, "PDC", "KAFKA", "publish", "error", err.Error())
 				if p.kafkaSpool != nil {
@@ -468,6 +475,7 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 				return
 			}
 			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
+			monitoring.NoteFrameKafkaOK(pmuName)
 		}
 		return
 	}
@@ -480,6 +488,7 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 			monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
 			monitoring.IncQueuePublishErrors()
 			monitoring.IncKafkaErrorForPMU(pmuName)
+			monitoring.NoteFrameKafkaFail(pmuName, err.Error(), reading)
 			log.Printf("[%s] kafka publish error: %v", pmuName, err)
 			if p.kafkaSpool != nil {
 				if spoolErr := p.kafkaSpool.Append(reading); spoolErr != nil {
@@ -492,6 +501,7 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 			return
 		}
 		monitoring.ObserveStage(pmuName, monitoring.StageReadingsPublish, time.Since(pubStart))
+		monitoring.NoteFrameKafkaOK(pmuName)
 	}
 }
 

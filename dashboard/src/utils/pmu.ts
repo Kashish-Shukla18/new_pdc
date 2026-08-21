@@ -17,7 +17,8 @@ export function metaForDB(name: string, config?: PMUConfig): PMUMeta {
     vendor: FIELD_PMU_VENDOR,
     primaryIp: config?.ip || '0.0.0.0',
     redundantIp: '-',
-    targetFps: config?.data_rate && config.data_rate > 0 ? config.data_rate : 30,
+    // 0 = use CFG-2 DATA_RATE from live state (30/60/120), not a hardcoded 30.
+    targetFps: config?.data_rate && config.data_rate > 0 ? config.data_rate : 0,
     lat: config?.lat ?? 0,
     lon: config?.lon ?? 0,
   }
@@ -29,11 +30,52 @@ export function toneFromStatus(connected: boolean, loss: number): 'ok' | 'warn' 
   return 'ok'
 }
 
+/** Live stream FPS: prefer 1s frame counter; fall back to inter-frame wait. */
+export function effectiveFps(pmu: LivePMUState): number {
+  const approx = pmu.approxFps || 0
+  if (approx >= 5) return approx
+  const wait = hopMs(pmu, 'tcp_wait') ?? hopMs(pmu, 'tcp_interarrival')
+  if (wait != null && wait > 1 && wait < 500) return 1000 / wait
+  return approx
+}
+
+function snapSynchroRate(live: number): number {
+  if (live >= 100) return 120
+  if (live >= 45) return 60
+  if (live >= 20) return 30
+  if (live >= 8) return 10
+  return Math.max(1, Math.round(live))
+}
+
+/**
+ * Target FPS for availability.
+ * If CFG advertises 120 but the wire steadily delivers ~30, use the live rate
+ * (frame-diag already proved the PDC is not dropping those frames).
+ */
+export function resolveTargetFps(pmu: LivePMUState, metaTarget = 0): number {
+  const live = effectiveFps(pmu)
+  let cfg = 0
+  if (typeof pmu.cfg?.dataRate === 'number' && pmu.cfg.dataRate !== 0) {
+    cfg = pmu.cfg.dataRate > 0 ? pmu.cfg.dataRate : 1 / Math.abs(pmu.cfg.dataRate)
+  } else if (metaTarget > 0) {
+    cfg = metaTarget
+  }
+  if (live >= 8 && cfg > 0 && live < cfg * 0.55) {
+    return snapSynchroRate(live)
+  }
+  if (cfg > 0) return cfg
+  if (live > 1) return snapSynchroRate(live)
+  return 60
+}
+
 export function availabilityOf(pmu: LivePMUState, targetFps: number) {
   if (!pmu.connected) return 0
-  const fpsRatio = Math.min(1.05, pmu.approxFps / Math.max(1, targetFps))
-  const rejectPenalty = Math.min(8, pmu.qualityRejects * 0.03)
-  return Math.max(0, Math.min(100, fpsRatio * 100 - rejectPenalty))
+  const target = resolveTargetFps(pmu, targetFps)
+  const fps = effectiveFps(pmu)
+  if (!Number.isFinite(fps) || fps <= 0) return 100
+  const ratio = fps / Math.max(1, target)
+  if (ratio >= 0.7) return 100
+  return Math.max(0, Math.min(100, Math.round(ratio * 1000) / 10))
 }
 
 export function packetLossOf(pmu: LivePMUState) {
@@ -49,6 +91,79 @@ export function latencyOf(pmu: LivePMUState) {
   if (!pmu.connected) return 999
   // No inventing latency from FPS — missing hop → NaN (chart holds last sample).
   return Number.NaN
+}
+
+/** Latest hop sample in ms from backend lastHops. */
+export function hopMs(pmu: LivePMUState, stage: string): number | undefined {
+  const v = pmu.lastHops?.[stage]
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 10_000) return v
+  return undefined
+}
+
+/**
+ * One sample-cycle breakdown:
+ * - pmuWait ≈ inter-frame gap (50 FPS → ~20 ms) — NOT PDC processing
+ * - parse = DATA decode time
+ * - pipeline = receive-complete → dashboard (includes parse)
+ * - total = pmuWait + pipeline  (full cycle the user asked to plot)
+ */
+export type CycleLatency = {
+  pmuWait: number
+  parse: number
+  pipeline: number
+  pipelineRest: number
+  total: number
+  fpsHint: number
+}
+
+export function cycleLatencyOf(pmu: LivePMUState): CycleLatency | null {
+  if (!pmu.connected) return null
+
+  const wait =
+    hopMs(pmu, 'tcp_wait') ??
+    hopMs(pmu, 'tcp_interarrival') ??
+    (pmu.approxFps > 1 ? 1000 / pmu.approxFps : undefined)
+  const parse = hopMs(pmu, 'parse')
+  const pipeline = hopMs(pmu, 'e2e_recv_to_dashboard') ?? latencyOf(pmu)
+
+  if (wait == null || !Number.isFinite(pipeline) || pipeline >= 900) return null
+
+  const parseMs = parse != null && Number.isFinite(parse) ? parse : 0
+  const rest = Math.max(0, pipeline - parseMs)
+  return {
+    pmuWait: wait,
+    parse: parseMs,
+    pipeline,
+    pipelineRest: rest,
+    total: wait + pipeline,
+    fpsHint: wait > 0 ? 1000 / wait : pmu.approxFps || 0,
+  }
+}
+
+/** Average cycle across connected PMUs that have hop data. */
+export function averageCycleLatency(pmus: LivePMUState[]): CycleLatency | null {
+  const samples = pmus.map(cycleLatencyOf).filter((c): c is CycleLatency => c != null)
+  if (!samples.length) return null
+  const n = samples.length
+  const sum = samples.reduce(
+    (acc, c) => ({
+      pmuWait: acc.pmuWait + c.pmuWait,
+      parse: acc.parse + c.parse,
+      pipeline: acc.pipeline + c.pipeline,
+      pipelineRest: acc.pipelineRest + c.pipelineRest,
+      total: acc.total + c.total,
+      fpsHint: acc.fpsHint + c.fpsHint,
+    }),
+    { pmuWait: 0, parse: 0, pipeline: 0, pipelineRest: 0, total: 0, fpsHint: 0 },
+  )
+  return {
+    pmuWait: sum.pmuWait / n,
+    parse: sum.parse / n,
+    pipeline: sum.pipeline / n,
+    pipelineRest: sum.pipelineRest / n,
+    total: sum.total / n,
+    fpsHint: sum.fpsHint / n,
+  }
 }
 
 export function jitterOf(pmu: LivePMUState) {

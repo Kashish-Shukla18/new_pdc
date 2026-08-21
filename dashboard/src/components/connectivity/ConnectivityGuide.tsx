@@ -4,53 +4,50 @@ export function ConnectivityGuide() {
       <div className="panel-head">
         <div>
           <h3>What these numbers mean</h3>
-          <p className="panel-sub">How to read the connectivity page</p>
+          <p className="panel-sub">How to read wait time vs real PDC processing</p>
         </div>
       </div>
       <div className="connectivity-guide-grid">
         <article>
-          <h4>Stream latency (chart)</h4>
+          <h4>End-to-end cycle (new chart)</h4>
           <p>
-            Time from when the PDC <strong>finishes receiving</strong> a C37.118 DATA frame until that
-            reading is recorded for the dashboard. Typical healthy values are under a few milliseconds
-            on this machine. This is <strong>not</strong> network ping RTT to the PMU, and it is{' '}
-            <strong>not</strong> PMU clock skew (SOC vs wall clock).
+            Plots <strong>PMU wait + parse + other pipeline</strong>. At 50 FPS the wait is ~20 ms
+            (time until the next frame arrives). That 20 ms is the PMU sample interval — not PDC
+            parse time. Parse is usually ~0.5 ms; dashboard/quality add a little more.
           </p>
         </article>
         <article>
-          <h4>Latency (matrix)</h4>
+          <h4>PMU wait (~20 ms @ 50 FPS)</h4>
           <p>
-            Same metric as the chart, latest sample per PMU. If a hop sample is briefly missing, the
-            chart holds the previous value so the line stays continuous.
+            Measured as <code>tcp_wait</code> / inter-arrival. The PDC is idle on the socket waiting
+            for the next DATA frame. Formula: 1000 ms ÷ FPS ≈ interval.
           </p>
         </article>
         <article>
-          <h4>Jitter</h4>
+          <h4>Pipeline (e2e recv → dashboard)</h4>
           <p>
-            Spread of recent frequency samples (a stability proxy), not classical network packet
-            jitter. Higher values mean the frequency series is noisier.
+            Time after the frame is fully received until it is recorded for the UI. This is the real
+            processing path (parse + quality + dashboard record), typically ~1 ms or less.
+          </p>
+        </article>
+        <article>
+          <h4>Stream latency chart</h4>
+          <p>
+            Per-PMU plot of receive→dashboard only (no PMU wait). Use it to compare streams; use the
+            cycle chart to see wait + processing together.
           </p>
         </article>
         <article>
           <h4>Packet loss %</h4>
           <p>
-            Share of frames rejected by the quality gate versus total frames seen. High values point
-            to STAT/data-error issues or a bad path — not silent UDP drops the PDC never saw.
+            Quality rejects ÷ total frames. High values mean STAT/data-error issues, not the 20 ms
+            wait.
           </p>
         </article>
         <article>
           <h4>Availability %</h4>
           <p>
-            How close the measured frame rate is to the expected rate for that stream. Low
-            availability usually means reconnects, idle gaps, or the peer closing TCP.
-          </p>
-        </article>
-        <article>
-          <h4>Why a line used to disappear</h4>
-          <p>
-            The old chart dropped a point whenever a hop sample was missing or the “top streams”
-            list reshuffled. The chart now uses a stable stream list and carries forward the last
-            good latency so traces stay continuous.
+            Measured frame rate vs expected rate. Drops when the peer reconnects or stops sending.
           </p>
         </article>
       </div>
