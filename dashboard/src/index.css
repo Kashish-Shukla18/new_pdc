@@ -3687,6 +3687,93 @@ tbody tr.row-click {
   color: var(--coral);
 }
 
+.align-readout {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.align-readout-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-3, #9eb0c5);
+}
+
+.align-readout-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.align-readout-head-row,
+.align-readout-entry {
+  display: grid;
+  grid-template-columns: minmax(88px, 1.1fr) minmax(90px, 1fr) minmax(110px, 1.2fr) minmax(130px, 1.3fr) 72px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.align-readout-head-row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+}
+
+.align-readout-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3, #8a9aab);
+}
+
+.align-readout-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-1, #e8eef6);
+}
+
+.align-readout-name i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.align-readout-mono {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  color: #d5e2ef;
+}
+
+.align-readout-match {
+  font-size: 11px;
+  color: var(--text-3, #8a9aab);
+}
+
+.align-readout-match.ok {
+  color: #7dd3a7;
+}
+
+.align-readout-match.warn {
+  color: #ffd166;
+}
+
+.align-readout-foot {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--text-3, #8a9aab);
+  line-height: 1.4;
+}
+
+.align-readout-foot strong {
+  color: #c5d2e0;
+  font-weight: 600;
+}
+
 @media (max-width: 960px) {
   .pipeline-row {
     grid-template-columns: 1fr;
@@ -3694,5 +3781,15 @@ tbody tr.row-click {
 
   .pipeline-slowest {
     align-items: flex-start;
+  }
+
+  .align-readout-head-row,
+  .align-readout-entry {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .align-readout-head-row .align-readout-head:nth-child(n + 3),
+  .align-readout-entry > :nth-child(n + 3) {
+    display: none;
   }
 }

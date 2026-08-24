@@ -10,7 +10,8 @@ import {
   YAxis,
 } from 'recharts'
 import type { RttHistoryPoint, RttStream } from '../../types/connectivity'
-import { formatTS, round } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
+import { MultiStreamTooltip } from '../../utils/multiStreamTooltip'
 
 type Props = {
   history: RttHistoryPoint[]
@@ -69,7 +70,7 @@ export const LatencyChart = memo(function LatencyChart({ history, streams }: Pro
               dataKey="ts"
               type="number"
               domain={['dataMin', 'dataMax']}
-              tickFormatter={(v) => formatTS(Number(v))}
+              tickFormatter={(v) => formatTSMs(Number(v))}
               tick={{ fill: '#9eb0c5', fontSize: 10 }}
               minTickGap={36}
               interval="preserveStartEnd"
@@ -81,10 +82,7 @@ export const LatencyChart = memo(function LatencyChart({ history, streams }: Pro
               tickFormatter={(value) => `${round(Number(value), 1)}`}
               unit=" ms"
             />
-            <Tooltip
-              labelFormatter={(value) => formatTS(Number(value))}
-              formatter={(value, name) => [`${round(Number(value ?? 0), 2)} ms`, String(name)]}
-            />
+            <Tooltip content={<MultiStreamTooltip tickLabel="Sample" valueSuffix=" ms" digits={2} />} />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             {streams.map((stream) => (
               <Line

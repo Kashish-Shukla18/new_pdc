@@ -161,11 +161,23 @@ export type UiTiming = {
   totalMs: number
 }
 
+export type TimeAlignStatus = {
+  timestamp?: string
+  present?: string[]
+  missing?: string[]
+  complete?: boolean
+  waitedMs?: number
+  forced?: boolean
+  setsTotal?: number
+  setsPartial?: number
+}
+
 export type DashboardState = {
   nowUtc: string
   pmus: LivePMUState[]
   eventCount: number
   latency?: PipelineLatency
+  timeAlign?: TimeAlignStatus
 }
 
 export type ConversationEvent = {

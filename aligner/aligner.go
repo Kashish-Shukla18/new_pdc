@@ -8,7 +8,8 @@ import (
 	"pdc/parser"
 )
 
-// Checker validates time sync and basic quality before data is persisted.
+// Checker validates time sync and basic quality before data enters the
+// time-alignment concentrator (see time_align.go).
 type Checker struct {
 	MaxClockSkew time.Duration
 }

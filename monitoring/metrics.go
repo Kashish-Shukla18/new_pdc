@@ -39,7 +39,7 @@ var (
 		prometheus.CounterOpts{Name: "pdc_queue_publish_errors_total", Help: "Total Kafka publish errors."},
 	)
 	storeErrors = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Redis/Influx store errors."},
+		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Redis/Postgres store errors."},
 	)
 	spoolQueued = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_spool_queued_total", Help: "Total readings queued to local durable spool."},
@@ -56,6 +56,22 @@ var (
 	)
 	sinkInflight = prometheus.NewGauge(
 		prometheus.GaugeOpts{Name: "pdc_sink_inflight", Help: "Current number of readings queued in sink channel."},
+	)
+	alignedSetsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "pdc_aligned_sets_total", Help: "Total time-aligned multi-PMU sets emitted."},
+	)
+	alignedSetsComplete = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "pdc_aligned_sets_complete_total", Help: "Aligned sets where all expected PMUs were present."},
+	)
+	alignedSetsPartial = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "pdc_aligned_sets_partial_total", Help: "Aligned sets emitted with one or more PMUs missing."},
+	)
+	alignedWaitSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "pdc_aligned_wait_seconds",
+			Help:    "Wait time from first PMU arrival to aligned-set emit.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.02, 0.04, 0.05, 0.1, 0.25, 0.5},
+		},
 	)
 )
 
@@ -75,6 +91,10 @@ func init() {
 		spoolReplayed,
 		processingLatency,
 		sinkInflight,
+		alignedSetsTotal,
+		alignedSetsComplete,
+		alignedSetsPartial,
+		alignedWaitSeconds,
 	)
 }
 
@@ -106,6 +126,18 @@ func IncSpoolReplayed(n int) {
 
 func ObserveLatency(d time.Duration) {
 	processingLatency.Observe(d.Seconds())
+}
+
+func IncAlignedSet(complete bool, waited time.Duration) {
+	alignedSetsTotal.Inc()
+	if complete {
+		alignedSetsComplete.Inc()
+	} else {
+		alignedSetsPartial.Inc()
+	}
+	if waited > 0 {
+		alignedWaitSeconds.Observe(waited.Seconds())
+	}
 }
 
 func StartServer(ctx context.Context, addr string) {

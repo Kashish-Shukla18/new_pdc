@@ -8,7 +8,7 @@ How this Phasor Data Concentrator (PDC) consumes IEEE C37.118 streams, what stac
 
 ## One-line summary
 
-We built a **PDC**: we speak **IEEE C37.118** to PMUs, **buffer** with Kafka so frames aren’t lost under load, **decode** using CFG2, then **fan out** clean readings to a live dashboard, Redis (latest), and InfluxDB (history).
+We built a **PDC**: we speak **IEEE C37.118** to PMUs, **buffer** with Kafka so frames aren’t lost under load, **decode** using CFG2, then **fan out** clean readings to a live dashboard, Redis (latest), and **Postgres/TimescaleDB** (history).
 
 ---
 
@@ -22,7 +22,7 @@ We built a **PDC**: we speak **IEEE C37.118** to PMUs, **buffer** with Kafka so 
 | **Go PDC** | Ingress + processor | Many concurrent PMU connections, low overhead |
 | **CFG2-driven parser** | Decode DATA from CFG2 layout | Correct for real field PMUs (not a fixed simulator layout only) |
 | **Redis** | Latest reading per PMU | Fast “what is now”; survives process restart (TTL) |
-| **InfluxDB** | Time-series history | Trends, forensics, later analytics |
+| **Postgres / TimescaleDB** | Time-series history + PMU config | Trends, forensics, registry |
 | **React + SSE** | Operator UI | Live view for operators |
 | **Disk spool** | Failed Kafka/sink writes | Retry when broker/DB is briefly down |
 | **CFG2 on disk** | `data/profiles/` | After restart we can still decode DATA before the next handshake |
@@ -30,10 +30,10 @@ We built a **PDC**: we speak **IEEE C37.118** to PMUs, **buffer** with Kafka so 
 ### Common questions
 
 **Why Kafka?**  
-At tens of PMUs × ~100 samples/s, a slow Influx flush or UI must not stall TCP. Kafka decouples **ingest** from **consume**.
+At tens of PMUs × ~100 samples/s, a slow DB flush or UI must not stall TCP. Kafka decouples **ingest** from **consume**.
 
-**Why not only InfluxDB?**  
-Influx is history. Live UI and multi-consumer fan-out need a bus plus a hot latest store. **Redis = now; Influx = then.**
+**Why not only Postgres?**  
+Postgres is history + config. Live UI and multi-consumer fan-out need a bus plus a hot latest store. **Redis = now; Postgres = then.**
 
 ---
 
@@ -56,7 +56,7 @@ Influx is history. Live UI and multi-consumer fan-out need a bus plus a hot late
 4. Publish **parsed reading** to `pmu.readings`
 5. Consumers:
    - **`pdc-dashboard`** → live SSE / operator UI
-   - **`pdc-sink`** → Redis latest + Influx history
+   - **`pdc-sink`** → Redis latest + Postgres history
 
 **Design point vs a naive “parse then write DB” PDC:**  
 We do not block the PMU socket on storage. We **queue raw**, then **queue parsed**, so the device stream is not punished by our downstream latency.
@@ -72,7 +72,7 @@ PMU ──C37.118──► Ingress ──► Kafka pmu.raw.frames
                            ┌────────┴────────┐
                            ▼                 ▼
                      pdc-dashboard      pdc-sink
-                     (live UI/SSE)   Redis + InfluxDB
+                     (live UI/SSE)   Redis + Postgres
 ```
 
 ---
@@ -113,7 +113,7 @@ From a DATA frame + CFG2 we build a **`Reading`**.
 | Data | Where |
 |------|--------|
 | Raw C37.118 frame | Kafka `pmu.raw.frames` |
-| Full parsed sample | Kafka `pmu.readings` → Redis + InfluxDB |
+| Full parsed sample | Kafka `pmu.readings` → Redis + Postgres |
 | Live operator view | In-memory bus + SSE (seeded from Redis on restart) |
 | CFG layout | Memory + `data/profiles/*.json` |
 
@@ -144,7 +144,7 @@ Better as a **concentrator and operator path**, not “better than your PMU”:
 Your PMU sends C37.118. We terminate that session as a PDC.  
 We publish **raw frames** to Kafka so processing delay does not drop packets.  
 We decode with **CFG2**, then publish **parsed readings** to a second Kafka topic.  
-One consumer group feeds the **live dashboard**; another writes **Redis** (latest) and **InfluxDB** (history).  
+One consumer group feeds the **live dashboard**; another writes **Redis** (latest) and **Postgres/Timescale** (history).  
 CFG2 is also saved to disk so after a PDC restart we can keep decoding.  
 Relative to a single-process parse-and-write PDC, we optimize for **no-drop buffering** and **independent consumers** of the same synchrophasor stream.
 
@@ -168,7 +168,7 @@ We use frame SOC/FRACSEC and expose TQ / STAT sync bits; the quality gate can wa
 Yes — one session per PMU; Kafka keyed by PMU name; devices can be started/stopped from the API/UI.
 
 **Where is the PDC output today?**  
-Kafka `pmu.readings`, Redis (latest), InfluxDB (history), and the live React UI.
+Kafka `pmu.readings`, Redis (latest), Postgres/TimescaleDB (history), and the live React UI.
 
 ---
 

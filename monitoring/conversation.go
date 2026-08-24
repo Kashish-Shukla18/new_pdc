@@ -138,10 +138,23 @@ type PMUState struct {
 }
 
 type DashboardState struct {
-	NowUTC     time.Time       `json:"nowUtc"`
-	PMUs       []PMUState      `json:"pmus"`
-	EventCount int             `json:"eventCount"`
-	Latency    PipelineLatency `json:"latency"`
+	NowUTC     time.Time        `json:"nowUtc"`
+	PMUs       []PMUState       `json:"pmus"`
+	EventCount int              `json:"eventCount"`
+	Latency    PipelineLatency  `json:"latency"`
+	TimeAlign  TimeAlignStatus  `json:"timeAlign"`
+}
+
+// TimeAlignStatus is the latest multi-PMU concentrator snapshot for the UI.
+type TimeAlignStatus struct {
+	Timestamp   time.Time `json:"timestamp,omitempty"`
+	Present     []string  `json:"present,omitempty"`
+	Missing     []string  `json:"missing,omitempty"`
+	Complete    bool      `json:"complete"`
+	WaitedMs    float64   `json:"waitedMs"`
+	Forced      bool      `json:"forced,omitempty"`
+	SetsTotal   int64     `json:"setsTotal"`
+	SetsPartial int64     `json:"setsPartial"`
 }
 
 type pmuRuntime struct {
@@ -243,6 +256,7 @@ var conversationBus = struct {
 	events      []ConversationEvent
 	subscribers map[chan ConversationEvent]struct{}
 	pmus        map[string]*pmuRuntime
+	align       TimeAlignStatus
 }{
 	events:      make([]ConversationEvent, 0, maxConversationEvents),
 	subscribers: make(map[chan ConversationEvent]struct{}),
@@ -273,6 +287,13 @@ func RecordReading(r parser.Reading) {
 	st.totalFrames++
 	st.statDataError = r.StatDetail.DataError
 
+	// Chart X-axis uses the PMU measurement timestamp (SOC+FRACSEC), not PDC wall
+	// clock, so multi-PMU series join on the same time-aligned sample instant.
+	sampleTS := now.UnixMilli()
+	if !r.Timestamp.IsZero() {
+		sampleTS = r.Timestamp.UnixMilli()
+	}
+
 	fnom := 0
 	if prof, ok := parser.GetProfile(r.PMUName); ok && prof.FnomHz > 0 {
 		fnom = prof.FnomHz
@@ -287,7 +308,7 @@ func RecordReading(r parser.Reading) {
 	vaMag, vbMag, vcMag, iaMag, ibMag, icMag := trendPhasorMags(r)
 
 	t := TrendPoint{
-		TS:            now.UnixMilli(),
+		TS:            sampleTS,
 		Frequency:     float64(r.Frequency),
 		FrequencyDev:  freqDev,
 		MW:            float64(r.MW),
@@ -307,7 +328,7 @@ func RecordReading(r parser.Reading) {
 		VB: PhasorVector{Magnitude: float64(r.VB.Magnitude), AngleDeg: float64(r.VB.PhaseDegrees)},
 		VC: PhasorVector{Magnitude: float64(r.VC.Magnitude), AngleDeg: float64(r.VC.PhaseDegrees)},
 		IA: PhasorVector{Magnitude: float64(r.IA.Magnitude), AngleDeg: float64(r.IA.PhaseDegrees)},
-		TS: now.UnixMilli(),
+		TS: sampleTS,
 	}
 
 	phasorViews := make([]NamedPhasorView, 0, len(r.Phasors))
@@ -348,7 +369,7 @@ func RecordReading(r parser.Reading) {
 		Phasors:     phasorViews,
 		Analogs:     analogViews,
 		DigitalBits: bits,
-		TS:          now.UnixMilli(),
+		TS:          sampleTS,
 	}
 	st.lastFrame = FrameStamp{
 		SOC:          r.SOC,
@@ -388,6 +409,7 @@ func RecordReading(r parser.Reading) {
 	}
 
 	// Downsample dashboard trends (~10 Hz) so fleet charts stay smooth at 100s of PMUs.
+	// Interval is still gated on receive wall-clock; the point itself carries SOC time.
 	if st.lastTrendAt.IsZero() || now.Sub(st.lastTrendAt) >= trendMinInterval {
 		st.lastTrendAt = now
 		if len(st.trends) == maxTrendPoints {
@@ -400,6 +422,32 @@ func RecordReading(r parser.Reading) {
 
 	NoteFrameDashboard(r.PMUName)
 	ApplyTraceHops(r.PMUName, r.Trace)
+}
+
+// RecordAlignedSet stores the latest concentrator emit for the dashboard / metrics.
+func RecordAlignedSet(timestamp time.Time, present, missing []string, complete bool, waited time.Duration, forced bool) {
+	IncAlignedSet(complete, waited)
+	if waited > 0 {
+		ObserveStage("SYSTEM", StageTimeAlignWait, waited)
+	}
+
+	presentCopy := append([]string(nil), present...)
+	missingCopy := append([]string(nil), missing...)
+	sort.Strings(presentCopy)
+	sort.Strings(missingCopy)
+
+	conversationBus.mu.Lock()
+	conversationBus.align.Timestamp = timestamp
+	conversationBus.align.Present = presentCopy
+	conversationBus.align.Missing = missingCopy
+	conversationBus.align.Complete = complete
+	conversationBus.align.WaitedMs = Ms(waited)
+	conversationBus.align.Forced = forced
+	conversationBus.align.SetsTotal++
+	if !complete {
+		conversationBus.align.SetsPartial++
+	}
+	conversationBus.mu.Unlock()
 }
 
 func IncQualityRejectForPMU(pmu string) {
@@ -692,11 +740,16 @@ func snapshotDashboard() DashboardState {
 		return pmus[i].Name < pmus[j].Name
 	})
 
+	alignCopy := conversationBus.align
+	alignCopy.Present = append([]string(nil), conversationBus.align.Present...)
+	alignCopy.Missing = append([]string(nil), conversationBus.align.Missing...)
+
 	return DashboardState{
 		NowUTC:     now,
 		PMUs:       pmus,
 		EventCount: len(conversationBus.events),
 		Latency:    SnapshotPipelineLatency(),
+		TimeAlign:  alignCopy,
 	}
 }
 
@@ -966,7 +1019,7 @@ const conversationPageHTML = `<!doctype html>
         <div class="arrow">→</div>
         <div class="node"><h3>PDC</h3><p id="nodePdc">waiting</p></div>
         <div class="arrow">→</div>
-        <div class="node"><h3>Kafka / Redis / Influx</h3><p id="nodeOut">waiting</p></div>
+        <div class="node"><h3>Kafka / Redis / Postgres</h3><p id="nodeOut">waiting</p></div>
       </div>
     </section>
 
