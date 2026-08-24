@@ -10,7 +10,8 @@ import {
   YAxis,
 } from 'recharts'
 import type { TrendPoint } from '../../types/dashboard'
-import { formatTS, round } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
+import { MultiStreamTooltip } from '../../utils/multiStreamTooltip'
 
 type Props = {
   data: TrendPoint[]
@@ -29,7 +30,7 @@ export const FreqRocofChart = memo(function FreqRocofChart({ data }: Props) {
         <ResponsiveContainer width="99%" height={320} minWidth={1} minHeight={320}>
           <LineChart data={data}>
             <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-            <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 9 }} interval={8} />
+            <XAxis dataKey="ts" tickFormatter={formatTSMs} tick={{ fill: '#9eb0c5', fontSize: 9 }} interval={8} />
             <YAxis
               yAxisId="left"
               domain={['auto', 'auto']}
@@ -44,11 +45,15 @@ export const FreqRocofChart = memo(function FreqRocofChart({ data }: Props) {
               tickFormatter={(v) => `${round(Number(v), 3)}`}
             />
             <Tooltip
-              labelFormatter={(value) => formatTS(Number(value))}
-              formatter={(value, name) => [
-                name === 'frequency' ? `${round(Number(value ?? 0), 4)} Hz` : `${round(Number(value ?? 0), 4)} Hz/s`,
-                name === 'frequency' ? 'Frequency' : 'ROCOF',
-              ]}
+              content={
+                <MultiStreamTooltip
+                  tickLabel="Frame ts"
+                  digits={4}
+                  unitForName={(name) =>
+                    String(name).toLowerCase().includes('rocof') ? ' Hz/s' : ' Hz'
+                  }
+                />
+              }
             />
             <Legend wrapperStyle={{ fontSize: 10 }} />
             <Line

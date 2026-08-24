@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,17 +26,18 @@ import (
 
 type pipeline struct {
 	checker             *aligner.Checker
+	concentrator        *aligner.Concentrator
 	publisher           *output.Publisher
 	sink                *output.Sink
 	kafkaSpool          *output.ReadingSpool
 	sinkSpool           *output.ReadingSpool
 	dropQualityRejected bool
-	// fanOutViaKafka: when true, dashboard + Redis/Influx are fed by Kafka
+	// fanOutViaKafka: when true, dashboard/sink are fed by Kafka
 	// readings consumers (separate consumer groups). HandleFrame only publishes.
 	fanOutViaKafka bool
 	traceMu        sync.Mutex
 	traceCounts    map[string]int
-	// sinkCh decouples Redis/Influx writes from the consumer hot path.
+	// sinkCh decouples Redis/Postgres writes from the consumer hot path.
 	sinkCh chan parser.Reading
 }
 
@@ -124,7 +126,7 @@ func newPipeline(ctx context.Context) *pipeline {
 	}
 
 	fanOutViaKafka := publisher != nil && envBool("KAFKA_READINGS_FANOUT", true)
-	return &pipeline{
+	p := &pipeline{
 		checker:             checker,
 		publisher:           publisher,
 		sink:                sink,
@@ -135,6 +137,48 @@ func newPipeline(ctx context.Context) *pipeline {
 		traceCounts:         make(map[string]int),
 		sinkCh:              make(chan parser.Reading, sinkBufSize),
 	}
+
+	alignEnabled := envBool("TIME_ALIGN_ENABLED", true)
+	alignWait := envDuration("TIME_ALIGN_WAIT", 200*time.Millisecond)
+	alignDepth := envInt("TIME_ALIGN_BUFFER_DEPTH", 50)
+	alignTTL := envDuration("TIME_ALIGN_ACTIVE_TTL", 5*time.Second)
+	alignQuantize := envDuration("TIME_ALIGN_QUANTIZE", 20*time.Millisecond)
+	alignMode := aligner.WaitRelative
+	switch strings.ToLower(strings.TrimSpace(envOrFallback("TIME_ALIGN_MODE", "relative"))) {
+	case "absolute", "abs":
+		alignMode = aligner.WaitAbsolute
+	}
+	bucketKey := aligner.BucketCorrected
+	bucketName := "corrected"
+	switch strings.ToLower(strings.TrimSpace(envOrFallback("TIME_ALIGN_KEY", "corrected"))) {
+	case "soc", "raw", "timestamp":
+		bucketKey = aligner.BucketSOC
+		bucketName = "soc"
+	case "receive", "arrival":
+		bucketKey = aligner.BucketReceive
+		bucketName = "receive"
+	case "corrected", "skew", "offset":
+		bucketKey = aligner.BucketCorrected
+		bucketName = "corrected"
+	}
+	modeName := "relative"
+	if alignMode == aligner.WaitAbsolute {
+		modeName = "absolute"
+	}
+	log.Printf("time align config: enabled=%t mode=%s key=%s wait=%s quantize=%s buffer_depth=%d active_ttl=%s",
+		alignEnabled, modeName, bucketName, alignWait, alignQuantize, alignDepth, alignTTL)
+	p.concentrator = aligner.NewConcentrator(aligner.Config{
+		Enabled:     alignEnabled,
+		Mode:        alignMode,
+		BucketKey:   bucketKey,
+		OffsetFunc:  monitoring.ClockOffset,
+		Quantize:    alignQuantize,
+		Wait:        alignWait,
+		BufferDepth: alignDepth,
+		ActiveTTL:   alignTTL,
+	}, p.onAlignedSet)
+
+	return p
 }
 
 func (p *pipeline) nextTraceIndex(pmuName string) (int, bool) {
@@ -155,7 +199,7 @@ func (p *pipeline) StartReplay(ctx context.Context) {
 	kafkaReplayInterval := envDuration("KAFKA_REPLAY_INTERVAL", 1*time.Second)
 	kafkaReplayBatch := envInt("KAFKA_REPLAY_BATCH", 2000)
 
-	// Sink replay is intentionally conservative to avoid overloading Influx.
+	// Sink replay is intentionally conservative to avoid overloading Postgres.
 	sinkReplayEnabled := envBool("SINK_REPLAY_ENABLED", true)
 	sinkReplayInterval := envDuration("SINK_REPLAY_INTERVAL", 2*time.Second)
 	sinkReplayBatch := envInt("SINK_REPLAY_BATCH", 200)
@@ -225,7 +269,7 @@ func (p *pipeline) startReplayLoop(
 	}()
 }
 
-// StartSinkWorkers drains the sinkCh and writes each reading to Redis + InfluxDB.
+// StartSinkWorkers drains the sinkCh and writes each reading to Redis + Postgres.
 // nWorkers run in parallel so a single slow write doesn't block others.
 func (p *pipeline) StartSinkWorkers(ctx context.Context) {
 	if p.sink == nil {
@@ -273,6 +317,9 @@ func (p *pipeline) StartSinkWorkers(ctx context.Context) {
 func (p *pipeline) Close() {
 	if p == nil {
 		return
+	}
+	if p.concentrator != nil {
+		p.concentrator.Close()
 	}
 	// Close sink channel so workers drain cleanly.
 	if p.sinkCh != nil {
@@ -452,6 +499,42 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 		monitoring.UpdateClockOffset(pmuName, meta.receivedAt, reading.Timestamp)
 	}
 
+	// Hold in the time-alignment buffer (relative/absolute wait) before fan-out.
+	// Single-PMU / disabled modes passthrough immediately inside the concentrator.
+	_ = ctx
+	if p.concentrator != nil {
+		alignStart := time.Now()
+		p.concentrator.Push(reading)
+		monitoring.ObserveStage(pmuName, monitoring.StageTimeAlignPush, time.Since(alignStart))
+		return
+	}
+	p.forwardReading(reading)
+}
+
+// onAlignedSet is invoked when a timestamp bucket completes or the wait expires.
+func (p *pipeline) onAlignedSet(set aligner.AlignedSet) {
+	present := make([]string, 0, len(set.Present))
+	for name := range set.Present {
+		present = append(present, name)
+	}
+	monitoring.RecordAlignedSet(set.Timestamp, present, set.Missing, set.Complete, set.Waited, set.Forced)
+	sort.Strings(present)
+	for _, name := range present {
+		r := set.Present[name]
+		// Stamp the common aligned axis so multi-PMU charts share one X time.
+		// Wire SOC/FRACSEC on the reading stay unchanged for forensics.
+		if !set.Timestamp.IsZero() {
+			r.Timestamp = set.Timestamp
+		}
+		p.forwardReading(r)
+	}
+}
+
+// forwardReading publishes / delivers one reading after time alignment (or passthrough).
+func (p *pipeline) forwardReading(reading parser.Reading) {
+	pmuName := reading.PMUName
+	ctx := context.Background()
+
 	if p.fanOutViaKafka {
 		// Split processor: dashboard/sink come from Kafka consumer groups.
 		if p.publisher != nil {
@@ -523,7 +606,7 @@ func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error
 	return nil
 }
 
-// OnSinkReading enqueues Redis/Influx work from the pdc-sink consumer group.
+// OnSinkReading enqueues Redis/Postgres work from the pdc-sink consumer group.
 func (p *pipeline) OnSinkReading(_ context.Context, r parser.Reading) error {
 	monitoring.IncReadingsConsumed()
 	p.enqueueSink(r)
@@ -647,7 +730,7 @@ func main() {
 
 	dbStore, err := store.NewStore()
 	if err != nil {
-		log.Fatalf("failed to initialize influx db store: %v", err)
+		log.Fatalf("failed to initialize postgres store: %v", err)
 	}
 	defer dbStore.Close()
 

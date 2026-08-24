@@ -1,4 +1,4 @@
-// One-off utility: update IP for all registered PMUs in InfluxDB.
+// One-off utility: update IP for all registered PMUs in Postgres.
 // Usage: go run ./cmd/update-pmu-ips [new-ip]
 package main
 

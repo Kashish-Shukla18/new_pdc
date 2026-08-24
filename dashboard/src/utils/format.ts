@@ -10,6 +10,28 @@ export function formatTS(ts: number) {
   })
 }
 
+/** Clock time with milliseconds — use to compare alignment across PMUs. */
+export function formatTSMs(ts: number) {
+  if (!ts || !Number.isFinite(ts)) return '—'
+  const d = new Date(ts)
+  const base = d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+  return `${base}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
+
+/** Wire SOC + FRACSEC count from the C37.118 frame (µs when TIME_BASE=1e6). */
+export function formatWireFrameTime(soc?: number, fracSecCount?: number) {
+  if (soc == null || soc <= 0) return '—'
+  const frac = fracSecCount ?? 0
+  const ms = Math.floor((frac % 1_000_000) / 1_000)
+  const us = frac % 1_000
+  return `${soc}.${String(ms).padStart(3, '0')}${String(us).padStart(3, '0')}`
+}
+
 export function ageText(iso: string) {
   if (!iso) return '--'
   const deltaMs = Date.now() - new Date(iso).getTime()

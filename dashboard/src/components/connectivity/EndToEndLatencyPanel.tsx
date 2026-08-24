@@ -12,7 +12,8 @@ import {
 } from 'recharts'
 import type { CycleHistoryPoint } from '../../hooks/useCycleLatencyHistory'
 import type { CycleLatency } from '../../utils/pmu'
-import { formatTS, round } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
+import { MultiStreamTooltip } from '../../utils/multiStreamTooltip'
 
 type Props = {
   history: CycleHistoryPoint[]
@@ -101,7 +102,7 @@ export const EndToEndLatencyPanel = memo(function EndToEndLatencyPanel({ history
                   dataKey="ts"
                   type="number"
                   domain={['dataMin', 'dataMax']}
-                  tickFormatter={(v) => formatTS(Number(v))}
+                  tickFormatter={(v) => formatTSMs(Number(v))}
                   tick={{ fill: '#9eb0c5', fontSize: 10 }}
                   minTickGap={36}
                 />
@@ -112,10 +113,7 @@ export const EndToEndLatencyPanel = memo(function EndToEndLatencyPanel({ history
                   tickFormatter={(v) => `${round(Number(v), 0)}`}
                   unit=" ms"
                 />
-                <Tooltip
-                  labelFormatter={(v) => formatTS(Number(v))}
-                  formatter={(value, name) => [`${round(Number(value ?? 0), 2)} ms`, String(name)]}
-                />
+                <Tooltip content={<MultiStreamTooltip tickLabel="Sample" valueSuffix=" ms" digits={2} />} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Area
                   type="monotone"

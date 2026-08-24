@@ -1,7 +1,5 @@
 # docker-compose.yaml – tuned for high-throughput PMU data ingestion
 
-version: '3.8'
-
 services:
 
   # ── KAFKA (message queue) ──────────────────────────────────────────────────
@@ -62,26 +60,39 @@ services:
         --save ""
         --appendonly no
 
-  # ── INFLUXDB (time-series storage) ────────────────────────────────────────
-  influxdb:
-    image: influxdb:2.7
+  # ── POSTGRES / TIMESCALEDB (history + PMU config) ─────────────────────────
+  # Host port 5433 avoids clashing with a local Postgres on 5432.
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
     ports:
-      - "8087:8086"
+      - "5433:5432"
     environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: admin
-      DOCKER_INFLUXDB_INIT_PASSWORD: admin123456
-      DOCKER_INFLUXDB_INIT_ORG: pdc-org
-      DOCKER_INFLUXDB_INIT_BUCKET: synchrophasor
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: my-super-secret-token
-      # Storage engine concurrency
-      INFLUXD_STORAGE_WAL_MAX_CONCURRENT_WRITES: "8"
-      INFLUXD_STORAGE_WAL_FSYNC_DELAY: "100ms"
-      # HTTP limits – allow larger batch payloads
-      INFLUXD_HTTP_MAX_BODY_SIZE: "52428800"      # 50 MB
-      INFLUXD_QUERY_CONCURRENCY: "20"
+      POSTGRES_USER: pdc
+      POSTGRES_PASSWORD: pdc
+      POSTGRES_DB: pdc
     volumes:
-      - influxdb-data:/var/lib/influxdb2
+      - timescale-data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdc -d pdc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── PGADMIN (browse Postgres in the browser) ─────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:8
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      timescaledb:
+        condition: service_healthy
 
   # ── PROMETHEUS (app monitoring) ────────────────────────────────────────────
   prometheus:
@@ -92,4 +103,5 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
-  influxdb-data:
+  timescale-data:
+  pgadmin-data:
