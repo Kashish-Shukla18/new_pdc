@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import {
   CartesianGrid,
   Legend,
@@ -8,18 +9,47 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { AlignedStreamReadout } from '../charts/AlignedStreamReadout'
+import { CHART_COLORS } from '../../constants'
 import type { AngleHistoryPoint, AnglePair } from '../../types/analytics'
+import type { PMUWithMeta } from '../../types/dashboard'
 import { anglePairColors } from '../../utils/analytics'
-import { CHART_TOOLTIP_STYLE } from '../../utils/chartTooltip'
-import { formatTS } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
+import { MultiStreamTooltip } from '../../utils/multiStreamTooltip'
+import { pmuKey } from '../../utils/pmu'
 
 type Props = {
   history: AngleHistoryPoint[]
   pairs: AnglePair[]
+  /** Online PMUs used to show live VA + frame timestamps for alignment checks. */
+  pmus?: PMUWithMeta[]
+  alignHint?: string
 }
 
-export function AngleDiffChart({ history, pairs }: Props) {
+export function AngleDiffChart({ history, pairs, pmus = [], alignHint }: Props) {
   const coloredPairs = anglePairColors(pairs)
+
+  const streamRows = useMemo(() => {
+    const keysInPairs = new Set<string>()
+    for (const pair of pairs) {
+      for (const part of pair.key.split('__')) {
+        if (part) keysInPairs.add(part)
+      }
+    }
+    const list = pmus.filter((p) => keysInPairs.has(pmuKey(p.name)))
+    const fallback = list.length ? list : pmus.filter((p) => p.connected).slice(0, 6)
+    return fallback.map((pmu, idx) => {
+      const colorIdx = pmus.findIndex((p) => p.name === pmu.name)
+      return {
+        name: pmu.name,
+        color: CHART_COLORS[(colorIdx >= 0 ? colorIdx : idx) % CHART_COLORS.length],
+        value: `${round(pmu.lastPhasor?.va?.angleDeg ?? 0, 2)}° VA`,
+        chartTs: pmu.lastPhasor?.ts ?? pmu.lastReading?.ts ?? 0,
+        wireSoc: pmu.lastFrame?.soc,
+        wireFracCount: pmu.lastFrame?.fracSecCount,
+      }
+    })
+  }, [pmus, pairs])
 
   return (
     <div className="panel chart-panel">
@@ -28,7 +58,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
           <h3>Inter-PMU Angle Δ (VA)</h3>
           <p className="panel-sub">
             {pairs.length
-              ? 'From live VA phase angles · needs ≥2 PMUs'
+              ? 'Time-aligned VA phase angles · compare Aligned ts rows below'
               : 'Add a second online PMU to compare angles'}
           </p>
         </div>
@@ -44,7 +74,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
               <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
               <XAxis
                 dataKey="ts"
-                tickFormatter={formatTS}
+                tickFormatter={formatTSMs}
                 tick={{ fill: '#8a9aab', fontSize: 11 }}
               />
               <YAxis
@@ -52,11 +82,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
                 domain={[0, 'auto']}
                 tickFormatter={(value) => `${value}°`}
               />
-              <Tooltip
-                {...CHART_TOOLTIP_STYLE}
-                labelFormatter={(value) => formatTS(Number(value))}
-                formatter={(value) => [`${Number(value ?? 0).toFixed(2)}°`, '']}
-              />
+              <Tooltip content={<MultiStreamTooltip tickLabel="Aligned tick" valueSuffix="°" digits={2} />} />
               <Legend wrapperStyle={{ color: '#8a9aab', fontSize: 11 }} />
               {coloredPairs.map((pair) => (
                 <Line
@@ -85,6 +111,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
           ))}
         </div>
       )}
+      <AlignedStreamReadout rows={streamRows} alignHint={alignHint} />
     </div>
   )
 }

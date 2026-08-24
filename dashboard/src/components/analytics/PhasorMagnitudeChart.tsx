@@ -10,8 +10,8 @@ import {
 } from 'recharts'
 import type { TrendPoint } from '../../types/dashboard'
 import { PHASOR_I_COLORS, PHASOR_V_COLORS } from '../../utils/analyticsColors'
-import { CHART_TOOLTIP_STYLE } from '../../utils/chartTooltip'
-import { formatTS, round } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
+import { MultiStreamTooltip } from '../../utils/multiStreamTooltip'
 
 export const PHASOR_TREND_WINDOW = 90
 
@@ -63,7 +63,7 @@ export function PhasorMagnitudeChart({ trends, kind, pmuName }: Props) {
               <CartesianGrid stroke="rgba(158, 176, 197, 0.1)" strokeDasharray="3 3" />
               <XAxis
                 dataKey="ts"
-                tickFormatter={formatTS}
+                tickFormatter={formatTSMs}
                 tick={{ fill: '#8a9aab', fontSize: 10 }}
                 interval="preserveStartEnd"
                 minTickGap={28}
@@ -74,11 +74,7 @@ export function PhasorMagnitudeChart({ trends, kind, pmuName }: Props) {
                 tickFormatter={(v) => `${round(Number(v), 1)}`}
                 width={48}
               />
-              <Tooltip
-                {...CHART_TOOLTIP_STYLE}
-                labelFormatter={(value) => formatTS(Number(value))}
-                formatter={(value, name) => [`${round(Number(value ?? 0), 3)}`, String(name)]}
-              />
+              <Tooltip content={<MultiStreamTooltip tickLabel="Frame ts" valueSuffix="" digits={3} />} />
               <Legend wrapperStyle={{ color: '#8a9aab', fontSize: 11 }} />
               {series.map((s) => (
                 <Line

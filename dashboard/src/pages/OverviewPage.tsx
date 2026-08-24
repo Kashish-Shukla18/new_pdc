@@ -22,7 +22,9 @@ import 'leaflet/dist/leaflet.css'
 import { MapContainer, TileLayer, Marker, Popup, Tooltip as LeafletTooltip, useMap } from 'react-leaflet'
 import { CHART_COLORS, INDIA_CENTER } from '../constants'
 import { useDashboardContext } from '../context/DashboardContext'
-import { formatTS, round } from '../utils/format'
+import { AlignedStreamReadout } from '../components/charts/AlignedStreamReadout'
+import { formatTSMs, round } from '../utils/format'
+import { MultiStreamTooltip } from '../utils/multiStreamTooltip'
 import { packetLossOf, pmuKey } from '../utils/pmu'
 import type { PMUWithMeta } from '../types/dashboard'
 
@@ -77,6 +79,7 @@ export function OverviewPage() {
     liveAlerts,
     regionSummary,
     setDrawerPMUName,
+    dashboard,
   } = useDashboardContext()
 
   const [freqMode, setFreqMode] = useState<FreqMode>('absolute')
@@ -219,6 +222,59 @@ export function OverviewPage() {
   const freqDataKey = (name: string) =>
     freqMode === 'absolute' ? `${pmuKey(name)}__frequency` : `${pmuKey(name)}__frequencyDev`
 
+  const alignHint = useMemo(() => {
+    const ta = dashboard.timeAlign
+    if (!ta) return undefined
+    const present = ta.present?.length ?? 0
+    const missing = ta.missing?.length ?? 0
+    const status = ta.complete ? 'complete' : 'partial'
+    return `PDC time-align · ${status} · ${present} present${missing ? ` · ${missing} missing` : ''} · wait ${round(ta.waitedMs ?? 0, 1)} ms`
+  }, [dashboard.timeAlign])
+
+  const freqReadoutRows = useMemo(
+    () =>
+      plotPMUs.map((pmu) => {
+        const idx = pmus.findIndex((p) => p.name === pmu.name)
+        const color = CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length]
+        const fnom = pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : fleetFnom
+        const freq = pmu.lastReading?.frequency ?? 0
+        const df =
+          typeof pmu.lastReading?.frequencyDev === 'number'
+            ? pmu.lastReading.frequencyDev
+            : freq - fnom
+        const value =
+          freqMode === 'absolute'
+            ? `${round(freq, 4)} Hz`
+            : `${df >= 0 ? '+' : ''}${round(df, 4)} Hz`
+        return {
+          name: pmu.name,
+          color,
+          value,
+          chartTs: pmu.lastReading?.ts ?? pmu.lastPhasor?.ts ?? 0,
+          wireSoc: pmu.lastFrame?.soc,
+          wireFracCount: pmu.lastFrame?.fracSecCount,
+        }
+      }),
+    [plotPMUs, pmus, freqMode, fleetFnom],
+  )
+
+  const rocofReadoutRows = useMemo(
+    () =>
+      plotPMUs.map((pmu) => {
+        const idx = pmus.findIndex((p) => p.name === pmu.name)
+        const color = CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length]
+        return {
+          name: pmu.name,
+          color,
+          value: `${round(pmu.lastReading?.rocof ?? 0, 5)} Hz/s`,
+          chartTs: pmu.lastReading?.ts ?? pmu.lastPhasor?.ts ?? 0,
+          wireSoc: pmu.lastFrame?.soc,
+          wireFracCount: pmu.lastFrame?.fracSecCount,
+        }
+      }),
+    [plotPMUs, pmus],
+  )
+
   return (
     <div className="overview-page">
       <section className="kpi-grid">
@@ -273,8 +329,8 @@ export function OverviewPage() {
               <h3>System Frequency</h3>
               <p>
                 {freqMode === 'absolute'
-                  ? `Absolute Hz · FNOM ${fleetFnom} Hz band`
-                  : `Δf from CFG FNOM (${fleetFnom} Hz)`}
+                  ? `Absolute Hz · SOC-aligned · FNOM ${fleetFnom} Hz`
+                  : `Δf from CFG FNOM (${fleetFnom} Hz) · SOC-aligned`}
               </p>
             </div>
             <div className="panel-tools-inline">
@@ -300,7 +356,7 @@ export function OverviewPage() {
                 <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
-                  tickFormatter={formatTS}
+                  tickFormatter={formatTSMs}
                   tick={{ fill: '#9eb0c5', fontSize: 11 }}
                   minTickGap={32}
                   interval="preserveStartEnd"
@@ -313,11 +369,13 @@ export function OverviewPage() {
                   width={56}
                 />
                 <Tooltip
-                  labelFormatter={(value) => formatTS(Number(value))}
-                  formatter={(value) => [
-                    `${round(Number(value ?? 0), 4)} ${freqMode === 'absolute' ? 'Hz' : 'Hz Δ'}`,
-                    '',
-                  ]}
+                  content={
+                    <MultiStreamTooltip
+                      tickLabel="Aligned tick"
+                      valueSuffix={freqMode === 'absolute' ? ' Hz' : ' Hz Δ'}
+                      digits={4}
+                    />
+                  }
                 />
                 <Legend />
                 {freqMode === 'absolute' ? (
@@ -349,13 +407,14 @@ export function OverviewPage() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+          <AlignedStreamReadout rows={freqReadoutRows} alignHint={alignHint} />
         </div>
 
         <div className="panel overview-chart-panel">
           <div className="panel-head">
             <div>
               <h3>ROCOF</h3>
-              <p>Rate of change of frequency (Hz/s)</p>
+              <p>Rate of change of frequency (Hz/s) · SOC-aligned</p>
             </div>
           </div>
           <div className="chart-wrap overview-chart">
@@ -364,16 +423,13 @@ export function OverviewPage() {
                 <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
-                  tickFormatter={formatTS}
+                  tickFormatter={formatTSMs}
                   tick={{ fill: '#9eb0c5', fontSize: 11 }}
                   minTickGap={32}
                   interval="preserveStartEnd"
                 />
                 <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={['auto', 'auto']} scale="linear" width={56} />
-                <Tooltip
-                  labelFormatter={(value) => formatTS(Number(value))}
-                  formatter={(value) => [`${round(Number(value ?? 0), 5)} Hz/s`, 'ROCOF']}
-                />
+                <Tooltip content={<MultiStreamTooltip tickLabel="Aligned tick" valueSuffix=" Hz/s" digits={5} />} />
                 <Legend />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.25)" strokeDasharray="4 4" />
                 {plotPMUs.map((pmu) => {
@@ -396,6 +452,7 @@ export function OverviewPage() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+          <AlignedStreamReadout rows={rocofReadoutRows} alignHint={alignHint} />
         </div>
       </section>
 

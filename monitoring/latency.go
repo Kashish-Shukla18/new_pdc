@@ -30,6 +30,8 @@ const (
 	StageFrameToParse    = "frame_to_parse"
 	StageParse           = "parse"
 	StageQuality         = "quality"
+	StageTimeAlignPush   = "time_align_push"
+	StageTimeAlignWait   = "time_align_wait"
 	StageReadingsPublish = "readings_publish"
 	StageDashboardRecord = "dashboard_record"
 	StageStateSnapshot   = "dashboard_state_json"
@@ -63,10 +65,12 @@ var stageOrder = []stageSpec{
 	{StageFrameToParse, "Frame complete → parse start", "process"},
 	{StageParse, "Parse DATA", "process"},
 	{StageQuality, "Quality gate", "process"},
+	{StageTimeAlignPush, "Time-align buffer push", "process"},
+	{StageTimeAlignWait, "Time-align wait window", "process"},
 	{StageReadingsPublish, "Readings Kafka publish", "process"},
 	{StageDashboardRecord, "Dashboard RecordReading", "dashboard"},
 	{StageStateSnapshot, "Dashboard /state JSON", "dashboard"},
-	{StageSinkStore, "Redis + Influx store", "sink"},
+	{StageSinkStore, "Redis + Postgres store", "sink"},
 	{StageE2ERecvToDash, "E2E TCP-complete → dashboard", "e2e"},
 	{StageClockSkewPMU, "PMU clock skew (receive − SOC)", "clock"},
 	{StageE2EPMUToDash, "E2E PMU SOC → dashboard (raw, includes skew)", "clock"},

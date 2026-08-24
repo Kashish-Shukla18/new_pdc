@@ -9,6 +9,7 @@ export const emptyDashboardState: DashboardState = {
   pmus: [],
   eventCount: 0,
   latency: { slowestStage: '', slowestLabel: '', slowestAvgMs: 0, stages: [] },
+  timeAlign: { complete: true, waitedMs: 0, setsTotal: 0, setsPartial: 0 },
 }
 
 export const defaultNewPMU: NewPMUForm = {

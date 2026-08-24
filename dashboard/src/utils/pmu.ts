@@ -47,19 +47,23 @@ function snapSynchroRate(live: number): number {
   return Math.max(1, Math.round(live))
 }
 
+/** CFG2 DATA_RATE (or meta), never rewritten from live measurements. */
+export function configuredFps(pmu: LivePMUState, metaTarget = 0): number {
+  if (typeof pmu.cfg?.dataRate === 'number' && pmu.cfg.dataRate !== 0) {
+    return pmu.cfg.dataRate > 0 ? pmu.cfg.dataRate : 1 / Math.abs(pmu.cfg.dataRate)
+  }
+  if (metaTarget > 0) return metaTarget
+  return 0
+}
+
 /**
- * Target FPS for availability.
- * If CFG advertises 120 but the wire steadily delivers ~30, use the live rate
- * (frame-diag already proved the PDC is not dropping those frames).
+ * Target used for availability scoring only.
+ * If CFG advertises a high rate but the wire steadily delivers much less,
+ * score against the snapped live band so availability is not permanently red.
  */
 export function resolveTargetFps(pmu: LivePMUState, metaTarget = 0): number {
   const live = effectiveFps(pmu)
-  let cfg = 0
-  if (typeof pmu.cfg?.dataRate === 'number' && pmu.cfg.dataRate !== 0) {
-    cfg = pmu.cfg.dataRate > 0 ? pmu.cfg.dataRate : 1 / Math.abs(pmu.cfg.dataRate)
-  } else if (metaTarget > 0) {
-    cfg = metaTarget
-  }
+  const cfg = configuredFps(pmu, metaTarget)
   if (live >= 8 && cfg > 0 && live < cfg * 0.55) {
     return snapSynchroRate(live)
   }

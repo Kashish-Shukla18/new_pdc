@@ -93,4 +93,4 @@ export function vendorChartData(pmus: PMUWithMeta[]) {
       color: VOLTAGE_COLORS[index % VOLTAGE_COLORS.length],
     }))
 }
-export { toneFromStatus, availabilityOf, latencyOf, packetLossOf, resolveTargetFps, effectiveFps } from './pmu'
+export { toneFromStatus, availabilityOf, latencyOf, packetLossOf, resolveTargetFps, configuredFps, effectiveFps } from './pmu'

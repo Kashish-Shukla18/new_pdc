@@ -413,13 +413,27 @@ export function useDashboard() {
 
   const angleHistoryRef = useRef<AngleHistoryPoint[]>([])
   const [angleHistory, setAngleHistory] = useState<AngleHistoryPoint[]>([])
+  const lastAngleSocRef = useRef<number>(0)
 
   useEffect(() => {
     if (!chartAnglePairs.length || isPaused) return
 
+    // Prefer the SOC timestamp shared by time-aligned lastPhasor snapshots.
+    const socTimes = pmus
+      .filter((p) => p.connected && p.lastPhasor?.ts)
+      .map((p) => p.lastPhasor!.ts)
+    if (socTimes.length < 2) return
+    const counts = new Map<number, number>()
+    for (const t of socTimes) counts.set(t, (counts.get(t) ?? 0) + 1)
+    const [ts, count] = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]
+    // Need ≥2 PMUs on the same SOC tick (post time-align) before sampling Δ.
+    if (count < 2) return
+    if (ts === lastAngleSocRef.current) return
+    lastAngleSocRef.current = ts
+
     const point: AngleHistoryPoint = {
-      ts: Date.now(),
-      label: new Date().toLocaleTimeString(),
+      ts,
+      label: new Date(ts).toLocaleTimeString(),
     }
     for (const pair of chartAnglePairs) {
       point[pair.key] = pair.value
@@ -428,7 +442,7 @@ export function useDashboard() {
     const next = [...angleHistoryRef.current, point].slice(-60)
     angleHistoryRef.current = next
     setAngleHistory(next)
-  }, [chartAnglePairs, isPaused, dashboard.nowUtc])
+  }, [chartAnglePairs, isPaused, dashboard.nowUtc, pmus])
 
   const filteredHelp = HELP_SECTIONS.filter((item) => {
     if (!helpQuery.trim()) return true

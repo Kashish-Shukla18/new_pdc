@@ -6,17 +6,14 @@ import (
 	"os"
 	"time"
 
-	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"pdc/config"
 )
 
+// Store persists PMU registry rows in Postgres (pmu_config).
 type Store struct {
-	client influxdb2.Client
-	query  api.QueryAPI
-	write  api.WriteAPIBlocking
-	org    string
-	bucket string
+	pool *pgxpool.Pool
 }
 
 func env(key, fallback string) string {
@@ -27,172 +24,129 @@ func env(key, fallback string) string {
 	return v
 }
 
+// DefaultDSN matches docker-compose timescaledb service.
+func DefaultDSN() string {
+	return env("POSTGRES_DSN", "postgres://pdc:pdc@127.0.0.1:5433/pdc?sslmode=disable")
+}
+
 func NewStore() (*Store, error) {
-	url := env("INFLUX_URL", "http://127.0.0.1:8087")
-	token := env("INFLUX_TOKEN", "my-super-secret-token")
-	org := env("INFLUX_ORG", "pdc-org")
-	bucket := env("INFLUX_BUCKET", "synchrophasor")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	client := influxdb2.NewClient(url, token)
-	if ok, err := client.Health(context.Background()); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("influx health failed: %w", err)
-	} else if ok.Status != "pass" {
-		client.Close()
-		return nil, fmt.Errorf("influx not healthy: %s", ok.Status)
+	pool, err := pgxpool.New(ctx, DefaultDSN())
+	if err != nil {
+		return nil, fmt.Errorf("postgres connect: %w", err)
 	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("postgres ping: %w", err)
+	}
+	if err := ensureSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("postgres schema: %w", err)
+	}
+	return &Store{pool: pool}, nil
+}
 
-	return &Store{
-		client: client,
-		query:  client.QueryAPI(org),
-		write:  client.WriteAPIBlocking(org, bucket),
-		org:    org,
-		bucket: bucket,
-	}, nil
+func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS pmu_config (
+    name          TEXT PRIMARY KEY,
+    ip            TEXT NOT NULL DEFAULT '',
+    port          INT  NOT NULL DEFAULT 0,
+    tcp_port      INT  NOT NULL DEFAULT 0,
+    idcode        INT  NOT NULL DEFAULT 0,
+    protocol      TEXT NOT NULL DEFAULT 'tcp',
+    timeout_sec   INT  NOT NULL DEFAULT 0,
+    reconnect_sec INT  NOT NULL DEFAULT 0,
+    region        TEXT NOT NULL DEFAULT '',
+    lat           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    lon           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    active        BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`)
+	return err
 }
 
 func (s *Store) Close() {
-	s.client.Close()
+	if s != nil && s.pool != nil {
+		s.pool.Close()
+	}
 }
 
 func (s *Store) SavePMU(ctx context.Context, cfg config.PMUConfig) error {
-	p := influxdb2.NewPoint(
-		"pmu_config",
-		map[string]string{"name": cfg.Name},
-		map[string]interface{}{
-			"ip":            cfg.IP,
-			"port":          cfg.Port,
-			"tcp_port":      cfg.TCPPort,
-			"idcode":        int(cfg.IDCode),
-			"protocol":      cfg.Protocol,
-			"timeout_sec":   cfg.TimeoutSec,
-			"reconnect_sec": cfg.ReconnectSec,
-			"region":        cfg.Region,
-			"lat":           cfg.Lat,
-			"lon":           cfg.Lon,
-			"active":        1,
-		},
-		time.Now(),
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO pmu_config (
+    name, ip, port, tcp_port, idcode, protocol,
+    timeout_sec, reconnect_sec, region, lat, lon, active, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, TRUE, NOW())
+ON CONFLICT (name) DO UPDATE SET
+    ip = EXCLUDED.ip,
+    port = EXCLUDED.port,
+    tcp_port = EXCLUDED.tcp_port,
+    idcode = EXCLUDED.idcode,
+    protocol = EXCLUDED.protocol,
+    timeout_sec = EXCLUDED.timeout_sec,
+    reconnect_sec = EXCLUDED.reconnect_sec,
+    region = EXCLUDED.region,
+    lat = EXCLUDED.lat,
+    lon = EXCLUDED.lon,
+    active = TRUE,
+    updated_at = NOW()`,
+		cfg.Name, cfg.IP, cfg.Port, cfg.TCPPort, int(cfg.IDCode), cfg.Protocol,
+		cfg.TimeoutSec, cfg.ReconnectSec, cfg.Region, cfg.Lat, cfg.Lon,
 	)
-	return s.write.WritePoint(ctx, p)
+	return err
 }
 
 func (s *Store) DeletePMU(ctx context.Context, name string) error {
-	p := influxdb2.NewPoint(
-		"pmu_config",
-		map[string]string{"name": name},
-		map[string]interface{}{
-			"active": 0,
-		},
-		time.Now(),
-	)
-	return s.write.WritePoint(ctx, p)
+	_, err := s.pool.Exec(ctx, `
+UPDATE pmu_config SET active = FALSE, updated_at = NOW() WHERE name = $1`, name)
+	return err
 }
 
 func (s *Store) GetAllPMUs(ctx context.Context) ([]config.PMUConfig, error) {
-	flux := fmt.Sprintf(`
-		from(bucket:"%s")
-		  |> range(start: 0)
-		  |> filter(fn: (r) => r._measurement == "pmu_config")
-		  |> pivot(rowKey:["_time", "name"], columnKey: ["_field"], valueColumn: "_value")
-		  |> group(columns: ["name"])
-		  |> sort(columns: ["_time"], desc: true)
-		  |> limit(n: 1)
-	`, s.bucket)
-
-	result, err := s.query.Query(ctx, flux)
+	rows, err := s.pool.Query(ctx, `
+SELECT name, ip, port, tcp_port, idcode, protocol,
+       timeout_sec, reconnect_sec, region, lat, lon
+FROM pmu_config
+WHERE active = TRUE
+ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
-	defer result.Close()
+	defer rows.Close()
 
 	var pmus []config.PMUConfig
-	for result.Next() {
-		rec := result.Record()
-		
-		activeVal := rec.ValueByKey("active")
-		if activeVal == nil {
-			continue
+	for rows.Next() {
+		var (
+			cfg    config.PMUConfig
+			idcode int
+		)
+		if err := rows.Scan(
+			&cfg.Name, &cfg.IP, &cfg.Port, &cfg.TCPPort, &idcode, &cfg.Protocol,
+			&cfg.TimeoutSec, &cfg.ReconnectSec, &cfg.Region, &cfg.Lat, &cfg.Lon,
+		); err != nil {
+			return nil, err
 		}
-		var active int64
-		switch v := activeVal.(type) {
-		case int64:
-			active = v
-		case float64:
-			active = int64(v)
-		}
-
-		if active == 0 {
-			continue // deleted
-		}
-
-		name, _ := rec.ValueByKey("name").(string)
-		ip, _ := rec.ValueByKey("ip").(string)
-		protocol, _ := rec.ValueByKey("protocol").(string)
-		region, _ := rec.ValueByKey("region").(string)
-
-		var port, idcode, timeout, reconnect, tcpPort int64
-		var lat, lon float64
-
-		if v := rec.ValueByKey("port"); v != nil {
-			switch val := v.(type) {
-			case int64: port = val
-			case float64: port = int64(val)
-			}
-		}
-		if v := rec.ValueByKey("tcp_port"); v != nil {
-			switch val := v.(type) {
-			case int64: tcpPort = val
-			case float64: tcpPort = int64(val)
-			}
-		}
-		if v := rec.ValueByKey("idcode"); v != nil {
-			switch val := v.(type) {
-			case int64: idcode = val
-			case float64: idcode = int64(val)
-			}
-		}
-		if v := rec.ValueByKey("timeout_sec"); v != nil {
-			switch val := v.(type) {
-			case int64: timeout = val
-			case float64: timeout = int64(val)
-			}
-		}
-		if v := rec.ValueByKey("reconnect_sec"); v != nil {
-			switch val := v.(type) {
-			case int64: reconnect = val
-			case float64: reconnect = int64(val)
-			}
-		}
-		if v := rec.ValueByKey("lat"); v != nil {
-			switch val := v.(type) {
-			case float64: lat = val
-			case int64: lat = float64(val)
-			}
-		}
-		if v := rec.ValueByKey("lon"); v != nil {
-			switch val := v.(type) {
-			case float64: lon = val
-			case int64: lon = float64(val)
-			}
-		}
-
-		pmus = append(pmus, config.PMUConfig{
-			Name:         name,
-			IP:           ip,
-			Port:         int(port),
-			TCPPort:      int(tcpPort),
-			IDCode:       uint16(idcode),
-			Protocol:     protocol,
-			TimeoutSec:   int(timeout),
-			ReconnectSec: int(reconnect),
-			Region:       region,
-			Lat:          lat,
-			Lon:          lon,
-		})
+		cfg.IDCode = uint16(idcode)
+		pmus = append(pmus, cfg)
 	}
-	if result.Err() != nil {
-		return nil, result.Err()
+	return pmus, rows.Err()
+}
+
+// Ping is a health helper for diagnostics.
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("store not initialized")
 	}
-	return pmus, nil
+	return s.pool.Ping(ctx)
+}
+
+// Pool exposes the pool for shared use (optional).
+func (s *Store) Pool() *pgxpool.Pool {
+	if s == nil {
+		return nil
+	}
+	return s.pool
 }

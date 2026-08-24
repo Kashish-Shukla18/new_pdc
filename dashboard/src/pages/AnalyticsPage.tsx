@@ -5,6 +5,7 @@ import { OperatorRecommendations } from '../components/analytics/OperatorRecomme
 import { PhasorDiagram } from '../components/analytics/PhasorDiagram'
 import { PhasorMagnitudeChart } from '../components/analytics/PhasorMagnitudeChart'
 import { useDashboardContext } from '../context/DashboardContext'
+import { round } from '../utils/format'
 import { displayPhasors } from '../utils/phasorLabels'
 
 export function AnalyticsPage() {
@@ -14,6 +15,7 @@ export function AnalyticsPage() {
     chartAnglePairs,
     angleHistory,
     analyticsRecs,
+    dashboard,
   } = useDashboardContext()
 
   const [analyticsPMUName, setAnalyticsPMUName] = useState('')
@@ -21,6 +23,15 @@ export function AnalyticsPage() {
     ? analyticsPMUName
     : pmus[0]?.name ?? ''
   const selected = pmus.find((p) => p.name === selectedName) ?? pmus[0]
+
+  const alignHint = useMemo(() => {
+    const ta = dashboard.timeAlign
+    if (!ta) return undefined
+    const present = ta.present?.length ?? 0
+    const missing = ta.missing?.length ?? 0
+    const status = ta.complete ? 'complete' : 'partial'
+    return `PDC time-align · ${status} · ${present} present${missing ? ` · ${missing} missing` : ''} · wait ${round(ta.waitedMs ?? 0, 1)} ms`
+  }, [dashboard.timeAlign])
 
   const displayPhasorRows = useMemo(() => {
     if (!selected) return []
@@ -80,7 +91,12 @@ export function AnalyticsPage() {
       </section>
 
       <section className="analytics-grid-angle">
-        <AngleDiffChart history={angleHistory} pairs={chartAnglePairs} />
+        <AngleDiffChart
+          history={angleHistory}
+          pairs={chartAnglePairs}
+          pmus={pmus}
+          alignHint={alignHint}
+        />
       </section>
 
       <OperatorRecommendations recommendations={analyticsRecs} />

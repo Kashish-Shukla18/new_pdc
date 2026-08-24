@@ -11,7 +11,8 @@ import {
   YAxis,
 } from 'recharts'
 import type { TrendPoint } from '../../types/dashboard'
-import { formatTS, round } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
+import { MultiStreamTooltip } from '../../utils/multiStreamTooltip'
 
 type Props = {
   data: TrendPoint[]
@@ -31,17 +32,14 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
         <ResponsiveContainer width="99%" height={320} minWidth={1} minHeight={320}>
           <LineChart data={data}>
             <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-            <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 9 }} interval={8} />
+            <XAxis dataKey="ts" tickFormatter={formatTSMs} tick={{ fill: '#9eb0c5', fontSize: 9 }} interval={8} />
             <YAxis
               domain={['auto', 'auto']}
               tick={{ fill: '#4de0ff', fontSize: 9 }}
               tickFormatter={(v) => `${round(Number(v), 3)}`}
               width={56}
             />
-            <Tooltip
-              labelFormatter={(value) => formatTS(Number(value))}
-              formatter={(value) => [`${round(Number(value ?? 0), 4)} Hz`, 'Frequency']}
-            />
+            <Tooltip content={<MultiStreamTooltip tickLabel="Frame ts" valueSuffix=" Hz" digits={4} />} />
             <Legend wrapperStyle={{ fontSize: 10 }} />
             <ReferenceLine y={fnomHz} stroke="#7dd3a7" strokeDasharray="4 4" label={`FNOM ${fnomHz}`} />
             <Line

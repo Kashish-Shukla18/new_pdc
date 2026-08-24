@@ -11,7 +11,7 @@ For **PMU.001** (`172.24.105.87:4713`), each DATA frame is 88 bytes. After CFG2 
 | Layer | Fields | PMU.001 value |
 |-------|--------|---------------|
 | **Header** | SYNC, frame size, IDCODE, SOC, FRACSEC, CRC | 60 Hz nominal, CRC validated |
-| **STAT word** | 9 status flags (sync error, data error, GPS lock, trigger, etc.) | Parsed, stored in Kafka/Influx — **not shown in UI** |
+| **STAT word** | 9 status flags (sync error, data error, GPS lock, trigger, etc.) | Parsed, stored in Kafka/Postgres — **not shown in UI** |
 | **Phasors (6)** | Polar float: magnitude + angle | See mapping below |
 | **Frequency** | Hz | ~60.0 |
 | **ROCOF** | Hz/s | Small drift |
@@ -35,7 +35,7 @@ For **PMU.001** (`172.24.105.87:4713`), each DATA frame is 88 bytes. After CFG2 
 
 ### Backend computes (but dashboard doesn't receive)
 
-These exist in `parser.Reading` and go to **Kafka/InfluxDB**, but **not** to `/conversation/state`:
+These exist in `parser.Reading` and go to **Kafka/Postgres**, but **not** to `/conversation/state`:
 
 - Voltage imbalance %
 - Sequence components (V+, V−, V0)
@@ -53,7 +53,7 @@ These exist in `parser.Reading` and go to **Kafka/InfluxDB**, but **not** to `/c
 flowchart LR
     PMU["PMU.001\n88-byte frames"] --> Parser["Parser\n~30 fields"]
     Parser --> Kafka["Kafka\nfull JSON"]
-    Parser --> Influx["InfluxDB\n30 fields"]
+    Parser --> Postgres["Postgres\n30 fields"]
     Parser --> Redis["Redis\n7 fields"]
     Parser --> Conv["/conversation/state\n12 fields"]
     Conv --> UI["Dashboard UI"]
@@ -276,7 +276,7 @@ Static content only — no PMU data. No changes needed.
 6. **STAT/GPS lock** indicators on Connectivity
 7. Parse and expose **IB/IC** (PZR.BI, PZR.CI) — fix parser gap
 
-**Higher value** (needs InfluxDB/historical queries):
+**Higher value** (needs Postgres/historical queries):
 8. Long-term phasor trajectory and sag/swell detection
 9. Trigger event capture and replay
 10. Real network RTT probe (replace estimated latency)
