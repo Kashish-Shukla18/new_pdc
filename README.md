@@ -1,6 +1,6 @@
 # PDC
 
-Go-based synchrophasor **Phasor Data Concentrator**. It speaks IEEE C37.118 to PMUs, buffers and fans out data through Kafka, stores live state in Redis and history in InfluxDB, and exposes a real-time React operator dashboard.
+Go-based synchrophasor **Phasor Data Concentrator**. It speaks IEEE C37.118 to PMUs, buffers and fans out data through Kafka, stores live state in Redis and history in Postgres/TimescaleDB, and exposes a real-time React operator dashboard.
 
 Designed for high rate ingest (e.g. **50+ PMUs × ~100 samples/s**): Kafka absorbs burst/backlog; independent consumer groups feed the dashboard and storage without sharing one in-process queue.
 
@@ -26,7 +26,7 @@ PMU ──TCP/UDP C37.118──► Ingress
            ▼                               ▼
    group: pdc-dashboard            group: pdc-sink
    → in-memory SSE bus             → buffered sinkCh
-   → React live UI                 → Redis (live) + InfluxDB (history)
+   → React live UI                 → Redis (live) + Postgres/TimescaleDB (history)
 ```
 
 | Layer | Role |
@@ -36,7 +36,7 @@ PMU ──TCP/UDP C37.118──► Ingress
 | **Processor** | Consumes raw frames; parses; quality-checks; publishes **parsed** readings |
 | **`pmu.readings`** | Fan-out bus for any number of consumer groups |
 | **`pdc-dashboard`** | Feeds the live SSE / conversation state used by the React UI |
-| **`pdc-sink`** | Writes **Redis** (shared live latest) + **InfluxDB** (history) |
+| **`pdc-sink`** | Writes **Redis** (shared live latest) + **Postgres/TimescaleDB** (history) |
 | **Redis** | Shared live-state store; hydrates dashboard after restart; enables multi-instance scale-out |
 | **Disk spools** | Local JSONL retry if Kafka publish or sink store fails |
 | **CFG2 profile store** | Persisted channel layouts under `data/profiles/` so parse works after restart |
@@ -82,10 +82,37 @@ Wait ~15s for Kafka. Host ports:
 |---------|------|
 | Kafka (external) | `localhost:9093` |
 | Redis | `localhost:6380` |
-| InfluxDB | `http://localhost:8087` |
+| TimescaleDB (Postgres) | `localhost:5433` |
+| pgAdmin | `http://localhost:5050` |
 | Prometheus | `http://localhost:9090` |
 
 Operator UI is the **React dashboard** (`dashboard/`).
+
+### Inspect Postgres (SQL / pgAdmin)
+
+Connection string (host, not Docker DNS):
+
+```
+postgres://pdc:pdc@127.0.0.1:5433/pdc?sslmode=disable
+```
+
+pgAdmin: open `http://localhost:5050` (email `admin@example.com` / password `admin`). Add a server:
+
+- Host `timescaledb` if pgAdmin is in Compose, or `host.docker.internal` / `127.0.0.1` if you connect from the host with port `5433`
+- Port `5432` (in-compose) or `5433` (from the host)
+- User/password/database: `pdc` / `pdc` / `pdc`
+
+```sql
+SELECT name, ip, port, active, updated_at FROM pmu_config ORDER BY name;
+
+SELECT time, entity_id, freq, mw, mvar
+FROM pmu_readings
+WHERE entity_id = 'pmu.001'
+ORDER BY time DESC
+LIMIT 20;
+```
+
+The live dashboard still reads Redis / in-memory state, not these tables.
 
 ### 2. PDC
 
@@ -99,7 +126,7 @@ go build -o pdc.exe .
 | Metrics + SSE / conversation API | `http://127.0.0.1:2112` |
 | REST API (PMU CRUD) | `http://127.0.0.1:8081` |
 
-PMU connections load from InfluxDB on startup and can be added at runtime via the dashboard or `POST /api/pmus`.
+PMU connections load from Postgres (`pmu_config`) on startup and can be added at runtime via the dashboard or `POST /api/pmus`. The process **exits on startup** if Postgres is unreachable.
 
 ### 3. React dashboard
 
@@ -140,12 +167,14 @@ Register each device in **Devices → Register New PMU**, or via the API. Refere
 | `output/raw_kafka.go` | Raw frame producer + consumer |
 | `output/kafka.go` | Parsed readings publisher |
 | `output/readings_consumer.go` | Readings consumers (dashboard / sink groups) |
-| `output/influx.go` | Redis + Influx sink |
+| `output/sink.go` | Redis live latest + Postgres history enqueue |
+| `output/postgres/` | Buffered TimescaleDB COPY writer |
 | `output/spool.go` | Disk JSONL retry queues |
+| `sql/init.sql` | Registry + hypertable schema (compose init) |
 | `data/profiles/` | Persisted CFG2 layouts (runtime; gitignored) |
 | `monitoring/` | Prometheus metrics + SSE conversation bus |
 | `api/` | REST PMU management |
-| `store/` | Influx-backed PMU config store |
+| `store/` | Postgres-backed PMU config store |
 | `dashboard/` | React operator UI |
 | `cmd/` | Utilities (`probe-pmu`, `capture-pmu`, …) |
 
@@ -194,7 +223,7 @@ Register each device in **Devices → Register New PMU**, or via the API. Refere
 | `KAFKA_TOPIC_PARTITIONS` | `3` | Partitions when auto-creating readings topic |
 | `KAFKA_READINGS_FANOUT` | `true` | Dashboard + sink consume from Kafka |
 | `KAFKA_DASHBOARD_GROUP` | `pdc-dashboard` | Live UI consumer group |
-| `KAFKA_SINK_GROUP` | `pdc-sink` | Redis/Influx consumer group |
+| `KAFKA_SINK_GROUP` | `pdc-sink` | Redis/Postgres consumer group |
 | `KAFKA_ASYNC` | `true` | Async readings producer |
 | `KAFKA_BATCH_SIZE` | `500` | Readings producer batch |
 | `KAFKA_BATCH_TIMEOUT_MS` | `50` | Readings producer linger |
@@ -208,16 +237,13 @@ Both producers use a **hash balancer on PMU name** so CFG2 and DATA for one devi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENABLE_SINK` | `true` | Redis + Influx writers |
+| `ENABLE_SINK` | `true` | Redis + Postgres history writers |
 | `REDIS_ADDR` | `127.0.0.1:6380` | Redis (shared live latest + timeline) |
 | `REDIS_TTL_SECONDS` | `120` | TTL for `:latest` / `:timeline` keys |
-| `INFLUX_URL` | `http://127.0.0.1:8087` | InfluxDB |
-| `INFLUX_TOKEN` | `my-super-secret-token` | Matches compose init token |
-| `INFLUX_ORG` | `pdc-org` | |
-| `INFLUX_BUCKET` | `synchrophasor` | |
-| `INFLUX_BATCH_SIZE` | `500` | SDK batch |
-| `INFLUX_FLUSH_INTERVAL_MS` | `1000` | SDK flush |
-| `SINK_CHANNEL_SIZE` | `8192` | In-process queue before Redis/Influx |
+| `POSTGRES_DSN` | `postgres://pdc:pdc@127.0.0.1:5433/pdc?sslmode=disable` | TimescaleDB (config + history) |
+| `POSTGRES_BATCH_SIZE` | `500` | History COPY batch |
+| `POSTGRES_FLUSH_INTERVAL_MS` | `1000` | History flush interval |
+| `SINK_CHANNEL_SIZE` | `8192` | In-process queue before Redis/Postgres |
 | `SINK_WORKERS` | `4` | Parallel store workers |
 | `MAX_CLOCK_SKEW` | `24h` | Quality gate clock skew |
 | `DROP_QUALITY_REJECTED` | `false` | If `false`, warn and continue (no data loss) |
@@ -230,7 +256,7 @@ Both producers use a **hash balancer on PMU name** so CFG2 and DATA for one devi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KAFKA_SPOOL_FILE` | `data/spool/kafka_failed.jsonl` | Failed readings publishes |
-| `SINK_SPOOL_FILE` | `data/spool/sink_failed.jsonl` | Failed Redis/Influx stores |
+| `SINK_SPOOL_FILE` | `data/spool/sink_failed.jsonl` | Failed Redis/Postgres stores |
 | `KAFKA_REPLAY_ENABLED` | `true` | Replay readings spool → Kafka |
 | `SINK_REPLAY_ENABLED` | `true` | Replay sink spool → store |
 | `SPOOL_FSYNC` | `true` | fsync on append |
@@ -268,7 +294,7 @@ Prometheus scrapes `host.docker.internal:2112` (see `prometheus/prometheus.yml`)
 | `pdc_readings_consumed_total` | Fan-out consumes (**≈ 2× parsed** with both groups) |
 | `pdc_frames_dropped_total` | Direct-mode handler-pool drops |
 | `pdc_queue_publish_errors_total` | Kafka publish failures |
-| `pdc_store_errors_total` | Redis/Influx / sink-channel pressure |
+| `pdc_store_errors_total` | Redis/Postgres / sink-channel pressure |
 | `pdc_spool_queued_total` / `pdc_spool_replayed_total` | Disk spool activity |
 | `pdc_frame_processing_seconds` | Latency (PMU timestamp → sink path) |
 | `pdc_sink_inflight` | Readings waiting in `sinkCh` |
@@ -286,7 +312,7 @@ Redis is **kept and wired** as the shared live-state layer (not optional decorat
 | Startup hydrate | PDC loads all `:latest` keys into the dashboard bus so UI recovers after restart |
 | Kafka `pdc-dashboard` | Still pushes live SSE updates in-process (low latency) |
 
-**Why keep Redis (scaling):** multiple API/UI processes cannot each hold a full fleet view from one Kafka consumer group (partitions split the fleet). A shared Redis latest-store lets any instance read “current state for all PMUs.” Influx remains history; Kafka remains the buffer/fan-out bus.
+**Why keep Redis (scaling):** multiple API/UI processes cannot each hold a full fleet view from one Kafka consumer group (partitions split the fleet). A shared Redis latest-store lets any instance read “current state for all PMUs.” Postgres/TimescaleDB remains history; Kafka remains the buffer/fan-out bus.
 
 **Why not drop:** you already pay the write cost; without Redis (or an equivalent), scale-out of the live UI needs either N full Kafka consumer groups or sticky single-process memory.  
 **Why not leave write-only:** zero benefit for operators or multi-instance deploy.
@@ -311,8 +337,8 @@ $env:KAFKA_RAW_ASYNC="false"
 $env:KAFKA_ASYNC="true"
 $env:KAFKA_BATCH_SIZE="500"
 $env:KAFKA_BATCH_TIMEOUT_MS="50"
-$env:INFLUX_BATCH_SIZE="500"
-$env:INFLUX_FLUSH_INTERVAL_MS="1000"
+$env:POSTGRES_BATCH_SIZE="500"
+$env:POSTGRES_FLUSH_INTERVAL_MS="1000"
 $env:SINK_CHANNEL_SIZE="8192"
 $env:SINK_WORKERS="4"
 .\pdc.exe -metrics-addr :2112 -api-addr :8081

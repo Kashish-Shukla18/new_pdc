@@ -30,12 +30,12 @@ type pipeline struct {
 	kafkaSpool          *output.ReadingSpool
 	sinkSpool           *output.ReadingSpool
 	dropQualityRejected bool
-	// fanOutViaKafka: when true, dashboard + Redis/Influx are fed by Kafka
+	// fanOutViaKafka: when true, dashboard + Redis/Postgres are fed by Kafka
 	// readings consumers (separate consumer groups). HandleFrame only publishes.
 	fanOutViaKafka bool
 	traceMu        sync.Mutex
 	traceCounts    map[string]int
-	// sinkCh decouples Redis/Influx writes from the consumer hot path.
+	// sinkCh decouples Redis/Postgres writes from the consumer hot path.
 	sinkCh chan parser.Reading
 }
 
@@ -155,7 +155,7 @@ func (p *pipeline) StartReplay(ctx context.Context) {
 	kafkaReplayInterval := envDuration("KAFKA_REPLAY_INTERVAL", 1*time.Second)
 	kafkaReplayBatch := envInt("KAFKA_REPLAY_BATCH", 2000)
 
-	// Sink replay is intentionally conservative to avoid overloading Influx.
+	// Sink replay is intentionally conservative to avoid overloading Postgres.
 	sinkReplayEnabled := envBool("SINK_REPLAY_ENABLED", true)
 	sinkReplayInterval := envDuration("SINK_REPLAY_INTERVAL", 2*time.Second)
 	sinkReplayBatch := envInt("SINK_REPLAY_BATCH", 200)
@@ -225,7 +225,7 @@ func (p *pipeline) startReplayLoop(
 	}()
 }
 
-// StartSinkWorkers drains the sinkCh and writes each reading to Redis + InfluxDB.
+// StartSinkWorkers drains the sinkCh and writes each reading to Redis + Postgres.
 // nWorkers run in parallel so a single slow write doesn't block others.
 func (p *pipeline) StartSinkWorkers(ctx context.Context) {
 	if p.sink == nil {
@@ -523,7 +523,7 @@ func (p *pipeline) OnDashboardReading(_ context.Context, r parser.Reading) error
 	return nil
 }
 
-// OnSinkReading enqueues Redis/Influx work from the pdc-sink consumer group.
+// OnSinkReading enqueues Redis/Postgres work from the pdc-sink consumer group.
 func (p *pipeline) OnSinkReading(_ context.Context, r parser.Reading) error {
 	monitoring.IncReadingsConsumed()
 	p.enqueueSink(r)
@@ -647,7 +647,7 @@ func main() {
 
 	dbStore, err := store.NewStore()
 	if err != nil {
-		log.Fatalf("failed to initialize influx db store: %v", err)
+		log.Fatalf("failed to initialize postgres store: %v", err)
 	}
 	defer dbStore.Close()
 

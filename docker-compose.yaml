@@ -62,26 +62,34 @@ services:
         --save ""
         --appendonly no
 
-  # ── INFLUXDB (time-series storage) ────────────────────────────────────────
-  influxdb:
-    image: influxdb:2.7
+  # ── POSTGRES + TIMESCALEDB (config + history) ─────────────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
     ports:
-      - "8087:8086"
+      - "5433:5432"
     environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: admin
-      DOCKER_INFLUXDB_INIT_PASSWORD: admin123456
-      DOCKER_INFLUXDB_INIT_ORG: pdc-org
-      DOCKER_INFLUXDB_INIT_BUCKET: synchrophasor
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: my-super-secret-token
-      # Storage engine concurrency
-      INFLUXD_STORAGE_WAL_MAX_CONCURRENT_WRITES: "8"
-      INFLUXD_STORAGE_WAL_FSYNC_DELAY: "100ms"
-      # HTTP limits – allow larger batch payloads
-      INFLUXD_HTTP_MAX_BODY_SIZE: "52428800"      # 50 MB
-      INFLUXD_QUERY_CONCURRENCY: "20"
+      POSTGRES_USER: pdc
+      POSTGRES_PASSWORD: pdc
+      POSTGRES_DB: pdc
     volumes:
-      - influxdb-data:/var/lib/influxdb2
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - timescaledb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdc -d pdc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      timescaledb:
+        condition: service_healthy
 
   # ── PROMETHEUS (app monitoring) ────────────────────────────────────────────
   prometheus:
@@ -92,4 +100,4 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
-  influxdb-data:
+  timescaledb-data:

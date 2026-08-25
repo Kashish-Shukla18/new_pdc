@@ -66,7 +66,7 @@ var stageOrder = []stageSpec{
 	{StageReadingsPublish, "Readings Kafka publish", "process"},
 	{StageDashboardRecord, "Dashboard RecordReading", "dashboard"},
 	{StageStateSnapshot, "Dashboard /state JSON", "dashboard"},
-	{StageSinkStore, "Redis + Influx store", "sink"},
+	{StageSinkStore, "Redis + Postgres store", "sink"},
 	{StageE2ERecvToDash, "E2E TCP-complete → dashboard", "e2e"},
 	{StageClockSkewPMU, "PMU clock skew (receive − SOC)", "clock"},
 	{StageE2EPMUToDash, "E2E PMU SOC → dashboard (raw, includes skew)", "clock"},

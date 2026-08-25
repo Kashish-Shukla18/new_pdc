@@ -39,7 +39,7 @@ var (
 		prometheus.CounterOpts{Name: "pdc_queue_publish_errors_total", Help: "Total Kafka publish errors."},
 	)
 	storeErrors = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Redis/Influx store errors."},
+		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Redis/Postgres store errors."},
 	)
 	spoolQueued = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_spool_queued_total", Help: "Total readings queued to local durable spool."},

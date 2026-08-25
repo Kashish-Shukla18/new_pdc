@@ -966,7 +966,7 @@ const conversationPageHTML = `<!doctype html>
         <div class="arrow">→</div>
         <div class="node"><h3>PDC</h3><p id="nodePdc">waiting</p></div>
         <div class="arrow">→</div>
-        <div class="node"><h3>Kafka / Redis / Influx</h3><p id="nodeOut">waiting</p></div>
+        <div class="node"><h3>Kafka / Redis / Postgres</h3><p id="nodeOut">waiting</p></div>
       </div>
     </section>
 
