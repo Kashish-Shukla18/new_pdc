@@ -3,7 +3,7 @@ import type { ConnectivityRow, PMUWithMeta } from '../types/dashboard'
 import { round } from './format'
 import { availabilityOf, jitterOf, latencyOf, packetLossOf, pmuKey, toneFromStatus } from './pmu'
 
-export const RTT_CHART_COLORS = ['#ff5d6c', '#f4b740', '#a07cff', '#3da9fc', '#27d3a2', '#7ee0ff']
+export const RTT_CHART_COLORS = ['#b91c1c', '#b45309', '#6d28d9', '#2563eb', '#15803d', '#475569']
 /** Rolling samples for the latency chart (~1 Hz poll → ~1 min). */
 export const RTT_WINDOW = 60
 

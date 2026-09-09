@@ -2,7 +2,7 @@ import type { DashboardState, NewPMUForm } from '../types/dashboard'
 
 export const INDIA_CENTER: [number, number] = [22.5, 80.5]
 
-export const CHART_COLORS = ['#4de0ff', '#7dff93', '#ffd166', '#ff719a', '#ab82ff', '#ffa84d']
+export const CHART_COLORS = ['#2563eb', '#15803d', '#b45309', '#b91c1c', '#6d28d9', '#c2410c']
 
 export const emptyDashboardState: DashboardState = {
   nowUtc: new Date().toISOString(),

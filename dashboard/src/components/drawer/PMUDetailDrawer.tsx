@@ -42,8 +42,7 @@ export function PMUDetailDrawer() {
           {drawerPMU.lastError && <p><strong>Last error:</strong> {drawerPMU.lastError}</p>}
           <button
             type="button"
-            className="btn primary"
-            style={{ marginTop: '16px' }}
+            className="btn primary drawer-edit-btn"
             onClick={() => openEditPMU(drawerPMU.name)}
           >
             <Pencil size={14} /> Edit device

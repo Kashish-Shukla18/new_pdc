@@ -27,10 +27,6 @@ export function ConnectivityRecommendations({ recommendations }: Props) {
               <h4>{rec.title}</h4>
               <p>{rec.desc}</p>
             </div>
-            <div className="conn-rec-actions">
-              <button type="button" className="btn">Run</button>
-              <button type="button" className="btn primary">Ack</button>
-            </div>
           </article>
         ))}
       </div>

@@ -1,7 +1,5 @@
 import type { LivePMUState, PMUConfig, PMUMeta, PMUWithMeta } from '../types/dashboard'
 
-/** Display-only labels for the field PMU — everything else comes from live config/telemetry. */
-export const FIELD_PMU_VENDOR = 'ABB'
 export const FIELD_PMU_REGION = 'FIELD'
 
 export function pmuKey(name: string) {
@@ -14,7 +12,7 @@ export function metaForDB(name: string, config?: PMUConfig): PMUMeta {
     region: config?.region || FIELD_PMU_REGION,
     state: '-',
     voltage: '-',
-    vendor: FIELD_PMU_VENDOR,
+    vendor: '-',
     primaryIp: config?.ip || '0.0.0.0',
     redundantIp: '-',
     // 0 = use CFG-2 DATA_RATE from live state (30/60/120), not a hardcoded 30.

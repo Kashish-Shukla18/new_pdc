@@ -15,9 +15,12 @@ import (
 
 	"pdc/aligner"
 	"pdc/api"
+	"pdc/config"
+	"pdc/internal/instance"
 	"pdc/manager"
 	"pdc/monitoring"
 	"pdc/output"
+	"pdc/output/postgres"
 	"pdc/parser"
 	"pdc/receiver"
 	"pdc/store"
@@ -79,10 +82,27 @@ func envInt(key string, fallback int) int {
 	return n
 }
 
-func newPipeline(ctx context.Context) *pipeline {
+func validatePMUPorts(pmus []config.PMUConfig) error {
+	byPort := make(map[int]string, len(pmus))
+	for _, p := range pmus {
+		if p.Port <= 0 {
+			continue
+		}
+		if other, ok := byPort[p.Port]; ok {
+			return fmt.Errorf("duplicate TCP port %d: %s and %s (each PMU needs its own device port)", p.Port, p.Name, other)
+		}
+		byPort[p.Port] = p.Name
+	}
+	return nil
+}
+
+func newPipeline(ctx context.Context, kafkaEnabled bool) *pipeline {
 	maxClockSkew := envDuration("MAX_CLOCK_SKEW", 24*time.Hour)
 	checker := aligner.NewChecker(maxClockSkew)
-	publisher := output.NewPublisherFromEnv()
+	var publisher *output.Publisher
+	if kafkaEnabled {
+		publisher = output.NewPublisherFromEnv()
+	}
 	kafkaSpool := output.NewReadingSpool(envOrFallback("KAFKA_SPOOL_FILE", "data/spool/kafka_failed.jsonl"))
 	sinkSpool := output.NewReadingSpool(envOrFallback("SINK_SPOOL_FILE", "data/spool/sink_failed.jsonl"))
 	dropQualityRejected := envBool("DROP_QUALITY_REJECTED", false)
@@ -117,13 +137,14 @@ func newPipeline(ctx context.Context) *pipeline {
 	primeSpoolBacklog("sink", sinkSpool)
 
 	// Sink channel: buffer enough for several seconds of all-PMU traffic.
-	// At 50fps × 20 PMUs = 1000 frames/s; 8192 gives ~8 s of headroom.
-	sinkBufSize := envInt("SINK_CHANNEL_SIZE", 8192)
+	// At 50fps × 10 PMUs = 500 frames/s; 16384 gives ~33 s of headroom.
+	sinkBufSize := envInt("SINK_CHANNEL_SIZE", 16384)
 	if sinkBufSize < 256 {
 		sinkBufSize = 256
 	}
 
 	fanOutViaKafka := publisher != nil && envBool("KAFKA_READINGS_FANOUT", true)
+	output.ConfigureFrameCapture(envInt("FRAME_CAPTURE_SIZE", 1500))
 	return &pipeline{
 		checker:             checker,
 		publisher:           publisher,
@@ -160,9 +181,11 @@ func (p *pipeline) StartReplay(ctx context.Context) {
 	sinkReplayInterval := envDuration("SINK_REPLAY_INTERVAL", 2*time.Second)
 	sinkReplayBatch := envInt("SINK_REPLAY_BATCH", 200)
 
-	p.startReplayLoop(ctx, "kafka", p.kafkaSpool, kafkaReplayEnabled, kafkaReplayInterval, kafkaReplayBatch, func(replayCtx context.Context, r parser.Reading) error {
-		return p.publisher.Publish(replayCtx, r)
-	})
+	if p.publisher != nil {
+		p.startReplayLoop(ctx, "kafka", p.kafkaSpool, kafkaReplayEnabled, kafkaReplayInterval, kafkaReplayBatch, func(replayCtx context.Context, r parser.Reading) error {
+			return p.publisher.Publish(replayCtx, r)
+		})
+	}
 
 	p.startReplayLoop(ctx, "sink", p.sinkSpool, sinkReplayEnabled, sinkReplayInterval, sinkReplayBatch, func(replayCtx context.Context, r parser.Reading) error {
 		if p.sink == nil {
@@ -452,6 +475,8 @@ func (p *pipeline) handleFrame(ctx context.Context, pmuName string, raw []byte, 
 		monitoring.UpdateClockOffset(pmuName, meta.receivedAt, reading.Timestamp)
 	}
 
+	output.RecordSinkFrameAsync(pmuName, raw, postgres.RowFromReading(reading))
+
 	if p.fanOutViaKafka {
 		// Split processor: dashboard/sink come from Kafka consumer groups.
 		if p.publisher != nil {
@@ -634,8 +659,8 @@ func (p *pipeline) HydrateFromRedis(ctx context.Context) {
 func main() {
 	metricsAddr := flag.String("metrics-addr", ":2112", "prometheus metrics listen address")
 	apiAddr := flag.String("api-addr", ":8081", "REST API listen address")
-	modeFlag := flag.String("mode", envOrFallback("PDC_MODE", "all"),
-		"run mode: all (ingress+processor via Kafka), ingress (TCP→raw Kafka), processor (raw Kafka→parse/sink), direct (TCP→parse, bypass raw Kafka)")
+	modeFlag := flag.String("mode", envOrFallback("PDC_MODE", "direct"),
+		"run mode: direct (TCP→parse, recommended), all (TCP→parse+raw Kafka), ingress (TCP→raw Kafka), processor (raw Kafka→parse/sink)")
 	flag.Parse()
 
 	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
@@ -654,7 +679,16 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	monitoring.StartServer(ctx, *metricsAddr)
+	release, err := instance.Acquire()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer release()
+
+	if err := monitoring.StartServer(ctx, *metricsAddr, output.RegisterFrameCaptureHandler); err != nil {
+		log.Fatalf("cannot start metrics server: %v", err)
+	}
+	monitoring.StartDashboardWorkers(ctx, envInt("DASHBOARD_QUEUE_SIZE", 16384), envInt("DASHBOARD_WORKERS", 4))
 	log.Printf("prometheus metrics listening on %s/metrics", *metricsAddr)
 	log.Printf("PDC mode=%s", mode)
 
@@ -688,7 +722,8 @@ func main() {
 	var rawConsumer *output.RawFrameConsumer
 
 	if runProcessor {
-		pl = newPipeline(ctx)
+		kafkaEnabled := mode != "direct" || envBool("KAFKA_ENABLED", false)
+		pl = newPipeline(ctx, kafkaEnabled)
 		defer pl.Close()
 		// Same-process live path: parse → dashboard/sink without Kafka round-trips.
 		// Kafka remains for durability and split processor/ingress deployments.
@@ -780,23 +815,36 @@ func main() {
 			ingressPub = rawPub
 		}
 		pmuManager = manager.NewPMUManager(directHandler, ingressPub)
-		api.StartServer(*apiAddr, dbStore, pmuManager)
+		if err := api.StartServer(ctx, *apiAddr, dbStore, pmuManager); err != nil {
+			log.Fatalf("cannot start API server: %v", err)
+		}
 		log.Printf("REST API listening on %s", *apiAddr)
 
 		pmus, err := dbStore.GetAllPMUs(ctx)
 		if err != nil {
-			log.Printf("failed to load PMUs from DB: %v", err)
-		} else {
-			for _, pmu := range pmus {
-				if err := pmuManager.StartPMU(ctx, pmu); err != nil {
-					log.Printf("failed to start PMU %s: %v", pmu.Name, err)
-				}
+			log.Fatalf("failed to load PMUs from DB: %v", err)
+		}
+		if err := validatePMUPorts(pmus); err != nil {
+			log.Fatalf("invalid PMU config: %v", err)
+		}
+		stagger := envDuration("PMU_STARTUP_STAGGER", 2*time.Second)
+			for i, pmu := range pmus {
+				pmus[i].Normalize()
+				pmu = pmus[i]
+			if i > 0 && stagger > 0 {
+				log.Printf("PMU startup stagger: waiting %s before %s", stagger, pmu.Name)
+				time.Sleep(stagger)
+			}
+			if err := pmuManager.StartPMU(ctx, pmu); err != nil {
+				log.Fatalf("failed to start PMU %s: %v", pmu.Name, err)
 			}
 		}
 	} else {
 		// Processor-only: still expose API for PMU CRUD, but no live TCP receivers.
 		pmuManager = manager.NewPMUManager(nil, nil)
-		api.StartServer(*apiAddr, dbStore, pmuManager)
+		if err := api.StartServer(ctx, *apiAddr, dbStore, pmuManager); err != nil {
+			log.Fatalf("cannot start API server: %v", err)
+		}
 		log.Printf("REST API listening on %s (processor-only; PMU TCP owned by ingress)", *apiAddr)
 	}
 

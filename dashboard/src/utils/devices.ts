@@ -1,18 +1,18 @@
 import type { PMUWithMeta } from '../types/dashboard'
-import { availabilityOf, latencyOf, packetLossOf, toneFromStatus } from './pmu'
+import { availabilityOf, latencyOf, packetLossOf } from './pmu'
 import { round } from './format'
 
 export const REGION_COLORS: Record<string, string> = {
-  NRLDC: '#3da9fc',
-  WRLDC: '#27d3a2',
-  SRLDC: '#a07cff',
-  ERLDC: '#f4b740',
-  NERLDC: '#ff5d6c',
-  Unknown: '#7ee0ff',
+  NRLDC: '#2563eb',
+  WRLDC: '#15803d',
+  SRLDC: '#6d28d9',
+  ERLDC: '#b45309',
+  NERLDC: '#b91c1c',
+  Unknown: '#475569',
 }
 
 export const VOLTAGE_CLASSES = ['765 kV', '400 kV', '220 kV', 'HVDC', '132 kV'] as const
-export const VOLTAGE_COLORS = ['#3da9fc', '#7ee0ff', '#27d3a2', '#a07cff', '#f4b740']
+export const VOLTAGE_COLORS = ['#2563eb', '#475569', '#15803d', '#6d28d9', '#b45309']
 
 export type DeviceSummary = {
   label: string
@@ -22,10 +22,7 @@ export type DeviceSummary = {
 }
 
 export function voltageClassFor(pmu: PMUWithMeta): string {
-  if (pmu.meta.voltage && pmu.meta.voltage !== '-') return pmu.meta.voltage
-  let hash = 0
-  for (let i = 0; i < pmu.name.length; i++) hash = (hash + pmu.name.charCodeAt(i) * (i + 1)) % VOLTAGE_CLASSES.length
-  return VOLTAGE_CLASSES[hash]
+  return pmu.meta.voltage && pmu.meta.voltage !== '-' ? pmu.meta.voltage : '—'
 }
 
 export function vendorFor(pmu: PMUWithMeta): string {
@@ -50,10 +47,10 @@ export function computeDeviceSummary(pmus: PMUWithMeta[]): DeviceSummary[] {
 
   return [
     { label: 'Registered PMUs', value: String(pmus.length), subtext: `${regions} control regions`, tone: 'accent' },
-    { label: 'Healthy', value: String(healthy), subtext: 'full FPS · sync OK', tone: 'ok' },
+    { label: 'Healthy', value: String(healthy), subtext: 'connected without quality loss', tone: 'ok' },
     { label: 'Degraded', value: String(degraded), subtext: 'quality or loss flags', tone: degraded > 0 ? 'warn' : 'neutral' },
-    { label: 'Offline', value: String(offline), subtext: 'no frames > 30 s', tone: offline > 0 ? 'bad' : 'neutral' },
-    { label: 'Avg availability', value: `${avgAvail}%`, subtext: 'rolling 60 min window', tone: avgAvail < 95 ? 'warn' : 'ok' },
+    { label: 'Offline', value: String(offline), subtext: 'no frame seen in the live window', tone: offline > 0 ? 'bad' : 'neutral' },
+    { label: 'Avg availability', value: `${avgAvail}%`, subtext: 'current FPS against configured rate', tone: avgAvail < 95 ? 'warn' : 'ok' },
     { label: 'Avg latency', value: `${round(pmus.filter((p) => p.connected).reduce((s, p) => s + latencyOf(p), 0) / Math.max(1, pmus.filter((p) => p.connected).length), 0)} ms`, subtext: 'connected streams only', tone: 'neutral' },
   ]
 }

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { PMUWithMeta } from '../../types/dashboard'
 import { round } from '../../utils/format'
 import {
@@ -7,8 +8,6 @@ import {
   resolveTargetFps,
   statusLabel,
   toneFromStatus,
-  vendorFor,
-  voltageClassFor,
   packetLossOf,
 } from '../../utils/devices'
 
@@ -24,7 +23,10 @@ type Props = {
   onRowClick: (name: string) => void
   onEdit: (name: string) => void
   onDelete: (name: string, e: React.MouseEvent) => void
+  deletingPMUName: string
 }
+
+const PAGE_SIZE = 20
 
 export function DeviceInventoryTable({
   pmus,
@@ -38,14 +40,23 @@ export function DeviceInventoryTable({
   onRowClick,
   onEdit,
   onDelete,
+  deletingPMUName,
 }: Props) {
+  const [page, setPage] = useState(0)
+  const pageCount = Math.max(1, Math.ceil(filteredDevices.length / PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+  const pageStart = currentPage * PAGE_SIZE
+  const visibleDevices = filteredDevices.slice(pageStart, pageStart + PAGE_SIZE)
+
   return (
     <section className="panel device-table-panel">
       <div className="panel-head">
         <div>
           <h3>Registered PMUs</h3>
           <p className="panel-sub">
-            {filteredDevices.length} of {pmus.length} devices shown · click a row for full detail
+            {filteredDevices.length
+              ? `${pageStart + 1}–${Math.min(pageStart + PAGE_SIZE, filteredDevices.length)} of ${filteredDevices.length}`
+              : '0'} filtered devices · {pmus.length} registered · click a row for details
           </p>
         </div>
       </div>
@@ -53,10 +64,19 @@ export function DeviceInventoryTable({
       <div className="device-filters">
         <input
           value={deviceSearch}
-          onChange={(event) => setDeviceSearch(event.target.value)}
-          placeholder="Search substation, ID, IP, vendor…"
+          onChange={(event) => {
+            setPage(0)
+            setDeviceSearch(event.target.value)
+          }}
+          aria-label="Search devices"
         />
-        <select value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)}>
+        <select
+          value={regionFilter}
+          onChange={(event) => {
+            setPage(0)
+            setRegionFilter(event.target.value)
+          }}
+        >
           <option value="ALL">All Regions</option>
           {Array.from(new Set(pmus.map((pmu) => pmu.meta.region))).map((region) => (
             <option key={region} value={region}>
@@ -64,7 +84,13 @@ export function DeviceInventoryTable({
             </option>
           ))}
         </select>
-        <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+        <select
+          value={statusFilter}
+          onChange={(event) => {
+            setPage(0)
+            setStatusFilter(event.target.value)
+          }}
+        >
           <option value="ALL">All Status</option>
           <option value="OK">Healthy</option>
           <option value="WARN">Degraded</option>
@@ -79,9 +105,6 @@ export function DeviceInventoryTable({
               <th>PMU ID</th>
               <th>Substation</th>
               <th>Region</th>
-              <th>State</th>
-              <th>Voltage</th>
-              <th>Vendor / Model</th>
               <th>IP Address</th>
               <th>FPS</th>
               <th>Status</th>
@@ -91,7 +114,7 @@ export function DeviceInventoryTable({
             </tr>
           </thead>
           <tbody>
-            {filteredDevices.map((pmu) => {
+            {visibleDevices.map((pmu) => {
               const loss = packetLossOf(pmu)
               const tone = toneFromStatus(pmu.connected, loss)
               const label = statusLabel(pmu)
@@ -104,15 +127,8 @@ export function DeviceInventoryTable({
                   </td>
                   <td>
                     <span className="device-primary">{pmu.meta.substation}</span>
-                    <span className="device-muted">{pmu.meta.region} corridor</span>
                   </td>
                   <td>{pmu.meta.region}</td>
-                  <td>{pmu.meta.state}</td>
-                  <td><span className="voltage-tag">{voltageClassFor(pmu)}</span></td>
-                  <td>
-                    <span className="device-primary">{vendorFor(pmu)}</span>
-                    <span className="device-muted">RES670</span>
-                  </td>
                   <td><code className="mono-ip">{pmu.meta.primaryIp}</code></td>
                   <td>
                     <span className={fps >= target * 0.7 ? 'fps-ok' : 'fps-warn'}>
@@ -140,9 +156,10 @@ export function DeviceInventoryTable({
                       <button
                         type="button"
                         className="btn ghost device-disconnect"
+                        disabled={deletingPMUName === pmu.name}
                         onClick={(e) => onDelete(pmu.name, e)}
                       >
-                        Disconnect
+                        {deletingPMUName === pmu.name ? 'Removing…' : 'Disconnect'}
                       </button>
                     </div>
                   </td>
@@ -152,6 +169,27 @@ export function DeviceInventoryTable({
           </tbody>
         </table>
       </div>
+      {pageCount > 1 && (
+        <div className="device-pagination" aria-label="Device table pagination">
+          <button
+            type="button"
+            className="btn ghost"
+            disabled={currentPage === 0}
+            onClick={() => setPage((value) => Math.max(0, value - 1))}
+          >
+            Previous
+          </button>
+          <span>Page {currentPage + 1} of {pageCount}</span>
+          <button
+            type="button"
+            className="btn ghost"
+            disabled={currentPage >= pageCount - 1}
+            onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
+          >
+            Next
+          </button>
+        </div>
+      )}
     </section>
   )
 }

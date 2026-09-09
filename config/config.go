@@ -31,16 +31,25 @@ func (p *PMUConfig) Addr() string {
 // Timeout returns the dial/read timeout as a time.Duration.
 func (p *PMUConfig) Timeout() time.Duration {
 	if p.TimeoutSec <= 0 {
-		return 5 * time.Second
+		return 60 * time.Second
 	}
 	return time.Duration(p.TimeoutSec) * time.Second
+}
+
+// DataReadTimeout is the idle timeout while waiting for the next DATA frame.
+// Field PMUs can have multi-second gaps between bursts; keep this generous.
+func (p *PMUConfig) DataReadTimeout() time.Duration {
+	t := p.Timeout()
+	if t < 60*time.Second {
+		return 60 * time.Second
+	}
+	return t
 }
 
 // ReconnectInterval returns the reconnect back-off as a time.Duration.
 func (p *PMUConfig) ReconnectInterval() time.Duration {
 	if p.ReconnectSec <= 0 {
-		// Short default: many field PMUs drop TCP DATA after ~10s or allow only one client.
-		return 2 * time.Second
+		return 5 * time.Second
 	}
 	return time.Duration(p.ReconnectSec) * time.Second
 }
@@ -51,6 +60,22 @@ func (p *PMUConfig) NetworkProtocol() string {
 		return "udp"
 	}
 	return "tcp"
+}
+
+// Normalize fills defaults and fixes common UI copy-paste mistakes (e.g. tcp_port=4714 on TCP PMUs).
+func (p *PMUConfig) Normalize() {
+	if p.Protocol == "" {
+		p.Protocol = "tcp"
+	}
+	if p.NetworkProtocol() == "tcp" {
+		p.TCPPort = 0
+	}
+	if p.TimeoutSec <= 0 {
+		p.TimeoutSec = 60
+	}
+	if p.ReconnectSec <= 0 {
+		p.ReconnectSec = 5
+	}
 }
 
 // Config is the top-level configuration loaded from pmus.yaml.
