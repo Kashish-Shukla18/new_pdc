@@ -37,7 +37,13 @@ export function displayPhasors(phasors: NamedPhasorView[] | undefined): DisplayP
       }
     })
     .sort((a, b) => a.order - b.order)
-    .map(({ order: _, ...rest }) => rest)
+    .map(({ name, magnitude, angleDeg, label, cfgName }) => ({
+      name,
+      magnitude,
+      angleDeg,
+      label,
+      cfgName,
+    }))
 }
 
 /** CFG-2 list for the profile panel: "VA (PZR.AV), …" */

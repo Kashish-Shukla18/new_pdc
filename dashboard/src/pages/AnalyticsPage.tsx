@@ -39,17 +39,23 @@ export function AnalyticsPage() {
     <div className="analytics-page">
       <AnalyticsKpiGrid items={analyticsKpis} />
 
+      <section className="analytics-grid-2">
+        <PhasorMagnitudeChart pmus={pmus} kind="voltage" />
+        <PhasorMagnitudeChart pmus={pmus} kind="current" />
+      </section>
+
       <section className="panel analytics-toolbar">
         <div className="panel-head">
           <div>
-            <h3>Phasor focus</h3>
-            <p className="panel-sub">V/I charts and diagrams use the selected PMU</p>
+            <h3>Phasor diagram PMU</h3>
+            <p className="panel-sub">Select the PMU used only by the voltage and current diagrams</p>
           </div>
           <div className="panel-tools-inline">
             <select
               value={selectedName}
               onChange={(event) => setAnalyticsPMUName(event.target.value)}
               disabled={!pmus.length}
+              aria-label="Select PMU for phasor diagrams"
             >
               {pmus.map((pmu) => (
                 <option key={pmu.name} value={pmu.name}>
@@ -59,19 +65,6 @@ export function AnalyticsPage() {
             </select>
           </div>
         </div>
-      </section>
-
-      <section className="analytics-grid-2">
-        <PhasorMagnitudeChart
-          trends={selected?.trends ?? []}
-          kind="voltage"
-          pmuName={selectedName || '—'}
-        />
-        <PhasorMagnitudeChart
-          trends={selected?.trends ?? []}
-          kind="current"
-          pmuName={selectedName || '—'}
-        />
       </section>
 
       <section className="analytics-grid-2">

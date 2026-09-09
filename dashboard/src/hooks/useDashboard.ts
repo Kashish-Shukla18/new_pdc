@@ -5,7 +5,6 @@ import {
   computeAnalyticsKpis,
   computeAnalyticsRecs,
   computeAnglePairs,
-  topAnglePairsForChart,
 } from '../utils/analytics'
 import {
   computeConnectivityKpis,
@@ -33,10 +32,8 @@ import {
   buildOfflinePMU,
   metaForDB,
   packetLossOf,
-  pmuKey,
   toneFromStatus,
 } from '../utils/pmu'
-import { displayPhasors } from '../utils/phasorLabels'
 
 
 export function useDashboard() {
@@ -60,8 +57,13 @@ export function useDashboard() {
   const [newPMU, setNewPMU] = useState<NewPMUForm>(defaultNewPMU)
   const [editingPMUName, setEditingPMUName] = useState('')
   const [editPMU, setEditPMU] = useState<EditPMUForm | null>(null)
+  const [addSaving, setAddSaving] = useState(false)
+  const [addError, setAddError] = useState('')
   const [updateSaving, setUpdateSaving] = useState(false)
   const [updateError, setUpdateError] = useState('')
+  const [deletingPMUName, setDeletingPMUName] = useState('')
+  const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  const [loadError, setLoadError] = useState('')
   const [uiTiming, setUiTiming] = useState<UiTiming>({ fetchMs: 0, jsonMs: 0, totalMs: 0 })
 
   const openEditPMU = useCallback((name: string) => {
@@ -107,6 +109,10 @@ export function useDashboard() {
         setUpdateError(text || 'Failed to update device')
         return
       }
+      setDbConfigs((current) =>
+        current.map((config) => config.name === editPMU.name ? { ...config, ...editPMU } : config),
+      )
+      setNotice({ type: 'success', message: `${editPMU.name} was updated successfully.` })
       closeEditPMU()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
@@ -119,6 +125,8 @@ export function useDashboard() {
 
   const handleAddPMU = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
+    setAddSaving(true)
+    setAddError('')
     try {
       const res = await fetch('/api/pmus', {
         method: 'POST',
@@ -127,30 +135,46 @@ export function useDashboard() {
       })
       if (!res.ok) {
         const text = await res.text()
-        alert('Failed to connect PMU: ' + text)
+        setAddError(text || 'Failed to connect PMU.')
         return
       }
       setShowAddPMU(false)
+      setDbConfigs((current) => {
+        const next = newPMU as PMUConfig
+        return current.some((config) => config.name === next.name)
+          ? current.map((config) => config.name === next.name ? next : config)
+          : [...current, next]
+      })
+      setNewPMU(defaultNewPMU)
+      setNotice({ type: 'success', message: `${newPMU.name} was added successfully.` })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
-      alert('Error connecting PMU: ' + message)
+      setAddError(`Could not connect PMU: ${message}`)
       console.error(err)
+    } finally {
+      setAddSaving(false)
     }
   }, [newPMU])
 
   const handleDeletePMU = useCallback(async (name: string, e: React.MouseEvent) => {
     e.stopPropagation()
     if (!confirm(`Disconnect and delete PMU ${name}?`)) return
+    setDeletingPMUName(name)
     try {
       const res = await fetch(`/api/pmus/${name}`, { method: 'DELETE' })
       if (!res.ok) {
         const text = await res.text()
-        alert('Failed to delete PMU: ' + text)
+        setNotice({ type: 'error', message: text || `Failed to delete ${name}.` })
+        return
       }
+      setDbConfigs((current) => current.filter((config) => config.name !== name))
+      setNotice({ type: 'success', message: `${name} was disconnected and removed.` })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
-      alert('Error deleting PMU: ' + message)
+      setNotice({ type: 'error', message: `Could not delete ${name}: ${message}` })
       console.error(err)
+    } finally {
+      setDeletingPMUName('')
     }
   }, [])
 
@@ -177,9 +201,13 @@ export function useDashboard() {
             jsonMs: tJson - tNet,
             totalMs: tJson - t0,
           })
+          setLoadError('')
+        } else {
+          setLoadError(`Live state request failed (${stateRes.status}).`)
         }
       } catch {
         // Keep last good snapshot visible.
+        setLoadError('Live data is unavailable. Check that the PDC is running on port 2112.')
       }
     }
 
@@ -189,9 +217,12 @@ export function useDashboard() {
         if (configRes.ok) {
           const configs = (await configRes.json()) as PMUConfig[]
           setDbConfigs(configs)
+        } else {
+          setLoadError(`PMU configuration request failed (${configRes.status}).`)
         }
       } catch {
         // Keep last configs.
+        setLoadError('PMU configuration is unavailable. Check the API on port 8081.')
       }
     }
 
@@ -273,32 +304,6 @@ export function useDashboard() {
       connected: value.connected,
       availability: value.total ? value.availability / value.total : 0,
     }))
-  }, [pmus])
-
-  // Fleet charts merge only what Overview selects; keep a light default for other consumers.
-  const mergedTrend = useMemo(() => {
-    const rows = new Map<number, Record<string, number>>()
-    const chartPMUs = pmus.slice(0, 8)
-    for (const pmu of chartPMUs) {
-      const key = pmuKey(pmu.name)
-      const trend = pmu.trends.slice(-90)
-      const fnom = pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : 60
-      for (const point of trend) {
-        const row = rows.get(point.ts) ?? { ts: point.ts }
-        const freqDev =
-          typeof point.frequencyDev === 'number'
-            ? point.frequencyDev
-            : point.frequency - fnom
-        row[`${key}__frequency`] = point.frequency
-        row[`${key}__frequencyDev`] = freqDev
-        row[`${key}__mw`] = point.mw
-        row[`${key}__mvar`] = point.mvar
-        row[`${key}__rocof`] = point.rocof
-        row.fnom = fnom
-        rows.set(point.ts, row)
-      }
-    }
-    return Array.from(rows.values()).sort((a, b) => a.ts - b.ts)
   }, [pmus])
 
   const systemCounts = useMemo(() => {
@@ -398,8 +403,12 @@ export function useDashboard() {
     isPaused,
   )
 
-  const anglePairs = useMemo(() => computeAnglePairs(pmus), [pmus])
-  const chartAnglePairs = useMemo(() => topAnglePairsForChart(pmus), [pmus])
+  const onlinePMUs = useMemo(() => pmus.filter((pmu) => pmu.connected), [pmus])
+  const anglePairs = useMemo(
+    () => computeAnglePairs(onlinePMUs, onlinePMUs.length * (onlinePMUs.length - 1) / 2),
+    [onlinePMUs],
+  )
+  const chartAnglePairs = anglePairs
 
   const analyticsRecs = useMemo(
     () => computeAnalyticsRecs(pmus, anglePairs, connectivityRows, events),
@@ -451,23 +460,6 @@ export function useDashboard() {
     { id: 'docs', label: 'Documentation', section: 'Resources' },
   ], [pmus.length, connectivityRows])
 
-  const phasorItems = useMemo(() => {
-    const channels = selectedFramePMU?.lastChannels?.phasors
-    if (channels?.length) {
-      return displayPhasors(channels).map((p) => ({
-        label: p.label,
-        cfgName: p.cfgName,
-        value: { magnitude: p.magnitude, angleDeg: p.angleDeg },
-      }))
-    }
-    return [
-      { label: 'VA', cfgName: 'VA', value: selectedFramePMU?.lastPhasor?.va },
-      { label: 'VB', cfgName: 'VB', value: selectedFramePMU?.lastPhasor?.vb },
-      { label: 'VC', cfgName: 'VC', value: selectedFramePMU?.lastPhasor?.vc },
-      { label: 'IA', cfgName: 'IA', value: selectedFramePMU?.lastPhasor?.ia },
-    ]
-  }, [selectedFramePMU])
-
   return {
     dashboard,
     pmus,
@@ -500,7 +492,10 @@ export function useDashboard() {
     newPMU,
     setNewPMU,
     handleAddPMU,
+    addSaving,
+    addError,
     handleDeletePMU,
+    deletingPMUName,
     editingPMUName,
     editingPMU,
     editPMU,
@@ -510,8 +505,10 @@ export function useDashboard() {
     handleUpdatePMU,
     updateSaving,
     updateError,
+    notice,
+    setNotice,
+    loadError,
     regionSummary,
-    mergedTrend,
     systemCounts,
     frameRate,
     systemTone,
@@ -533,7 +530,6 @@ export function useDashboard() {
     analyticsRecs,
     filteredHelp,
     navItems,
-    phasorItems,
     uiTiming,
   }
 }

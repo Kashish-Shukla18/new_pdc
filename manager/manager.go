@@ -12,10 +12,15 @@ import (
 	"pdc/receiver"
 )
 
+type pmuRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // PMUManager keeps track of active PMU receivers and handles starting/stopping them dynamically.
 type PMUManager struct {
 	mu        sync.Mutex
-	receivers map[string]context.CancelFunc
+	receivers map[string]*pmuRun
 	handler   receiver.FrameHandler
 	rawPub    receiver.RawFramePublisher
 }
@@ -24,7 +29,7 @@ type PMUManager struct {
 // rawPub, when non-nil, enables ingress mode (TCP → Kafka). handler is used for direct mode.
 func NewPMUManager(handler receiver.FrameHandler, rawPub receiver.RawFramePublisher) *PMUManager {
 	return &PMUManager{
-		receivers: make(map[string]context.CancelFunc),
+		receivers: make(map[string]*pmuRun),
 		handler:   handler,
 		rawPub:    rawPub,
 	}
@@ -44,10 +49,14 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 	}
 
 	pmuCtx, cancel := context.WithCancel(ctx)
-	m.receivers[cfg.Name] = cancel
+	done := make(chan struct{})
+	m.receivers[cfg.Name] = &pmuRun{cancel: cancel, done: done}
 
 	r := receiver.New(cfg, m.handler, m.rawPub)
-	go r.Run(pmuCtx)
+	go func() {
+		defer close(done)
+		r.Run(pmuCtx)
+	}()
 
 	mode := "direct"
 	if m.rawPub != nil && m.handler != nil {
@@ -56,26 +65,29 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 		mode = "ingress"
 	}
 	monitoring.RecordConversation(cfg.Name, "SYSTEM", "PDC", "manager", "ok",
-		fmt.Sprintf("Started PMU receiver (%s)", mode))
-	log.Printf("[Manager] Started PMU receiver for %s (%s)", cfg.Name, mode)
+		fmt.Sprintf("Started PMU receiver (%s) %s:%d", mode, cfg.IP, cfg.Port))
+	log.Printf("[Manager] Started PMU receiver for %s (%s) %s:%d", cfg.Name, mode, cfg.IP, cfg.Port)
 	return nil
 }
 
-// StopPMU stops a running PMU receiver.
+// StopPMU stops a running PMU receiver and waits until its TCP loop has exited.
 func (m *PMUManager) StopPMU(name string) error {
 	m.mu.Lock()
-	cancel, exists := m.receivers[name]
+	run, exists := m.receivers[name]
 	if !exists {
 		m.mu.Unlock()
 		return fmt.Errorf("PMU %s is not running", name)
 	}
-
-	cancel()
+	run.cancel()
 	delete(m.receivers, name)
+	done := run.done
 	m.mu.Unlock()
 
-	// Allow UDP/TCP sockets to leave TIME_WAIT / finish Close before re-bind.
-	time.Sleep(250 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		log.Printf("[Manager] PMU %s receiver did not exit within 15s after stop", name)
+	}
 
 	monitoring.RecordConversation(name, "SYSTEM", "PDC", "manager", "warn", "Stopped PMU receiver")
 	log.Printf("[Manager] Stopped PMU receiver for %s", name)
@@ -85,10 +97,15 @@ func (m *PMUManager) StopPMU(name string) error {
 // StopAll stops all running PMU receivers.
 func (m *PMUManager) StopAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	runs := make([]*pmuRun, 0, len(m.receivers))
+	for _, run := range m.receivers {
+		run.cancel()
+		runs = append(runs, run)
+	}
+	m.receivers = make(map[string]*pmuRun)
+	m.mu.Unlock()
 
-	for name, cancel := range m.receivers {
-		cancel()
-		delete(m.receivers, name)
+	for _, run := range runs {
+		<-run.done
 	}
 }

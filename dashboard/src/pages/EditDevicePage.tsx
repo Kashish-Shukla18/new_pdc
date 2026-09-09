@@ -49,7 +49,6 @@ export function EditDevicePage() {
                 required
                 value={editPMU.ip}
                 onChange={(e) => setEditPMU({ ...editPMU, ip: e.target.value })}
-                placeholder="PMU IP address"
               />
             </label>
 
@@ -76,7 +75,6 @@ export function EditDevicePage() {
                   onChange={(e) =>
                     setEditPMU({ ...editPMU, tcp_port: parseInt(e.target.value, 10) || 0 })
                   }
-                  placeholder="Connection Tester Local TCP Port"
                 />
               </label>
             )}
@@ -99,7 +97,6 @@ export function EditDevicePage() {
                 required
                 value={editPMU.region}
                 onChange={(e) => setEditPMU({ ...editPMU, region: e.target.value })}
-                placeholder="FIELD"
               />
             </label>
 

@@ -18,4 +18,15 @@ export const PHASOR_I_COLORS: Record<string, string> = {
 export const PHASOR_V_BAR_COLORS = [PHASOR_V_COLORS.VA, PHASOR_V_COLORS.VB, PHASOR_V_COLORS.VC]
 export const PHASOR_I_BAR_COLORS = [PHASOR_I_COLORS.IA, PHASOR_I_COLORS.IB, PHASOR_I_COLORS.IC]
 
-export const ANGLE_PAIR_COLORS = [PHASE_YELLOW, PHASE_RED, PHASE_BLUE]
+export const ANGLE_PAIR_COLORS = [
+  '#2563eb',
+  '#15803d',
+  '#b45309',
+  '#b91c1c',
+  '#6d28d9',
+  '#c2410c',
+  '#0f766e',
+  '#be185d',
+  '#4d7c0f',
+  '#475569',
+]

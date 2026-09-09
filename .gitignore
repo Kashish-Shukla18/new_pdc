@@ -48,4 +48,10 @@ data/spool/*.jsonl
 data/spool/*.tmp
 data/profiles/*.json
 data/profiles/*.tmp
+data/last_100_*
+data/last_1000_*
+data/last_1500_*
+data/*_1min.csv
+data/*_probe.csv
+data/device_frame_dump.json
 

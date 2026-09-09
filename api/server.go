@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"pdc/config"
+	"pdc/internal/instance"
 	"pdc/manager"
 	"pdc/store"
 )
@@ -28,7 +31,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 // StartServer starts the REST API server on the given address.
-func StartServer(addr string, db *store.Store, m *manager.PMUManager) {
+// Returns an error if the port is already in use (another PDC instance).
+func StartServer(ctx context.Context, addr string, db *store.Store, m *manager.PMUManager) error {
+	ln, err := instance.ListenOrExit("api", instance.NormalizeAddr(addr))
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/pmus", func(w http.ResponseWriter, r *http.Request) {
@@ -49,15 +58,26 @@ func StartServer(addr string, db *store.Store, m *manager.PMUManager) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			if cfg.Name == "" {
+				http.Error(w, "pmu name is required", http.StatusBadRequest)
+				return
+			}
+			if err := validatePMUPorts(r.Context(), db, cfg); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			cfg.Normalize()
 
 			if err := db.SavePMU(r.Context(), cfg); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
-			// Try to stop if already running, then start (update case)
-			_ = m.StopPMU(cfg.Name)
-			if err := m.StartPMU(context.Background(), cfg); err != nil {
+			// Stop the old receiver and wait for TCP teardown before reconnecting.
+			if err := m.StopPMU(cfg.Name); err != nil {
+				log.Printf("api POST /api/pmus stop %s: %v (starting fresh)", cfg.Name, err)
+			}
+			if err := m.StartPMU(ctx, cfg); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -88,5 +108,33 @@ func StartServer(addr string, db *store.Store, m *manager.PMUManager) {
 		}
 	})
 
-	go http.ListenAndServe(addr, corsMiddleware(mux))
+	srv := &http.Server{Handler: corsMiddleware(mux)}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("api server error: %v", err)
+		}
+	}()
+	return nil
+}
+
+func validatePMUPorts(ctx context.Context, db *store.Store, incoming config.PMUConfig) error {
+	pmus, err := db.GetAllPMUs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, p := range pmus {
+		if p.Name == incoming.Name {
+			continue
+		}
+		if incoming.Port > 0 && p.Port == incoming.Port {
+			return fmt.Errorf("port %d already used by %s", incoming.Port, p.Name)
+		}
+	}
+	return nil
 }

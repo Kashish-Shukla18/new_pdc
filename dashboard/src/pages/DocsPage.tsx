@@ -100,7 +100,7 @@ export function DocsPage() {
               className="docs-search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search pages and panels…"
+              aria-label="Search documentation"
             />
           </label>
           <nav className="docs-nav-list" aria-label="Documentation sections">

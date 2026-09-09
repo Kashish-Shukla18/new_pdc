@@ -1,6 +1,4 @@
-import { Upload } from 'lucide-react'
 import { useMemo } from 'react'
-import { DeviceDistributionCharts } from '../components/devices/DeviceDistributionCharts'
 import { DeviceInventoryTable } from '../components/devices/DeviceInventoryTable'
 import { DeviceSummaryGrid } from '../components/devices/DeviceSummaryGrid'
 import { useDashboardContext } from '../context/DashboardContext'
@@ -20,6 +18,7 @@ export function DevicesPage() {
     setShowAddPMU,
     setDrawerPMUName,
     handleDeletePMU,
+    deletingPMUName,
     editingPMUName,
     openEditPMU,
   } = useDashboardContext()
@@ -36,13 +35,10 @@ export function DevicesPage() {
         <div>
           <h2 className="devices-title">Device Inventory & Locations</h2>
           <p className="devices-subtitle">
-            Registered field PMUs — connection details, vendor, region, IP, and live operational status
+            Registered PMUs — connection details, region, IP, and live operational status
           </p>
         </div>
         <div className="page-actions">
-          <button type="button" className="btn ghost">
-            <Upload size={14} /> Import CSV
-          </button>
           <button type="button" className="btn primary" onClick={() => setShowAddPMU(true)}>
             + Register New PMU
           </button>
@@ -63,9 +59,9 @@ export function DevicesPage() {
         onRowClick={setDrawerPMUName}
         onEdit={openEditPMU}
         onDelete={handleDeletePMU}
+        deletingPMUName={deletingPMUName}
       />
 
-      <DeviceDistributionCharts pmus={pmus} />
     </>
   )
 }

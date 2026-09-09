@@ -50,22 +50,6 @@ export function computeAnglePairs(pmus: PMUWithMeta[], limit = 10): AnglePair[] 
   return pairs.sort((left, right) => right.value - left.value).slice(0, limit)
 }
 
-export function topAnglePairsForChart(pmus: PMUWithMeta[], limit = 5): AnglePair[] {
-  const pairs = computeAnglePairs(pmus, pmus.length * 2)
-  const seen = new Set<string>()
-  const selected: AnglePair[] = []
-
-  for (const pair of pairs) {
-    const corridor = [pair.regionA, pair.regionB].sort().join('|')
-    if (seen.has(corridor) && pair.regionA !== pair.regionB) continue
-    seen.add(corridor)
-    selected.push(pair)
-    if (selected.length >= limit) break
-  }
-
-  return selected.length ? selected : pairs.slice(0, limit)
-}
-
 export function anglePairColors(pairs: AnglePair[]) {
   return pairs.map((pair, idx) => ({
     ...pair,
