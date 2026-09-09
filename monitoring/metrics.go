@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"pdc/internal/instance"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -57,6 +59,16 @@ var (
 	sinkInflight = prometheus.NewGauge(
 		prometheus.GaugeOpts{Name: "pdc_sink_inflight", Help: "Current number of readings queued in sink channel."},
 	)
+	rawKafkaQueueDropped = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "pdc_raw_kafka_queue_dropped_total", Help: "Raw frames dropped because the Kafka ingress queue was full."},
+	)
+	dashboardQueueDropped = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "pdc_dashboard_queue_dropped_total", Help: "Readings dropped because the dashboard update queue was full."},
+	)
+	connectionReconnects = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "pdc_connection_reconnects_total", Help: "TCP session reconnect attempts after connection errors."},
+		[]string{"pmu"},
+	)
 )
 
 func init() {
@@ -75,6 +87,9 @@ func init() {
 		spoolReplayed,
 		processingLatency,
 		sinkInflight,
+		rawKafkaQueueDropped,
+		dashboardQueueDropped,
+		connectionReconnects,
 	)
 }
 
@@ -104,17 +119,37 @@ func IncSpoolReplayed(n int) {
 	spoolReplayed.Add(float64(n))
 }
 
+func IncRawKafkaQueueDropped()  { rawKafkaQueueDropped.Inc() }
+func IncDashboardQueueDropped() { dashboardQueueDropped.Inc() }
+
+func IncConnectionReconnect(pmu string) {
+	if pmu == "" {
+		pmu = "unknown"
+	}
+	connectionReconnects.WithLabelValues(pmu).Inc()
+}
+
 func ObserveLatency(d time.Duration) {
 	processingLatency.Observe(d.Seconds())
 }
 
-func StartServer(ctx context.Context, addr string) {
+func StartServer(ctx context.Context, addr string, registerExtra ...func(*http.ServeMux)) error {
+	ln, err := instance.ListenOrExit("metrics", instance.NormalizeAddr(addr))
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	registerConversationHandlers(mux)
+	for _, fn := range registerExtra {
+		if fn != nil {
+			fn(mux)
+		}
+	}
 	StartLatencyReporter(ctx.Done())
 
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Handler: mux}
 
 	go func() {
 		<-ctx.Done()
@@ -124,8 +159,9 @@ func StartServer(ctx context.Context, addr string) {
 	}()
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server error: %v", err)
 		}
 	}()
+	return nil
 }

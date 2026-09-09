@@ -2,7 +2,15 @@ import { X } from 'lucide-react'
 import { useDashboardContext } from '../../context/DashboardContext'
 
 export function AddPMUModal() {
-  const { showAddPMU, setShowAddPMU, newPMU, setNewPMU, handleAddPMU } = useDashboardContext()
+  const {
+    showAddPMU,
+    setShowAddPMU,
+    newPMU,
+    setNewPMU,
+    handleAddPMU,
+    addSaving,
+    addError,
+  } = useDashboardContext()
 
   if (!showAddPMU) return null
 
@@ -11,7 +19,7 @@ export function AddPMUModal() {
       <aside className="drawer-react" onClick={(event) => event.stopPropagation()} style={{ width: '400px' }}>
         <div className="drawer-head-react">
           <h3>Add PMU Connection</h3>
-          <button type="button" onClick={() => setShowAddPMU(false)}>
+          <button type="button" aria-label="Close add PMU form" onClick={() => setShowAddPMU(false)}>
             <X size={18} />
           </button>
         </div>
@@ -21,20 +29,20 @@ export function AddPMUModal() {
               <label style={{ display: 'block', marginBottom: '4px' }}>Name</label>
               <input
                 required
+                aria-label="PMU name"
                 value={newPMU.name}
                 onChange={(e) => setNewPMU({ ...newPMU, name: e.target.value })}
                 style={{ width: '100%', padding: '8px' }}
-                placeholder="PMU-1"
               />
             </div>
             <div>
               <label style={{ display: 'block', marginBottom: '4px' }}>IP Address</label>
               <input
                 required
+                aria-label="IP address"
                 value={newPMU.ip}
                 onChange={(e) => setNewPMU({ ...newPMU, ip: e.target.value })}
                 style={{ width: '100%', padding: '8px' }}
-                placeholder="127.0.0.1"
               />
             </div>
             <div>
@@ -70,7 +78,6 @@ export function AddPMUModal() {
                     setNewPMU({ ...newPMU, tcp_port: parseInt(e.target.value, 10) || 0 })
                   }
                   style={{ width: '100%', padding: '8px' }}
-                  placeholder="Local TCP Port from tester"
                 />
               </div>
             )}
@@ -114,8 +121,9 @@ export function AddPMUModal() {
                 style={{ width: '100%', padding: '8px' }}
               />
             </div>
-            <button type="submit" className="btn primary" style={{ marginTop: '10px' }}>
-              Connect PMU
+            {addError && <p className="form-message error" role="alert">{addError}</p>}
+            <button type="submit" className="btn primary" style={{ marginTop: '10px' }} disabled={addSaving}>
+              {addSaving ? 'Connecting…' : 'Connect PMU'}
             </button>
           </form>
         </div>

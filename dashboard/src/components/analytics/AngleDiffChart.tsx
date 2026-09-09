@@ -28,7 +28,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
           <h3>Inter-PMU Angle Δ (VA)</h3>
           <p className="panel-sub">
             {pairs.length
-              ? 'From live VA phase angles · needs ≥2 PMUs'
+              ? `${pairs.length} pairwise comparisons across all connected PMUs`
               : 'Add a second online PMU to compare angles'}
           </p>
         </div>

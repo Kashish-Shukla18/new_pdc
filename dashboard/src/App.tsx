@@ -6,10 +6,30 @@ import { PageHeader } from './components/layout/PageHeader'
 import { Sidebar } from './components/layout/Sidebar'
 import { DashboardProvider, useDashboardContext } from './context/DashboardContext'
 import { PageRouter } from './pages'
+import { NotFoundPage } from './pages/NotFoundPage'
 
 function DashboardShell() {
-  const { activeTab } = useDashboardContext()
+  const { activeTab, notice, setNotice, loadError } = useDashboardContext()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  useEffect(() => {
+    const pageNames: Record<string, string> = {
+      overview: 'Overview',
+      devices: 'Device Inventory',
+      dataframes: 'Data Frames',
+      connectivity: 'Connectivity',
+      analytics: 'Analytics',
+      help: 'Help',
+      docs: 'Documentation',
+    }
+    document.title = `${pageNames[activeTab] ?? 'Dashboard'} | PDC`
+    document
+      .querySelector('meta[name="description"]')
+      ?.setAttribute(
+        'content',
+        `PDC ${pageNames[activeTab] ?? 'dashboard'} for live PMU monitoring and synchrophasor data.`,
+      )
+  }, [activeTab])
 
   useEffect(() => {
     const onResize = () => {
@@ -41,6 +61,19 @@ function DashboardShell() {
         <main className={`main ${activeTab === 'docs' ? 'main--docs' : ''}`}>
           <div className={`app-shell ${activeTab === 'docs' ? 'app-shell--docs' : ''}`}>
             <PageHeader />
+            {(notice || loadError) && (
+              <div
+                className={`app-message ${notice?.type ?? 'error'}`}
+                role={notice?.type === 'success' ? 'status' : 'alert'}
+              >
+                <span>{notice?.message ?? loadError}</span>
+                {notice && (
+                  <button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)}>
+                    ×
+                  </button>
+                )}
+              </div>
+            )}
             <PageRouter activeTab={activeTab} />
           </div>
         </main>
@@ -53,6 +86,10 @@ function DashboardShell() {
 }
 
 function App() {
+  if (window.location.pathname !== '/') {
+    return <NotFoundPage />
+  }
+
   return (
     <DashboardProvider>
       <DashboardShell />

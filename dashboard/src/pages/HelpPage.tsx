@@ -16,7 +16,7 @@ export function HelpPage() {
         <input
           value={helpQuery}
           onChange={(event) => setHelpQuery(event.target.value)}
-          placeholder="Search help topics"
+          aria-label="Search help topics"
         />
       </div>
       <div className="help-list-react">

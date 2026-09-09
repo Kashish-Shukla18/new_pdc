@@ -1,6 +1,7 @@
 package monitoring
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -145,26 +146,26 @@ type DashboardState struct {
 }
 
 type pmuRuntime struct {
-	name          string
-	lastEventTime time.Time
-	lastFrameTime time.Time
-	lastHandshake time.Time
-	lastError     string
-	totalFrames   int64
-	qualityReject int64
-	kafkaErrors   int64
-	sinkErrors    int64
-	spoolQueued   int64
-	lastPhasor    PhasorSnapshot
-	lastChannels  ChannelSnapshot
-	lastFrame     FrameStamp
-	trends        []TrendPoint
-	fnomHz        int
-	statDataError bool
-	approxFPS     float64
+	name           string
+	lastEventTime  time.Time
+	lastFrameTime  time.Time
+	lastHandshake  time.Time
+	lastError      string
+	totalFrames    int64
+	qualityReject  int64
+	kafkaErrors    int64
+	sinkErrors     int64
+	spoolQueued    int64
+	lastPhasor     PhasorSnapshot
+	lastChannels   ChannelSnapshot
+	lastFrame      FrameStamp
+	trends         []TrendPoint
+	fnomHz         int
+	statDataError  bool
+	approxFPS      float64
 	fpsWindowStart time.Time
 	fpsWindowCount int
-	lastTrendAt   time.Time
+	lastTrendAt    time.Time
 }
 
 const maxConversationEvents = 1000
@@ -249,6 +250,36 @@ var conversationBus = struct {
 	pmus:        make(map[string]*pmuRuntime),
 }
 
+var (
+	dashboardCh   chan parser.Reading
+	dashboardOnce sync.Once
+)
+
+// StartDashboardWorkers drains dashboard updates off the parse/handler hot path.
+func StartDashboardWorkers(ctx context.Context, queueCap, workers int) {
+	if queueCap < 256 {
+		queueCap = 256
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	dashboardOnce.Do(func() {
+		dashboardCh = make(chan parser.Reading, queueCap)
+		for i := 0; i < workers; i++ {
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case r := <-dashboardCh:
+						recordReadingSync(r)
+					}
+				}
+			}()
+		}
+	})
+}
+
 func getOrCreatePMU(name string) *pmuRuntime {
 	pmu := strings.TrimSpace(name)
 	if pmu == "" {
@@ -263,6 +294,18 @@ func getOrCreatePMU(name string) *pmuRuntime {
 }
 
 func RecordReading(r parser.Reading) {
+	if dashboardCh == nil {
+		recordReadingSync(r)
+		return
+	}
+	select {
+	case dashboardCh <- r:
+	default:
+		IncDashboardQueueDropped()
+	}
+}
+
+func recordReadingSync(r parser.Reading) {
 	conversationBus.mu.Lock()
 
 	st := getOrCreatePMU(r.PMUName)
@@ -279,6 +322,11 @@ func RecordReading(r parser.Reading) {
 	}
 	st.fnomHz = fnom
 
+	measurementTS := now.UnixMilli()
+	if !r.Timestamp.IsZero() {
+		measurementTS = r.Timestamp.UnixMilli()
+	}
+
 	freqDev := float64(r.FrequencyDeviation)
 	if fnom > 0 {
 		freqDev = float64(r.Frequency) - float64(fnom)
@@ -287,7 +335,7 @@ func RecordReading(r parser.Reading) {
 	vaMag, vbMag, vcMag, iaMag, ibMag, icMag := trendPhasorMags(r)
 
 	t := TrendPoint{
-		TS:            now.UnixMilli(),
+		TS:            measurementTS,
 		Frequency:     float64(r.Frequency),
 		FrequencyDev:  freqDev,
 		MW:            float64(r.MW),
@@ -307,7 +355,7 @@ func RecordReading(r parser.Reading) {
 		VB: PhasorVector{Magnitude: float64(r.VB.Magnitude), AngleDeg: float64(r.VB.PhaseDegrees)},
 		VC: PhasorVector{Magnitude: float64(r.VC.Magnitude), AngleDeg: float64(r.VC.PhaseDegrees)},
 		IA: PhasorVector{Magnitude: float64(r.IA.Magnitude), AngleDeg: float64(r.IA.PhaseDegrees)},
-		TS: now.UnixMilli(),
+		TS: measurementTS,
 	}
 
 	phasorViews := make([]NamedPhasorView, 0, len(r.Phasors))
@@ -348,7 +396,7 @@ func RecordReading(r parser.Reading) {
 		Phasors:     phasorViews,
 		Analogs:     analogViews,
 		DigitalBits: bits,
-		TS:          now.UnixMilli(),
+		TS:          measurementTS,
 	}
 	st.lastFrame = FrameStamp{
 		SOC:          r.SOC,

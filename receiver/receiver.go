@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -386,22 +385,10 @@ type RawFramePublisher interface {
 
 // Receiver manages a persistent, auto-reconnecting TCP connection to one PMU.
 type Receiver struct {
-	cfg     config.PMUConfig
-	handler FrameHandler
-	rawPub  RawFramePublisher
-	sem     chan struct{}
-}
-
-func frameHandlerMaxInflight() int {
-	v := strings.TrimSpace(os.Getenv("FRAME_HANDLER_MAX_INFLIGHT"))
-	if v == "" {
-		return 128
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 128
-	}
-	return n
+	cfg            config.PMUConfig
+	handler        FrameHandler
+	rawPub         RawFramePublisher
+	reconnectFails int
 }
 
 // New creates a Receiver for the given PMU configuration.
@@ -413,29 +400,51 @@ func New(cfg config.PMUConfig, handler FrameHandler, rawPub RawFramePublisher) *
 		cfg:     cfg,
 		handler: handler,
 		rawPub:  rawPub,
-		sem:     make(chan struct{}, frameHandlerMaxInflight()),
 	}
 }
 
 // Run connects to the PMU and streams data frames until ctx is cancelled.
-// On any connection or protocol error it waits ReconnectInterval and retries.
+// On any connection or protocol error it waits with backoff and retries.
 func (r *Receiver) Run(ctx context.Context) {
 	for {
-		if err := r.connect(ctx); err != nil {
-			if ctx.Err() != nil {
-				return // context cancelled – exit cleanly
-			}
-			log.Printf("[%s] connection error: %v – reconnecting in %s",
-				r.cfg.Name, err, r.cfg.ReconnectInterval())
-			monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connection", "error", err.Error())
+		err := r.connect(ctx)
+		if ctx.Err() != nil {
+			return
 		}
+		if err == nil {
+			return
+		}
+		r.reconnectFails++
+		monitoring.IncConnectionReconnect(r.cfg.Name)
+		delay := r.reconnectDelay()
+		log.Printf("[%s] connection error: %v – reconnecting in %s (attempt %d)",
+			r.cfg.Name, err, monitoring.FormatMs(delay), r.reconnectFails)
+		monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connection", "error", err.Error())
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(r.cfg.ReconnectInterval()):
+		case <-time.After(delay):
 		}
 	}
+}
+
+func (r *Receiver) reconnectDelay() time.Duration {
+	base := r.cfg.ReconnectInterval()
+	fails := r.reconnectFails
+	if fails > 5 {
+		fails = 5
+	}
+	delay := base * time.Duration(1<<fails)
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	// Stagger PMUs so they don't hammer the device simultaneously.
+	var jitter int
+	for _, c := range r.cfg.Name {
+		jitter += int(c)
+	}
+	return delay + time.Duration(jitter%800)*time.Millisecond
 }
 
 // connect performs the full C37.118 connection handshake and reads data frames
@@ -594,33 +603,39 @@ func drainTCPQuiet(conn net.Conn) {
 // handshakeCFG runs HDR (optional) + CFG2 on a TCP control connection.
 func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time.Duration) error {
 	handshakeStart := time.Now()
-	_ = r.sendCMD(conn, cmdDataOff)
-
 	headerText := ""
-	log.Printf("[%s] handshake step 1: sending %s", r.cfg.Name, cmdName(cmdSendHdr))
-	if err := r.sendCMD(conn, cmdSendHdr); err != nil {
-		return fmt.Errorf("send HDR request: %w", err)
-	}
-	hdrDeadline := hdrWaitTimeout()
-	if timeout > 0 && timeout < hdrDeadline {
-		hdrDeadline = timeout
-	}
-	hdrWaitStart := time.Now()
-	if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
-		hdrDur := time.Since(hdrWaitStart)
-		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
-		log.Printf("[%s] optional HEADER not received after %s (%v) – continuing with CFG2",
-			r.cfg.Name, monitoring.FormatMs(hdrDur), err)
+
+	if simpleHandshakeEnabled() {
+		log.Printf("[%s] handshake (simple): sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
 	} else {
-		hdrDur := time.Since(hdrWaitStart)
-		monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
-		if text, perr := parser.ParseHeaderFrame(hdrRaw); perr == nil {
-			headerText = text
+		_ = r.sendCMD(conn, cmdDataOff)
+
+		log.Printf("[%s] handshake step 1: sending %s", r.cfg.Name, cmdName(cmdSendHdr))
+		if err := r.sendCMD(conn, cmdSendHdr); err != nil {
+			return fmt.Errorf("send HDR request: %w", err)
 		}
-		_ = r.publishRaw(ctx, "hdr", hdrRaw, 0, 0)
+		hdrDeadline := hdrWaitTimeout()
+		if timeout > 0 && timeout < hdrDeadline {
+			hdrDeadline = timeout
+		}
+		hdrWaitStart := time.Now()
+		if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
+			hdrDur := time.Since(hdrWaitStart)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
+			log.Printf("[%s] optional HEADER not received after %s (%v) – continuing with CFG2",
+				r.cfg.Name, monitoring.FormatMs(hdrDur), err)
+		} else {
+			hdrDur := time.Since(hdrWaitStart)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
+			if text, perr := parser.ParseHeaderFrame(hdrRaw); perr == nil {
+				headerText = text
+			}
+			_ = r.publishRaw(ctx, "hdr", hdrRaw, 0, 0)
+		}
+
+		log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
 	}
 
-	log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
 	if err := r.sendCMD(conn, cmdSendCfg2); err != nil {
 		return fmt.Errorf("send CFG2 request: %w", err)
 	}
@@ -664,6 +679,10 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 		return fmt.Errorf("dial %s %s: %w", proto, addr, err)
 	}
 	defer conn.Close()
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
 
 	configureStreamConn(conn)
 
@@ -682,9 +701,11 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	}
 	log.Printf("[%s] sent CMD_DATA_ON – streaming data", r.cfg.Name)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok", "sent CMD_DATA_ON")
+	r.reconnectFails = 0
 
 	dataFrames := 0
 	var lastComplete time.Time
+	readTimeout := r.cfg.DataReadTimeout()
 
 	for {
 		if ctx.Err() != nil {
@@ -692,7 +713,7 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 			return nil
 		}
 
-		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
 			return fmt.Errorf("set read deadline: %w", err)
 		}
 
@@ -731,34 +752,31 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	}
 }
 
-// publishRaw sends a frame to the raw Kafka topic when ingress publishing is enabled.
+// dispatchDataFrame parses DATA on this PMU's read goroutine so SOC/fracsec
+// stay in wire order. Kafka raw publish stays async (side path).
 func (r *Receiver) dispatchDataFrame(ctx context.Context, payload []byte, tcpWait, tcpCopy time.Duration) {
 	if r.handler != nil {
-		select {
-		case r.sem <- struct{}{}:
-			frame := append([]byte(nil), payload...)
-			go func(name string, frame []byte) {
-				defer func() { <-r.sem }()
-				r.handler(name, frame)
-			}(r.cfg.Name, frame)
-		default:
-			monitoring.IncFramesDropped()
-			monitoring.NoteFrameHandlerDrop(r.cfg.Name, payload)
-			log.Printf("[%s] frame dropped: handler pool full (inflight=%d)", r.cfg.Name, len(r.sem))
-			monitoring.RecordConversation(r.cfg.Name, "PDC", "PDC", "overload", "warn",
-				fmt.Sprintf("frame dropped – handler pool full (inflight=%d/%d)", len(r.sem), cap(r.sem)))
-		}
+		r.handler(r.cfg.Name, payload)
 	}
 
 	if r.rawPub == nil {
 		return
 	}
-	if err := r.publishRaw(ctx, "data", payload, tcpWait, tcpCopy); err != nil {
-		monitoring.IncQueuePublishErrors()
-		monitoring.IncKafkaErrorForPMU(r.cfg.Name)
-		log.Printf("[%s] raw kafka publish error: %v", r.cfg.Name, err)
-		monitoring.RecordConversation(r.cfg.Name, "PDC", "KAFKA", "raw-publish", "error", err.Error())
-	}
+	pub := r.rawPub
+	name := r.cfg.Name
+	payloadCopy := append([]byte(nil), payload...)
+	go func() {
+		if err := pub.Publish(ctx, name, "data", r.cfg.IDCode, payloadCopy, tcpWait, tcpCopy); err != nil {
+			monitoring.IncQueuePublishErrors()
+			monitoring.IncKafkaErrorForPMU(name)
+			if !strings.Contains(err.Error(), "queue full") {
+				log.Printf("[%s] raw kafka publish error: %v", name, err)
+				monitoring.RecordConversation(name, "PDC", "KAFKA", "raw-publish", "error", err.Error())
+			}
+		} else {
+			monitoring.IncRawFramesPublished()
+		}
+	}()
 }
 
 func (r *Receiver) publishRaw(ctx context.Context, frameType string, raw []byte, tcpWait, tcpCopy time.Duration) error {
@@ -779,6 +797,23 @@ func hdrWaitTimeout() time.Duration {
 		return 200 * time.Millisecond
 	}
 	return d
+}
+
+// simpleHandshakeEnabled uses CFG2→DATA_ON only (same as cmd/capture-pmu).
+// The full DATA_OFF→HDR→CFG2 path can destabilize multi-port field PMUs.
+func simpleHandshakeEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("C37118_SIMPLE_HANDSHAKE"))
+	if v == "" {
+		return true
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func configureStreamConn(conn net.Conn) {

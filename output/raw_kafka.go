@@ -37,7 +37,6 @@ type RawFramePublisher struct {
 	topic     string
 	ch        chan kafka.Message
 	quit      chan struct{}
-	done      chan struct{}
 	closeOnce sync.Once
 }
 
@@ -93,8 +92,9 @@ func NewRawFramePublisherFromEnv() *RawFramePublisher {
 	writeTimeoutMs := envIntOr("KAFKA_WRITE_TIMEOUT_MS", 15000)
 	readTimeoutMs := envIntOr("KAFKA_READ_TIMEOUT_MS", 15000)
 	maxAttempts := envIntOr("KAFKA_MAX_ATTEMPTS", 10)
-	queueCap := envIntOr("KAFKA_RAW_QUEUE", 256)
-	asyncMode := envBoolOr("KAFKA_RAW_ASYNC", false)
+	queueCap := envIntOr("KAFKA_RAW_QUEUE", 4096)
+	asyncMode := envBoolOr("KAFKA_RAW_ASYNC", true)
+	dispatchers := envIntOr("KAFKA_RAW_DISPATCHERS", 2)
 
 	if batchTimeoutMs < 1 {
 		batchTimeoutMs = 1
@@ -129,18 +129,23 @@ func NewRawFramePublisherFromEnv() *RawFramePublisher {
 		Balancer:     &kafka.Hash{},
 	}
 
+	if dispatchers < 1 {
+		dispatchers = 1
+	}
+
 	p := &RawFramePublisher{
 		writer:  w,
 		brokers: brokers,
 		topic:   topic,
 		ch:      make(chan kafka.Message, queueCap),
 		quit:    make(chan struct{}),
-		done:    make(chan struct{}),
 	}
-	go p.dispatch()
+	for i := 0; i < dispatchers; i++ {
+		go p.dispatch()
+	}
 
-	log.Printf("kafka raw writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d queue=%d balancer=hash",
-		brokers, topic, asyncMode, batchTimeoutMs, batchSize, queueCap)
+	log.Printf("kafka raw writer ready: brokers=%v topic=%q async=%t batch_timeout=%dms batch_size=%d queue=%d dispatchers=%d balancer=hash",
+		brokers, topic, asyncMode, batchTimeoutMs, batchSize, queueCap, dispatchers)
 
 	return p
 }
@@ -186,11 +191,15 @@ func (p *RawFramePublisher) Publish(ctx context.Context, pmuName, frameType stri
 	case p.ch <- msg:
 		monitoring.ObserveStage(pmuName, monitoring.StageRawKafkaEnqueue, time.Since(t0))
 		return nil
+	default:
+		monitoring.IncRawKafkaQueueDropped()
+		monitoring.IncQueuePublishErrors()
+		monitoring.IncKafkaErrorForPMU(pmuName)
+		return fmt.Errorf("raw kafka queue full")
 	}
 }
 
 func (p *RawFramePublisher) dispatch() {
-	defer close(p.done)
 	ctx := context.Background()
 	for msg := range p.ch {
 		pmu := string(msg.Key)
@@ -228,7 +237,6 @@ func (p *RawFramePublisher) Close() error {
 		close(p.quit)
 		if p.ch != nil {
 			close(p.ch)
-			<-p.done
 		}
 		if p.writer != nil {
 			_ = p.writer.Close()
