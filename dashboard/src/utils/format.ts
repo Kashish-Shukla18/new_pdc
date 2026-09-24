@@ -10,6 +10,19 @@ export function formatTS(ts: number) {
   })
 }
 
+/** Same as formatTS but includes milliseconds — for chart hover tooltips. */
+export function formatTSMs(ts: number) {
+  const d = new Date(ts)
+  if (!Number.isFinite(d.getTime())) return '—'
+  const base = d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  const ms = String(d.getMilliseconds()).padStart(3, '0')
+  return `${base}.${ms}`
+}
+
 export function ageText(iso: string) {
   if (!iso) return '--'
   const deltaMs = Date.now() - new Date(iso).getTime()

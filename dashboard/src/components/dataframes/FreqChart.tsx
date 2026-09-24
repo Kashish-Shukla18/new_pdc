@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import type { TrendPoint } from '../../types/dashboard'
-import { formatTS, round } from '../../utils/format'
+import { formatTS, formatTSMs, round } from '../../utils/format'
 
 type Props = {
   data: TrendPoint[]
@@ -24,7 +24,7 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
       <div className="panel-head">
         <div>
           <h3>Frequency</h3>
-          <p className="panel-sub">Hz · live trend samples · FNOM {fnomHz} Hz</p>
+          <p className="panel-sub">Hz · time-aligned ticks · FNOM {fnomHz} Hz</p>
         </div>
       </div>
       <div className="chart-wrap small">
@@ -39,7 +39,7 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
               width={56}
             />
             <Tooltip
-              labelFormatter={(value) => formatTS(Number(value))}
+              labelFormatter={(value) => formatTSMs(Number(value))}
               formatter={(value) => [`${round(Number(value ?? 0), 4)} Hz`, 'Frequency']}
             />
             <Legend wrapperStyle={{ fontSize: 10 }} />
@@ -52,7 +52,7 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
               dot={false}
               strokeWidth={1.75}
               isAnimationActive={false}
-              connectNulls
+              connectNulls={false}
             />
           </LineChart>
         </ResponsiveContainer>

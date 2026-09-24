@@ -1,3 +1,7 @@
+// spool.go — PARKED durable queue for failed store writes.
+//
+// If Redis/Postgres is briefly down, readings can land in a local file and
+// replay later. Not used by the live pipeline until the sink is re-enabled.
 package output
 
 import (
