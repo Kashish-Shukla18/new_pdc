@@ -1,5 +1,7 @@
 package monitoring
 
+// frame_diag.go — short per-PMU notes about parse / quality / loss for the UI.
+
 import (
 	"encoding/binary"
 	"encoding/json"
@@ -38,27 +40,23 @@ type FrameDiagSnapshot struct {
 	QualityFlag  int64 `json:"qualityFlag"`  // Validate() failed (may still continue)
 	QualityDrop  int64 `json:"qualityDrop"`  // actually dropped (DROP_QUALITY_REJECTED)
 	Dashboard    int64 `json:"dashboard"`
-	KafkaOK      int64 `json:"kafkaOK"`
-	KafkaFail    int64 `json:"kafkaFail"`
 
 	Losses []FrameLossSample `json:"losses"`
 }
 
 type frameDiagRuntime struct {
-	mu       sync.Mutex
-	since    time.Time
-	tcpOK    int64
-	crcFail  int64
-	hDrop    int64
-	parseOK  int64
+	mu        sync.Mutex
+	since     time.Time
+	tcpOK     int64
+	crcFail   int64
+	hDrop     int64
+	parseOK   int64
 	parseFail int64
-	qualOK   int64
-	qualFlag int64
-	qualDrop int64
-	dash     int64
-	kafkaOK  int64
-	kafkaFail int64
-	losses   []FrameLossSample
+	qualOK    int64
+	qualFlag  int64
+	qualDrop  int64
+	dash      int64
+	losses    []FrameLossSample
 }
 
 var frameDiag = struct {
@@ -175,21 +173,6 @@ func NoteFrameDashboard(pmu string) {
 	st.mu.Unlock()
 }
 
-func NoteFrameKafkaOK(pmu string) {
-	st := frameDiagOf(pmu)
-	st.mu.Lock()
-	st.kafkaOK++
-	st.mu.Unlock()
-}
-
-func NoteFrameKafkaFail(pmu, reason string, r parser.Reading) {
-	st := frameDiagOf(pmu)
-	st.mu.Lock()
-	st.kafkaFail++
-	st.noteLoss("kafka", reason, r.SOC, r.FracSecRaw, r.FracSecCount)
-	st.mu.Unlock()
-}
-
 func ResetFrameDiag(pmu string) {
 	frameDiag.mu.Lock()
 	defer frameDiag.mu.Unlock()
@@ -219,8 +202,6 @@ func SnapshotFrameDiag(pmu string) FrameDiagSnapshot {
 		QualityFlag:  st.qualFlag,
 		QualityDrop:  st.qualDrop,
 		Dashboard:    st.dash,
-		KafkaOK:      st.kafkaOK,
-		KafkaFail:    st.kafkaFail,
 		Losses:       losses,
 	}
 }

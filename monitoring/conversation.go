@@ -1,9 +1,13 @@
 package monitoring
 
+// conversation.go — live "what each PMU is doing" state for the dashboard (JSON / SSE).
+
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -124,7 +128,6 @@ type PMUState struct {
 	TotalFrames    int64              `json:"totalFrames"`
 	ApproxFPS      float64            `json:"approxFps"`
 	QualityRejects int64              `json:"qualityRejects"`
-	KafkaErrors    int64              `json:"kafkaErrors"`
 	SinkErrors     int64              `json:"sinkErrors"`
 	SpoolQueued    int64              `json:"spoolQueued"`
 	LastReading    TrendPoint         `json:"lastReading"`
@@ -138,11 +141,57 @@ type PMUState struct {
 	LastHops       map[string]float64 `json:"lastHops,omitempty"`
 }
 
+// AlignedPoint is one PMU's contribution inside a locked aligned dashboard batch.
+type AlignedPoint struct {
+	Frequency    float64 `json:"frequency"`
+	FrequencyDev float64 `json:"frequencyDev"`
+	ROCOF        float64 `json:"rocof"`
+	VA           float64 `json:"va"`
+	VB           float64 `json:"vb"`
+	VC           float64 `json:"vc"`
+	IA           float64 `json:"ia"`
+	IB           float64 `json:"ib"`
+	IC           float64 `json:"ic"`
+	VAAngle      float64 `json:"vaAngle"`
+	VBAngle      float64 `json:"vbAngle"`
+	VCAngle      float64 `json:"vcAngle"`
+	IAAngle      float64 `json:"iaAngle"`
+	// Analogs keyed by CFG-2 channel names (e.g. Analog1) — no invented labels.
+	Analogs map[string]float64 `json:"analogs,omitempty"`
+}
+
+// AlignedBatch is a locked SOC/FRACSEC slot for analytics charts.
+type AlignedBatch struct {
+	TS       int64                   `json:"ts"`
+	Points   map[string]AlignedPoint `json:"points"`
+	Missing  []string                `json:"missing"`
+	Complete bool                    `json:"complete"`
+	Reason   string                  `json:"reason"`
+}
+
+// AlignerStatus is the live auto-tune config + emit counters for testing.
+type AlignerStatus struct {
+	N           int     `json:"n"`
+	FPS         float64 `json:"fps"`
+	PeriodMs    float64 `json:"periodMs"`
+	WaitMs      float64 `json:"waitMs"`
+	MaxOpen     int     `json:"maxOpen"`
+	FreshMs     float64 `json:"freshMs"`
+	Expected    []string `json:"expected,omitempty"`
+	Emitted     int64   `json:"emitted"`
+	Complete    int64   `json:"complete"`
+	Timeout     int64   `json:"timeout"`
+	Cap         int64   `json:"cap"`
+	CompletePct float64 `json:"completePct"`
+}
+
 type DashboardState struct {
-	NowUTC     time.Time       `json:"nowUtc"`
-	PMUs       []PMUState      `json:"pmus"`
-	EventCount int             `json:"eventCount"`
-	Latency    PipelineLatency `json:"latency"`
+	NowUTC         time.Time       `json:"nowUtc"`
+	PMUs           []PMUState      `json:"pmus"`
+	EventCount     int             `json:"eventCount"`
+	Latency        PipelineLatency `json:"latency"`
+	Aligner        AlignerStatus   `json:"aligner"`
+	AlignedBatches []AlignedBatch  `json:"alignedBatches,omitempty"`
 }
 
 type pmuRuntime struct {
@@ -153,7 +202,6 @@ type pmuRuntime struct {
 	lastError      string
 	totalFrames    int64
 	qualityReject  int64
-	kafkaErrors    int64
 	sinkErrors     int64
 	spoolQueued    int64
 	lastPhasor     PhasorSnapshot
@@ -165,6 +213,7 @@ type pmuRuntime struct {
 	approxFPS      float64
 	fpsWindowStart time.Time
 	fpsWindowCount int
+	lastFPSKey     string // last SOC|FRACSEC counted toward approxFPS (dedupe wire repeats)
 	lastTrendAt    time.Time
 }
 
@@ -172,6 +221,9 @@ const maxConversationEvents = 1000
 const maxTrendPoints = 180 // ~18s at 10 Hz dashboard sample rate
 const dashboardTrendExport = 120
 const trendMinInterval = 100 * time.Millisecond // keep charts smooth without 50–60 Hz SVG load
+const maxAlignedBatches = 180                    // ~9s at 20 FPS aligned slots
+const alignedBatchExport = 120
+const alignerSummaryEvery = 5 * time.Second // rate-limit [aligner] summary logs
 
 // trendPhasorMags maps CFG channel names onto VA–IC magnitudes for trend series.
 func trendPhasorMags(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
@@ -240,14 +292,30 @@ func cfgSummaryForPMU(name string) CFGSummary {
 }
 
 var conversationBus = struct {
-	mu          sync.Mutex
-	events      []ConversationEvent
-	subscribers map[chan ConversationEvent]struct{}
-	pmus        map[string]*pmuRuntime
+	mu             sync.Mutex
+	events         []ConversationEvent
+	subscribers    map[chan ConversationEvent]struct{}
+	pmus           map[string]*pmuRuntime
+	alignedBatches []AlignedBatch
+
+	// Auto-tune snapshot + emit counters (for /conversation/state + periodic logs).
+	alignN        int
+	alignFPS      float64
+	alignPeriod   time.Duration
+	alignWait     time.Duration
+	alignMaxOpen  int
+	alignFresh    time.Duration
+	alignExpected []string
+	alignEmitted  int64
+	alignComplete int64
+	alignTimeout  int64
+	alignCap      int64
+	alignLastLog  time.Time
 }{
-	events:      make([]ConversationEvent, 0, maxConversationEvents),
-	subscribers: make(map[chan ConversationEvent]struct{}),
-	pmus:        make(map[string]*pmuRuntime),
+	events:         make([]ConversationEvent, 0, maxConversationEvents),
+	subscribers:    make(map[chan ConversationEvent]struct{}),
+	pmus:           make(map[string]*pmuRuntime),
+	alignedBatches: make([]AlignedBatch, 0, maxAlignedBatches),
 }
 
 var (
@@ -303,6 +371,125 @@ func RecordReading(r parser.Reading) {
 	default:
 		IncDashboardQueueDropped()
 	}
+}
+
+// SetAlignerTune records the auto-tuned aligner parameters after SetExpected.
+func SetAlignerTune(n int, fps float64, period, wait, fresh time.Duration, maxOpen int, expected []string) {
+	conversationBus.mu.Lock()
+	defer conversationBus.mu.Unlock()
+	conversationBus.alignN = n
+	conversationBus.alignFPS = fps
+	conversationBus.alignPeriod = period
+	conversationBus.alignWait = wait
+	conversationBus.alignFresh = fresh
+	conversationBus.alignMaxOpen = maxOpen
+	conversationBus.alignExpected = append([]string(nil), expected...)
+	conversationBus.alignEmitted = 0
+	conversationBus.alignComplete = 0
+	conversationBus.alignTimeout = 0
+	conversationBus.alignCap = 0
+	conversationBus.alignLastLog = time.Time{}
+}
+
+// RecordAlignedFrame stores one locked dashboard alignment batch for analytics charts.
+// Inventory / FPS still come from RecordReading on the raw path.
+func RecordAlignedFrame(tsMs int64, present map[string]parser.Reading, missing []string, complete bool, reason string) {
+	points := make(map[string]AlignedPoint, len(present))
+	for name, r := range present {
+		fnom := 0.0
+		if prof, ok := parser.GetProfile(name); ok && prof.FnomHz > 0 {
+			fnom = float64(prof.FnomHz)
+		}
+		va, vb, vc, ia, ib, ic := trendPhasorMags(r)
+		freq := float64(r.Frequency)
+		freqDev := float64(r.FrequencyDeviation)
+		if fnom > 0 {
+			freqDev = freq - fnom
+		}
+		analogs := make(map[string]float64, len(r.Analogs))
+		for _, a := range r.Analogs {
+			if a.Name == "" {
+				continue
+			}
+			analogs[a.Name] = float64(a.Value)
+		}
+		points[name] = AlignedPoint{
+			Frequency:    freq,
+			FrequencyDev: freqDev,
+			ROCOF:        float64(r.ROCOF),
+			VA:           va,
+			VB:           vb,
+			VC:           vc,
+			IA:           ia,
+			IB:           ib,
+			IC:           ic,
+			VAAngle:      float64(r.VA.PhaseDegrees),
+			VBAngle:      float64(r.VB.PhaseDegrees),
+			VCAngle:      float64(r.VC.PhaseDegrees),
+			IAAngle:      float64(r.IA.PhaseDegrees),
+			Analogs:      analogs,
+		}
+	}
+	missCopy := append([]string(nil), missing...)
+
+	conversationBus.mu.Lock()
+	if len(conversationBus.alignedBatches) >= maxAlignedBatches {
+		copy(conversationBus.alignedBatches, conversationBus.alignedBatches[1:])
+		conversationBus.alignedBatches = conversationBus.alignedBatches[:maxAlignedBatches-1]
+	}
+	conversationBus.alignedBatches = append(conversationBus.alignedBatches, AlignedBatch{
+		TS:       tsMs,
+		Points:   points,
+		Missing:  missCopy,
+		Complete: complete,
+		Reason:   reason,
+	})
+	conversationBus.alignEmitted++
+	switch reason {
+	case "complete":
+		conversationBus.alignComplete++
+	case "timeout":
+		conversationBus.alignTimeout++
+	case "cap":
+		conversationBus.alignCap++
+	}
+	emitted := conversationBus.alignEmitted
+	completeN := conversationBus.alignComplete
+	timeoutN := conversationBus.alignTimeout
+	capN := conversationBus.alignCap
+	n := conversationBus.alignN
+	wait := conversationBus.alignWait
+	fps := conversationBus.alignFPS
+	maxOpen := conversationBus.alignMaxOpen
+	shouldLog := conversationBus.alignLastLog.IsZero() || time.Since(conversationBus.alignLastLog) >= alignerSummaryEvery
+	if shouldLog {
+		conversationBus.alignLastLog = time.Now()
+	}
+	conversationBus.mu.Unlock()
+
+	if !shouldLog {
+		return
+	}
+	pct := 0.0
+	if emitted > 0 {
+		pct = 100 * float64(completeN) / float64(emitted)
+	}
+	msg := fmt.Sprintf("summary N=%d fps=%.1f wait=%s max_open=%d emitted=%d complete=%d (%.1f%%) timeout=%d cap=%d",
+		n, fps, wait, maxOpen, emitted, completeN, pct, timeoutN, capN)
+	log.Printf("[aligner] %s", msg)
+	RecordConversation("SYSTEM", "PDC", "ALIGN", "summary", "ok", msg)
+}
+
+// ClearAlignedBatches drops dashboard alignment history (PMU set change / restart).
+func ClearAlignedBatches() {
+	conversationBus.mu.Lock()
+	defer conversationBus.mu.Unlock()
+	conversationBus.alignedBatches = conversationBus.alignedBatches[:0]
+	conversationBus.alignEmitted = 0
+	conversationBus.alignComplete = 0
+	conversationBus.alignTimeout = 0
+	conversationBus.alignCap = 0
+	conversationBus.alignLastLog = time.Time{}
 }
 
 func recordReadingSync(r parser.Reading) {
@@ -412,16 +599,26 @@ func recordReadingSync(r parser.Reading) {
 		Digitals:     append([]uint16(nil), r.Digitals...),
 	}
 
-	// FPS from active-stream windows only. Reconnect gaps must not dilute the rate
-	// (otherwise inventory shows ~2 FPS while CFG/tcp_wait say 30/60).
+	// FPS = unique measurement stamps / sec (SOC+FRACSEC). Some devices/sims
+	// emit several identical DATA frames per reporting instant; counting every
+	// TCP frame then shows e.g. 100 / 25 while CFG DATA_RATE is 25.
 	gap := time.Duration(0)
 	if !prevFrame.IsZero() {
 		gap = now.Sub(prevFrame)
 	}
+	stampKey := fmt.Sprintf("%d:%d", r.SOC, r.FracSecCount)
+	newStamp := stampKey != st.lastFPSKey
+	if newStamp {
+		st.lastFPSKey = stampKey
+	}
 	if st.fpsWindowStart.IsZero() || gap > 750*time.Millisecond {
 		st.fpsWindowStart = now
-		st.fpsWindowCount = 1
-	} else {
+		if newStamp {
+			st.fpsWindowCount = 1
+		} else {
+			st.fpsWindowCount = 0
+		}
+	} else if newStamp {
 		st.fpsWindowCount++
 		if elapsed := now.Sub(st.fpsWindowStart); elapsed >= time.Second {
 			instant := float64(st.fpsWindowCount) / elapsed.Seconds()
@@ -455,14 +652,6 @@ func IncQualityRejectForPMU(pmu string) {
 	defer conversationBus.mu.Unlock()
 	st := getOrCreatePMU(pmu)
 	st.qualityReject++
-	st.lastEventTime = time.Now().UTC()
-}
-
-func IncKafkaErrorForPMU(pmu string) {
-	conversationBus.mu.Lock()
-	defer conversationBus.mu.Unlock()
-	st := getOrCreatePMU(pmu)
-	st.kafkaErrors++
 	st.lastEventTime = time.Now().UTC()
 }
 
@@ -558,11 +747,24 @@ func registerConversationHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/conversation/state", handleConversationState)
 	mux.HandleFunc("/conversation/latency", handleConversationLatency)
 	mux.HandleFunc("/conversation/frame-diag", handleConversationFrameDiag)
+	// aligner-buffers is registered from main (needs the live Bank)
 }
 
+// handleConversationPage used to serve a standalone HTML monitor. The React app
+// in dashboard/ now renders the same data from the JSON endpoints below, so this
+// only points callers at them rather than maintaining a second UI.
 func handleConversationPage(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(conversationPageHTML))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, strings.Join([]string{
+		"PDC telemetry endpoints (UI lives in the dashboard/ React app):",
+		"  /conversation/state       dashboard snapshot (PMUs, live inventory)",
+		"  /conversation/events      SSE live event stream",
+		"  /conversation/recent      recent events, one-shot",
+		"  /conversation/latency     pipeline stage latency",
+		"  /conversation/frame-diag  per-stage frame accounting",
+		"  /conversation/aligner-buffers  time-align buffers (built separately)",
+		"  /metrics                  Prometheus metrics",
+	}, "\n")+"\n")
 }
 
 func handleConversationRecent(w http.ResponseWriter, _ *http.Request) {
@@ -692,7 +894,6 @@ func snapshotDashboard() DashboardState {
 			TotalFrames:    st.totalFrames,
 			ApproxFPS:      fps,
 			QualityRejects: st.qualityReject,
-			KafkaErrors:    st.kafkaErrors,
 			SinkErrors:     st.sinkErrors,
 			SpoolQueued:    st.spoolQueued,
 			LastReading:    last,
@@ -740,11 +941,37 @@ func snapshotDashboard() DashboardState {
 		return pmus[i].Name < pmus[j].Name
 	})
 
+	pct := 0.0
+	if conversationBus.alignEmitted > 0 {
+		pct = 100 * float64(conversationBus.alignComplete) / float64(conversationBus.alignEmitted)
+	}
+	alignStatus := AlignerStatus{
+		N:           conversationBus.alignN,
+		FPS:         conversationBus.alignFPS,
+		PeriodMs:    float64(conversationBus.alignPeriod) / float64(time.Millisecond),
+		WaitMs:      float64(conversationBus.alignWait) / float64(time.Millisecond),
+		MaxOpen:     conversationBus.alignMaxOpen,
+		FreshMs:     float64(conversationBus.alignFresh) / float64(time.Millisecond),
+		Expected:    append([]string(nil), conversationBus.alignExpected...),
+		Emitted:     conversationBus.alignEmitted,
+		Complete:    conversationBus.alignComplete,
+		Timeout:     conversationBus.alignTimeout,
+		Cap:         conversationBus.alignCap,
+		CompletePct: pct,
+	}
+	alignedCopy := make([]AlignedBatch, len(conversationBus.alignedBatches))
+	copy(alignedCopy, conversationBus.alignedBatches)
+	if len(alignedCopy) > alignedBatchExport {
+		alignedCopy = alignedCopy[len(alignedCopy)-alignedBatchExport:]
+	}
+
 	return DashboardState{
-		NowUTC:     now,
-		PMUs:       pmus,
-		EventCount: len(conversationBus.events),
-		Latency:    SnapshotPipelineLatency(),
+		NowUTC:         now,
+		PMUs:           pmus,
+		EventCount:     len(conversationBus.events),
+		Latency:        SnapshotPipelineLatency(),
+		Aligner:        alignStatus,
+		AlignedBatches: alignedCopy,
 	}
 }
 
@@ -760,507 +987,3 @@ func removeSubscriber(ch chan ConversationEvent) {
 	conversationBus.mu.Unlock()
 	close(ch)
 }
-
-const conversationPageHTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PMU-PDC Real-Time Monitor</title>
-  <style>
-    :root {
-      --bg: #f0f6f8;
-      --ink: #102333;
-      --card: #ffffff;
-      --line: #c7d8e0;
-      --ok: #0e8a4a;
-      --warn: #c17a00;
-      --err: #b3261e;
-      --accent: #0277a8;
-      --muted: #4a6476;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", "Tahoma", sans-serif;
-      color: var(--ink);
-      background: radial-gradient(circle at 100% 0%, #d9edf6 0%, transparent 35%),
-                  radial-gradient(circle at 0% 100%, #e6f5ef 0%, transparent 25%),
-                  var(--bg);
-      min-height: 100vh;
-    }
-    .wrap {
-      max-width: 1280px;
-      margin: 20px auto;
-      padding: 0 16px 24px;
-    }
-    .head {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-    h1 {
-      margin: 0;
-      letter-spacing: 0.3px;
-      font-size: clamp(1.4rem, 2.3vw, 2.1rem);
-    }
-    .sub { margin: 6px 0 0; color: var(--muted); }
-    .status-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border: 1px solid var(--line);
-      background: var(--card);
-      border-radius: 999px;
-      font-size: 0.95rem;
-    }
-    .dot {
-      width: 11px;
-      height: 11px;
-      border-radius: 999px;
-      background: #777;
-    }
-    .topology {
-      border: 1px solid var(--line);
-      background: var(--card);
-      border-radius: 14px;
-      padding: 14px;
-      margin-bottom: 14px;
-      box-shadow: 0 6px 18px rgba(16,35,51,0.06);
-    }
-    .topology-title {
-      margin: 0 0 10px;
-      font-size: 1rem;
-      color: var(--muted);
-    }
-    .flow {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(90px, 1fr));
-      gap: 10px;
-      align-items: center;
-    }
-    .node {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #fbfdff;
-      padding: 10px;
-      min-height: 72px;
-    }
-    .node h3 {
-      margin: 0;
-      font-size: 0.92rem;
-      font-weight: 700;
-    }
-    .node p {
-      margin: 5px 0 0;
-      font-size: 0.84rem;
-      color: var(--muted);
-    }
-    .arrow {
-      text-align: center;
-      color: var(--accent);
-      font-size: 1.4rem;
-      font-weight: 700;
-    }
-    .dash {
-      display: grid;
-      grid-template-columns: 1.1fr 0.9fr;
-      gap: 14px;
-    }
-    @media (max-width: 920px) {
-      .flow { grid-template-columns: 1fr; }
-      .arrow { display: none; }
-      .dash { grid-template-columns: 1fr; }
-      .head { grid-template-columns: 1fr; }
-    }
-    .panel {
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: var(--card);
-      padding: 12px;
-      box-shadow: 0 8px 20px rgba(16,35,51,0.06);
-    }
-    .panel h2 {
-      margin: 0 0 10px;
-      font-size: 1.03rem;
-    }
-    .pmu-list {
-      max-height: 240px;
-      overflow: auto;
-    }
-    .pmu-item {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 8px;
-      margin-bottom: 8px;
-      background: #fcfeff;
-      cursor: pointer;
-    }
-    .pmu-item.active {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(2,119,168,0.12);
-    }
-    .row {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: center;
-      font-size: 0.85rem;
-      color: var(--muted);
-    }
-    .name {
-      font-weight: 700;
-      color: var(--ink);
-      font-size: 0.94rem;
-    }
-    .badge {
-      border-radius: 999px;
-      padding: 2px 8px;
-      border: 1px solid var(--line);
-      font-size: 0.78rem;
-    }
-    .badge.ok { border-color: #8fd8b0; color: var(--ok); background: #edf9f1; }
-    .badge.err { border-color: #f1b6b2; color: var(--err); background: #fff1f0; }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 8px;
-      margin: 10px 0;
-    }
-    .kpi {
-      border: 1px solid var(--line);
-      border-radius: 9px;
-      padding: 8px;
-      background: #fcfeff;
-    }
-    .kpi .k {
-      font-size: 0.76rem;
-      color: var(--muted);
-    }
-    .kpi .v {
-      margin-top: 3px;
-      font-size: 1rem;
-      font-weight: 700;
-    }
-    .graph-wrap {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px;
-      background: #fbfdff;
-    }
-    .legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      font-size: 0.8rem;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    .legend span::before {
-      content: "";
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 999px;
-      margin-right: 6px;
-      vertical-align: -1px;
-    }
-    .lg-freq::before { background: #0277a8; }
-    .lg-mw::before { background: #b06a00; }
-    .lg-mvar::before { background: #6c47ff; }
-    canvas { width: 100%; height: 260px; }
-    .stream {
-      max-height: 340px;
-      overflow: auto;
-      padding-right: 4px;
-      margin-top: 10px;
-    }
-    .evt {
-      border: 1px solid #d8e3e9;
-      border-left: 4px solid var(--accent);
-      border-radius: 10px;
-      padding: 7px 9px;
-      margin-bottom: 7px;
-      background: #fff;
-    }
-    .evt.ok { border-left-color: var(--ok); }
-    .evt.warn { border-left-color: var(--warn); }
-    .evt.error { border-left-color: var(--err); }
-    .evt .msg { font-size: 0.85rem; }
-    .evt .time { color: var(--muted); font-size: 0.77rem; }
-    .small-note { color: var(--muted); font-size: 0.82rem; }
-    @media (max-width: 700px) {
-      .stats { grid-template-columns: repeat(2, 1fr); }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="head">
-      <div>
-        <h1>PMU-PDC Real-Time Connection Monitor</h1>
-        <p class="sub">Live handshake status, frame health, and synchrophasor trends.</p>
-      </div>
-      <div class="status-chip"><span class="dot" id="dot"></span><span id="conn">Connecting...</span></div>
-    </div>
-
-    <section class="topology">
-      <p class="topology-title">Architecture Path Visibility</p>
-      <div class="flow">
-        <div class="node"><h3>PMU</h3><p id="nodePmu">waiting</p></div>
-        <div class="arrow">→</div>
-        <div class="node"><h3>PDC</h3><p id="nodePdc">waiting</p></div>
-        <div class="arrow">→</div>
-        <div class="node"><h3>Kafka / Redis / Postgres</h3><p id="nodeOut">waiting</p></div>
-      </div>
-    </section>
-
-    <div class="dash">
-      <section class="panel">
-        <h2>PMU Connection Health</h2>
-        <div class="pmu-list" id="pmuList"></div>
-        <p class="small-note">Connected means frame seen in last 3 seconds.</p>
-      </section>
-
-      <section class="panel">
-        <h2>Selected PMU Live Graph</h2>
-        <div class="stats" id="stats"></div>
-        <div class="graph-wrap">
-          <div class="legend">
-            <span class="lg-freq">Frequency (Hz)</span>
-            <span class="lg-mw">MW</span>
-            <span class="lg-mvar">MVAR</span>
-          </div>
-          <canvas id="trendCanvas" width="820" height="260"></canvas>
-        </div>
-      </section>
-    </div>
-
-    <section class="panel" style="margin-top:14px;">
-      <h2>Conversation Stream</h2>
-      <div class="dash">
-        <div>
-          <div class="small-note">PMU -> PDC</div>
-          <div class="stream" id="pmuToPdc"></div>
-        </div>
-        <div>
-          <div class="small-note">PDC -> Internal/Outputs</div>
-          <div class="stream" id="pdcToPmu"></div>
-        </div>
-      </section>
-    </section>
-  </div>
-  <script>
-    const pmuToPdc = document.getElementById('pmuToPdc');
-    const pdcToPmu = document.getElementById('pdcToPmu');
-    const dot = document.getElementById('dot');
-    const conn = document.getElementById('conn');
-    const pmuList = document.getElementById('pmuList');
-    const stats = document.getElementById('stats');
-    const trendCanvas = document.getElementById('trendCanvas');
-    const nodePmu = document.getElementById('nodePmu');
-    const nodePdc = document.getElementById('nodePdc');
-    const nodeOut = document.getElementById('nodeOut');
-
-    let selectedPMU = '';
-    let dashboard = { pmus: [] };
-
-    function cls(status) {
-      const s = (status || '').toLowerCase();
-      if (s.includes('error') || s.includes('fail')) return 'error';
-      if (s.includes('warn') || s.includes('reject') || s.includes('queued')) return 'warn';
-      return 'ok';
-    }
-
-    function appendEvent(target, e) {
-      const item = document.createElement('article');
-      item.className = 'evt ' + cls(e.status);
-      const t = new Date(e.time).toLocaleTimeString();
-      item.innerHTML = '<div class="time">' + t + ' · ' + (e.pmu || 'SYSTEM') + ' · ' + e.direction + '</div>' +
-        '<div class="msg"><strong>' + e.stage + '</strong> [' + e.status + '] - ' + e.message + '</div>';
-      target.prepend(item);
-      while (target.children.length > 240) {
-        target.removeChild(target.lastChild);
-      }
-    }
-
-    function route(e) {
-      if (e.from === 'PMU') {
-        appendEvent(pmuToPdc, e);
-      } else {
-        appendEvent(pdcToPmu, e);
-      }
-    }
-
-    function n(v, d = 2) {
-      if (typeof v !== 'number' || Number.isNaN(v)) return 'n/a';
-      return v.toFixed(d);
-    }
-
-    function ageText(ts) {
-      if (!ts) return 'never';
-      const sec = (Date.now() - new Date(ts).getTime()) / 1000;
-      if (sec < 1) return 'just now';
-      if (sec < 60) return sec.toFixed(1) + 's ago';
-      return (sec / 60).toFixed(1) + 'm ago';
-    }
-
-    function renderPMUList() {
-      pmuList.innerHTML = '';
-      if (!dashboard.pmus || dashboard.pmus.length === 0) {
-        pmuList.innerHTML = '<div class="small-note">No PMU state yet. Waiting for frames...</div>';
-        return;
-      }
-
-      if (!selectedPMU || !dashboard.pmus.find(p => p.name === selectedPMU)) {
-        selectedPMU = dashboard.pmus[0].name;
-      }
-
-      for (const p of dashboard.pmus) {
-        const el = document.createElement('div');
-        el.className = 'pmu-item' + (p.name === selectedPMU ? ' active' : '');
-        const badge = p.connected ? 'ok' : 'err';
-        const txt = p.connected ? 'connected' : 'disconnected';
-        el.innerHTML =
-          '<div class="row"><span class="name">' + p.name + '</span><span class="badge ' + badge + '">' + txt + '</span></div>' +
-          '<div class="row"><span>fps ' + n(p.approxFps, 1) + '</span><span>frames ' + p.totalFrames + '</span></div>' +
-          '<div class="row"><span>last frame</span><span>' + ageText(p.lastFrameTime) + '</span></div>';
-        el.onclick = () => {
-          selectedPMU = p.name;
-          renderPMUList();
-          renderSelected();
-        };
-        pmuList.appendChild(el);
-      }
-    }
-
-    function statCard(label, value) {
-      return '<div class="kpi"><div class="k">' + label + '</div><div class="v">' + value + '</div></div>';
-    }
-
-    function drawLine(ctx, points, color, minY, maxY, w, h, pad) {
-      if (points.length < 2) return;
-      const minX = points[0].ts;
-      const maxX = points[points.length - 1].ts;
-      const xSpan = Math.max(1, maxX - minX);
-      const ySpan = Math.max(0.0001, maxY - minY);
-
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      points.forEach((pt, i) => {
-        const x = pad + ((pt.ts - minX) / xSpan) * (w - pad * 2);
-        const y = h - pad - ((pt.v - minY) / ySpan) * (h - pad * 2);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-    }
-
-    function renderSelected() {
-      const p = (dashboard.pmus || []).find(x => x.name === selectedPMU);
-      if (!p) {
-        stats.innerHTML = '';
-        return;
-      }
-
-      stats.innerHTML =
-        statCard('Connection', p.connected ? 'Healthy' : 'Down') +
-        statCard('Frequency', n(p.lastReading.frequency, 3) + ' Hz') +
-        statCard('MW', n(p.lastReading.mw, 3)) +
-        statCard('MVAR', n(p.lastReading.mvar, 3)) +
-        statCard('Quality Rejects', p.qualityRejects) +
-        statCard('Kafka Errors', p.kafkaErrors) +
-        statCard('Store Errors', p.sinkErrors) +
-        statCard('Spool Queued', p.spoolQueued);
-
-      const ctx = trendCanvas.getContext('2d');
-      const w = trendCanvas.width;
-      const h = trendCanvas.height;
-      const pad = 28;
-
-      ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = '#f8fcff';
-      ctx.fillRect(0, 0, w, h);
-      ctx.strokeStyle = '#d0dee6';
-      ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-
-      const tr = p.trends || [];
-      if (tr.length < 2) {
-        ctx.fillStyle = '#4a6476';
-        ctx.font = '13px Segoe UI';
-        ctx.fillText('Waiting for enough samples to draw trend...', 20, 28);
-        return;
-      }
-
-      const freq = tr.map(x => ({ ts: x.ts, v: x.frequency }));
-      const mw = tr.map(x => ({ ts: x.ts, v: x.mw }));
-      const mvar = tr.map(x => ({ ts: x.ts, v: x.mvar }));
-      const all = freq.concat(mw).concat(mvar).map(x => x.v).filter(v => Number.isFinite(v));
-      const minY = Math.min.apply(null, all);
-      const maxY = Math.max.apply(null, all);
-      const margin = (maxY - minY) * 0.08 + 0.001;
-
-      for (let i = 0; i <= 4; i++) {
-        const y = pad + ((h - pad * 2) * i / 4);
-        ctx.strokeStyle = '#e5edf2';
-        ctx.beginPath();
-        ctx.moveTo(pad, y);
-        ctx.lineTo(w - pad, y);
-        ctx.stroke();
-      }
-
-      drawLine(ctx, freq, '#0277a8', minY - margin, maxY + margin, w, h, pad);
-      drawLine(ctx, mw, '#b06a00', minY - margin, maxY + margin, w, h, pad);
-      drawLine(ctx, mvar, '#6c47ff', minY - margin, maxY + margin, w, h, pad);
-    }
-
-    function renderTopology() {
-      const pmus = dashboard.pmus || [];
-      const connected = pmus.filter(x => x.connected).length;
-      const total = pmus.length;
-      const kafkaErrors = pmus.reduce((s, x) => s + (x.kafkaErrors || 0), 0);
-      const sinkErrors = pmus.reduce((s, x) => s + (x.sinkErrors || 0), 0);
-
-      nodePmu.textContent = total === 0 ? 'waiting for PMUs' : (connected + '/' + total + ' connected');
-      nodePdc.textContent = total === 0 ? 'idle' : 'tracking ' + total + ' PMU streams';
-      nodeOut.textContent = 'kafkaErr=' + kafkaErrors + ' | storeErr=' + sinkErrors;
-    }
-
-    async function refreshState() {
-      try {
-        const resp = await fetch('/conversation/state');
-        dashboard = await resp.json();
-        renderPMUList();
-        renderSelected();
-        renderTopology();
-      } catch (_) {}
-    }
-
-    fetch('/conversation/recent')
-      .then(r => r.json())
-      .then(events => events.forEach(route))
-      .catch(() => {});
-
-    refreshState();
-    setInterval(refreshState, 1000);
-
-    const es = new EventSource('/conversation/events');
-    es.onopen = () => {
-      dot.style.background = '#146c43';
-      conn.textContent = 'Live telemetry connected';
-    };
-    es.onerror = () => {
-      dot.style.background = '#a61111';
-      conn.textContent = 'Telemetry disconnected - retrying';
-    };
-    es.onmessage = (msg) => {
-      try {
-        route(JSON.parse(msg.data));
-      } catch (_) {}
-    };
-  </script>
-</body>
-</html>`

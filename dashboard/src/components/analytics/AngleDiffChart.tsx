@@ -11,7 +11,7 @@ import {
 import type { AngleHistoryPoint, AnglePair } from '../../types/analytics'
 import { anglePairColors } from '../../utils/analytics'
 import { CHART_TOOLTIP_STYLE } from '../../utils/chartTooltip'
-import { formatTS } from '../../utils/format'
+import { formatTS, formatTSMs } from '../../utils/format'
 
 type Props = {
   history: AngleHistoryPoint[]
@@ -28,7 +28,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
           <h3>Inter-PMU Angle Δ (VA)</h3>
           <p className="panel-sub">
             {pairs.length
-              ? `${pairs.length} pairwise comparisons across all connected PMUs`
+              ? `${pairs.length} pairwise comparisons from locked aligned VA angles`
               : 'Add a second online PMU to compare angles'}
           </p>
         </div>
@@ -54,7 +54,7 @@ export function AngleDiffChart({ history, pairs }: Props) {
               />
               <Tooltip
                 {...CHART_TOOLTIP_STYLE}
-                labelFormatter={(value) => formatTS(Number(value))}
+                labelFormatter={(value) => formatTSMs(Number(value))}
                 formatter={(value) => [`${Number(value ?? 0).toFixed(2)}°`, '']}
               />
               <Legend wrapperStyle={{ color: '#8a9aab', fontSize: 11 }} />

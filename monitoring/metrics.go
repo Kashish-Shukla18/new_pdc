@@ -1,3 +1,7 @@
+// Package monitoring feeds the live dashboard.
+//
+// It keeps the latest readings in memory, serves SSE/JSON on :2112,
+// and tracks timing so you can see which step is slow.
 package monitoring
 
 import (
@@ -19,15 +23,6 @@ var (
 	framesDropped = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_frames_dropped_total", Help: "Total frames dropped because handler pool was full."},
 	)
-	rawFramesPublished = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_raw_frames_published_total", Help: "Total raw C37.118 frames published to Kafka."},
-	)
-	rawFramesConsumed = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_raw_frames_consumed_total", Help: "Total raw C37.118 frames consumed from Kafka."},
-	)
-	readingsConsumed = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_readings_consumed_total", Help: "Total parsed readings consumed from Kafka (all fan-out groups)."},
-	)
 	framesParsed = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_frames_parsed_total", Help: "Total frames parsed into readings."},
 	)
@@ -36,9 +31,6 @@ var (
 	)
 	qualityRejected = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_quality_rejected_total", Help: "Total readings rejected by time/quality checks."},
-	)
-	queuePublishErrors = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_queue_publish_errors_total", Help: "Total Kafka publish errors."},
 	)
 	storeErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Redis/Postgres store errors."},
@@ -59,9 +51,6 @@ var (
 	sinkInflight = prometheus.NewGauge(
 		prometheus.GaugeOpts{Name: "pdc_sink_inflight", Help: "Current number of readings queued in sink channel."},
 	)
-	rawKafkaQueueDropped = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_raw_kafka_queue_dropped_total", Help: "Raw frames dropped because the Kafka ingress queue was full."},
-	)
 	dashboardQueueDropped = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_dashboard_queue_dropped_total", Help: "Readings dropped because the dashboard update queue was full."},
 	)
@@ -75,38 +64,28 @@ func init() {
 	prometheus.MustRegister(
 		framesReceived,
 		framesDropped,
-		rawFramesPublished,
-		rawFramesConsumed,
-		readingsConsumed,
 		framesParsed,
 		parseErrors,
 		qualityRejected,
-		queuePublishErrors,
 		storeErrors,
 		spoolQueued,
 		spoolReplayed,
 		processingLatency,
 		sinkInflight,
-		rawKafkaQueueDropped,
 		dashboardQueueDropped,
 		connectionReconnects,
 	)
 }
 
-func IncFramesReceived()     { framesReceived.Inc() }
-func IncFramesDropped()      { framesDropped.Inc() }
-func IncRawFramesPublished() { rawFramesPublished.Inc() }
-func IncRawFramesConsumed()  { rawFramesConsumed.Inc() }
-func IncReadingsConsumed()   { readingsConsumed.Inc() }
-func IncFramesParsed()       { framesParsed.Inc() }
-func IncSinkInflight()       { sinkInflight.Inc() }
-func DecSinkInflight()       { sinkInflight.Dec() }
+func IncFramesReceived() { framesReceived.Inc() }
+func IncFramesDropped()  { framesDropped.Inc() }
+func IncFramesParsed()   { framesParsed.Inc() }
+func IncSinkInflight()   { sinkInflight.Inc() }
+func DecSinkInflight()   { sinkInflight.Dec() }
 
 func IncParseErrors() { parseErrors.Inc() }
 
 func IncQualityRejected() { qualityRejected.Inc() }
-
-func IncQueuePublishErrors() { queuePublishErrors.Inc() }
 
 func IncStoreErrors() { storeErrors.Inc() }
 
@@ -119,7 +98,6 @@ func IncSpoolReplayed(n int) {
 	spoolReplayed.Add(float64(n))
 }
 
-func IncRawKafkaQueueDropped()  { rawKafkaQueueDropped.Inc() }
 func IncDashboardQueueDropped() { dashboardQueueDropped.Inc() }
 
 func IncConnectionReconnect(pmu string) {

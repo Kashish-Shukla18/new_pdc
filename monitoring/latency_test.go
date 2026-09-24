@@ -44,16 +44,16 @@ func TestFormatLatencySummarySeparatesConnection(t *testing.T) {
 	ObserveStage("TEST-PMU", StageTCPWait, 22*time.Millisecond)
 	ObserveStage("TEST-PMU", StageParse, 1*time.Millisecond)
 	s := FormatLatencySummary()
-	if !strings.Contains(s, "connection (one-time") {
-		t.Fatalf("expected one-time connection line, got:\n%s", s)
+	if !strings.Contains(s, "conn:") || !strings.Contains(s, "handshake_total=") {
+		t.Fatalf("expected conn/handshake segment, got:\n%s", s)
 	}
-	if !strings.Contains(s, "PMU clock skew") {
-		t.Fatalf("expected clock skew line, got:\n%s", s)
+	if !strings.Contains(s, "skew:") || !strings.Contains(s, "clock_skew_pmu=") {
+		t.Fatalf("expected clock skew segment, got:\n%s", s)
 	}
-	if !strings.Contains(s, "wait-for-PMU") {
-		t.Fatalf("expected wait-for-PMU line, got:\n%s", s)
+	if !strings.Contains(s, "idle:") || !strings.Contains(s, "tcp_wait=") {
+		t.Fatalf("expected idle/wait segment, got:\n%s", s)
 	}
-	if !strings.Contains(s, "processing slowest=") {
-		t.Fatalf("expected processing line, got:\n%s", s)
+	if !strings.Contains(s, "slowest=") {
+		t.Fatalf("expected slowest segment, got:\n%s", s)
 	}
 }

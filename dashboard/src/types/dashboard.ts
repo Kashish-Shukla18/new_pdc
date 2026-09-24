@@ -123,7 +123,6 @@ export type LivePMUState = {
   totalFrames: number
   approxFps: number
   qualityRejects: number
-  kafkaErrors: number
   sinkErrors: number
   spoolQueued: number
   lastReading: TrendPoint
@@ -161,11 +160,55 @@ export type UiTiming = {
   totalMs: number
 }
 
+export type AlignedPoint = {
+  frequency: number
+  frequencyDev?: number
+  rocof?: number
+  va?: number
+  vb?: number
+  vc?: number
+  ia?: number
+  ib?: number
+  ic?: number
+  vaAngle?: number
+  vbAngle?: number
+  vcAngle?: number
+  iaAngle?: number
+  /** CFG-2 analog channel names → values (e.g. Analog1). */
+  analogs?: Record<string, number>
+}
+
+export type AlignedBatch = {
+  ts: number
+  points: Record<string, AlignedPoint>
+  missing: string[]
+  complete: boolean
+  reason: string
+}
+
 export type DashboardState = {
   nowUtc: string
   pmus: LivePMUState[]
   eventCount: number
   latency?: PipelineLatency
+  aligner?: AlignerStatus
+  /** Time-aligned chart rows (one per measurement tick, gaps included). */
+  alignedBatches?: AlignedBatch[]
+}
+
+export type AlignerStatus = {
+  n: number
+  fps: number
+  periodMs: number
+  waitMs: number
+  maxOpen: number
+  freshMs?: number
+  expected?: string[]
+  emitted: number
+  complete: number
+  timeout: number
+  cap: number
+  completePct: number
 }
 
 export type ConversationEvent = {

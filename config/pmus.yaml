@@ -1,8 +1,0 @@
-pmus:
-  - name: "PMU-SIM-1"
-    ip: "127.0.0.1"
-    port: 4712
-    idcode: 7734
-    protocol: "tcp"         # tcp or udp
-    timeout_sec: 30         # dial / read timeout in seconds
-    reconnect_sec: 3        # seconds to wait before reconnecting

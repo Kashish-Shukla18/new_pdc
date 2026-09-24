@@ -22,35 +22,14 @@ import 'leaflet/dist/leaflet.css'
 import { MapContainer, TileLayer, Marker, Popup, Tooltip as LeafletTooltip, useMap } from 'react-leaflet'
 import { CHART_COLORS, INDIA_CENTER } from '../constants'
 import { useDashboardContext } from '../context/DashboardContext'
-import { formatTS, round } from '../utils/format'
+import { formatTS, formatTSMs, round } from '../utils/format'
 import { packetLossOf, pmuKey } from '../utils/pmu'
-import type { PMUWithMeta } from '../types/dashboard'
+import { rowsFromAlignedBatches, ALIGNED_CHART_WINDOW } from '../utils/alignedChart'
 
 type FreqMode = 'absolute' | 'deviation'
 
 /** Hard cap so Recharts stays interactive with large fleets. */
 const OVERVIEW_CHART_MAX_SERIES = 8
-const OVERVIEW_TREND_POINTS = 90
-
-function mergeSelectedTrends(pmus: PMUWithMeta[]): Record<string, number>[] {
-  const rows = new Map<number, Record<string, number>>()
-  for (const pmu of pmus) {
-    const key = pmuKey(pmu.name)
-    const trend = pmu.trends.slice(-OVERVIEW_TREND_POINTS)
-    const fnom = pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : 60
-    for (const point of trend) {
-      const row = rows.get(point.ts) ?? { ts: point.ts }
-      const freqDev =
-        typeof point.frequencyDev === 'number' ? point.frequencyDev : point.frequency - fnom
-      row[`${key}__frequency`] = point.frequency
-      row[`${key}__frequencyDev`] = freqDev
-      row[`${key}__rocof`] = point.rocof
-      row.fnom = fnom
-      rows.set(point.ts, row)
-    }
-  }
-  return Array.from(rows.values()).sort((a, b) => a.ts - b.ts)
-}
 
 function MapInvalidateSize() {
   const map = useMap()
@@ -72,6 +51,7 @@ function MapInvalidateSize() {
 export function OverviewPage() {
   const {
     pmus,
+    dashboard,
     mapFilter,
     setMapFilter,
     liveAlerts,
@@ -103,7 +83,16 @@ export function OverviewPage() {
     [pmus, selectedStreams],
   )
 
-  const chartTrend = useMemo(() => mergeSelectedTrends(plotPMUs), [plotPMUs])
+  // Time-aligned ticks from the PDC aligner (same source as Analytics charts).
+  const chartTrend = useMemo(
+    () =>
+      rowsFromAlignedBatches(
+        dashboard.alignedBatches,
+        plotPMUs.map((p) => p.name),
+        ALIGNED_CHART_WINDOW,
+      ),
+    [dashboard.alignedBatches, plotPMUs],
+  )
 
   const fleetFnom = useMemo(() => {
     const fromSelected = plotPMUs.map((p) => p.fnomHz).filter((v): v is number => !!v && v > 0)
@@ -273,8 +262,8 @@ export function OverviewPage() {
               <h3>System Frequency</h3>
               <p>
                 {freqMode === 'absolute'
-                  ? `Absolute Hz · FNOM ${fleetFnom} Hz band`
-                  : `Δf from CFG FNOM (${fleetFnom} Hz)`}
+                  ? `Absolute Hz · FNOM ${fleetFnom} Hz · time-aligned ticks`
+                  : `Δf from CFG FNOM (${fleetFnom} Hz) · time-aligned ticks`}
               </p>
             </div>
             <div className="panel-tools-inline">
@@ -313,10 +302,10 @@ export function OverviewPage() {
                   width={56}
                 />
                 <Tooltip
-                  labelFormatter={(value) => formatTS(Number(value))}
-                  formatter={(value) => [
+                  labelFormatter={(value) => formatTSMs(Number(value))}
+                  formatter={(value, name) => [
                     `${round(Number(value ?? 0), 4)} ${freqMode === 'absolute' ? 'Hz' : 'Hz Δ'}`,
-                    '',
+                    String(name),
                   ]}
                 />
                 <Legend />
@@ -341,7 +330,7 @@ export function OverviewPage() {
                       stroke={color}
                       dot={false}
                       strokeWidth={1.75}
-                      connectNulls
+                      connectNulls={false}
                       isAnimationActive={false}
                     />
                   )
@@ -355,7 +344,7 @@ export function OverviewPage() {
           <div className="panel-head">
             <div>
               <h3>ROCOF</h3>
-              <p>Rate of change of frequency (Hz/s)</p>
+              <p>Rate of change of frequency (Hz/s) · time-aligned ticks</p>
             </div>
           </div>
           <div className="chart-wrap overview-chart">
@@ -371,8 +360,11 @@ export function OverviewPage() {
                 />
                 <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={['auto', 'auto']} scale="linear" width={56} />
                 <Tooltip
-                  labelFormatter={(value) => formatTS(Number(value))}
-                  formatter={(value) => [`${round(Number(value ?? 0), 5)} Hz/s`, 'ROCOF']}
+                  labelFormatter={(value) => formatTSMs(Number(value))}
+                  formatter={(value, name) => [
+                    `${round(Number(value ?? 0), 5)} Hz/s`,
+                    String(name),
+                  ]}
                 />
                 <Legend />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.25)" strokeDasharray="4 4" />
@@ -388,7 +380,7 @@ export function OverviewPage() {
                       stroke={color}
                       dot={false}
                       strokeWidth={1.75}
-                      connectNulls
+                      connectNulls={false}
                       isAnimationActive={false}
                     />
                   )
