@@ -1,34 +1,35 @@
+// Package config describes how to reach one PMU (IP, port, idcode, …).
+//
+// Think of it like a contact card for each device.
+// The real list of PMUs lives in Postgres (see store/), not in YAML files.
 package config
 
 import (
 	"fmt"
-	"os"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
-// PMUConfig holds the connection parameters for a single PMU.
+// PMUConfig is the contact card for one phasor measurement unit.
 type PMUConfig struct {
-	Name         string  `yaml:"name" json:"name"`
-	IP           string  `yaml:"ip" json:"ip"`
-	Port         int     `yaml:"port" json:"port"`                               // TCP dial port, or UDP *listen* port
-	TCPPort      int     `yaml:"tcp_port" json:"tcp_port"`                       // optional; UDP mode: TCP port for CFG/DATA_ON
-	IDCode       uint16  `yaml:"idcode" json:"idcode"`
-	Protocol     string  `yaml:"protocol" json:"protocol"`                       // "tcp" (default) or "udp"
-	TimeoutSec   int     `yaml:"timeout_sec" json:"timeout_sec"`                 // dial / read timeout
-	ReconnectSec int     `yaml:"reconnect_sec" json:"reconnect_sec"`             // reconnect back-off
-	Region       string  `yaml:"region" json:"region"`                           // geographical region
-	Lat          float64 `yaml:"lat" json:"lat"`                                 // latitude
-	Lon          float64 `yaml:"lon" json:"lon"`                                 // longitude
+	Name         string  `json:"name"`
+	IP           string  `json:"ip"`
+	Port         int     `json:"port"`       // TCP dial port, or UDP listen port
+	TCPPort      int     `json:"tcp_port"`   // UDP mode only: TCP port for handshake
+	IDCode       uint16  `json:"idcode"`
+	Protocol     string  `json:"protocol"`   // "tcp" (default) or "udp"
+	TimeoutSec   int     `json:"timeout_sec"`
+	ReconnectSec int     `json:"reconnect_sec"`
+	Region       string  `json:"region"`
+	Lat          float64 `json:"lat"`
+	Lon          float64 `json:"lon"`
 }
 
-// Addr returns the "host:port" string used for dialing.
+// Addr is "ip:port" — what we dial.
 func (p *PMUConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", p.IP, p.Port)
 }
 
-// Timeout returns the dial/read timeout as a time.Duration.
+// Timeout for dial / handshake reads.
 func (p *PMUConfig) Timeout() time.Duration {
 	if p.TimeoutSec <= 0 {
 		return 60 * time.Second
@@ -36,8 +37,7 @@ func (p *PMUConfig) Timeout() time.Duration {
 	return time.Duration(p.TimeoutSec) * time.Second
 }
 
-// DataReadTimeout is the idle timeout while waiting for the next DATA frame.
-// Field PMUs can have multi-second gaps between bursts; keep this generous.
+// DataReadTimeout is how long we wait for the next DATA frame on a quiet stream.
 func (p *PMUConfig) DataReadTimeout() time.Duration {
 	t := p.Timeout()
 	if t < 60*time.Second {
@@ -46,7 +46,7 @@ func (p *PMUConfig) DataReadTimeout() time.Duration {
 	return t
 }
 
-// ReconnectInterval returns the reconnect back-off as a time.Duration.
+// ReconnectInterval is how long we sleep before trying again after a drop.
 func (p *PMUConfig) ReconnectInterval() time.Duration {
 	if p.ReconnectSec <= 0 {
 		return 5 * time.Second
@@ -54,7 +54,7 @@ func (p *PMUConfig) ReconnectInterval() time.Duration {
 	return time.Duration(p.ReconnectSec) * time.Second
 }
 
-// NetworkProtocol returns "tcp" unless "udp" is explicitly set.
+// NetworkProtocol is "tcp" unless you explicitly set "udp".
 func (p *PMUConfig) NetworkProtocol() string {
 	if p.Protocol == "udp" {
 		return "udp"
@@ -62,7 +62,7 @@ func (p *PMUConfig) NetworkProtocol() string {
 	return "tcp"
 }
 
-// Normalize fills defaults and fixes common UI copy-paste mistakes (e.g. tcp_port=4714 on TCP PMUs).
+// Normalize fills blanks and cleans up common form mistakes.
 func (p *PMUConfig) Normalize() {
 	if p.Protocol == "" {
 		p.Protocol = "tcp"
@@ -76,55 +76,4 @@ func (p *PMUConfig) Normalize() {
 	if p.ReconnectSec <= 0 {
 		p.ReconnectSec = 5
 	}
-}
-
-// Config is the top-level configuration loaded from pmus.yaml.
-type Config struct {
-	PMUs []PMUConfig `yaml:"pmus"`
-}
-
-// Load reads and parses the YAML configuration file at path.
-func Load(path string) (*Config, error) {
-	f, err := os.Open(path) // #nosec G304 – path comes from a controlled CLI argument
-	if err != nil {
-		return nil, fmt.Errorf("config: open %q: %w", path, err)
-	}
-	defer f.Close()
-
-	var cfg Config
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", path, err)
-	}
-
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("config: validation: %w", err)
-	}
-
-	return &cfg, nil
-}
-
-func (c *Config) validate() error {
-	if len(c.PMUs) == 0 {
-		return fmt.Errorf("no PMUs defined")
-	}
-	seen := make(map[uint16]string)
-	for i, p := range c.PMUs {
-		if p.IP == "" {
-			return fmt.Errorf("pmus[%d] (%s): ip is required", i, p.Name)
-		}
-		if p.Port <= 0 || p.Port > 65535 {
-			return fmt.Errorf("pmus[%d] (%s): port %d is invalid", i, p.Name, p.Port)
-		}
-		if p.IDCode == 0 {
-			return fmt.Errorf("pmus[%d] (%s): idcode must be non-zero", i, p.Name)
-		}
-		if prev, dup := seen[p.IDCode]; dup {
-			return fmt.Errorf("pmus[%d] (%s): duplicate idcode %d (already used by %s)",
-				i, p.Name, p.IDCode, prev)
-		}
-		seen[p.IDCode] = p.Name
-	}
-	return nil
 }

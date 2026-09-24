@@ -13,7 +13,6 @@ import {
 } from '../utils/connectivity'
 import { useCycleLatencyHistory } from './useCycleLatencyHistory'
 import { useRttHistory } from './useRttHistory'
-import { useFrameTrendHistory } from './useFrameTrendHistory'
 import type {
   ConversationEvent,
   DashboardState,
@@ -32,6 +31,7 @@ import {
   buildOfflinePMU,
   metaForDB,
   packetLossOf,
+  pmuKey,
   toneFromStatus,
 } from '../utils/pmu'
 
@@ -309,9 +309,8 @@ export function useDashboard() {
   const systemCounts = useMemo(() => {
     const connected = pmus.filter((pmu) => pmu.connected).length
     const disconnected = pmus.length - connected
-    const totalErrors = pmus.reduce((sum, pmu) => sum + pmu.kafkaErrors + pmu.sinkErrors, 0)
-    const spool = pmus.reduce((sum, pmu) => sum + pmu.spoolQueued, 0)
-    return { connected, disconnected, totalErrors, spool }
+    const totalErrors = pmus.reduce((sum, pmu) => sum + pmu.qualityRejects, 0)
+    return { connected, disconnected, totalErrors }
   }, [pmus])
 
   const frameRate = selectedPMU?.approxFps ?? 0
@@ -396,12 +395,6 @@ export function useDashboard() {
   const connectivityRecs = useMemo(() => computeConnectivityRecs(connectivityRows), [connectivityRows])
   const { rttHistory, rttStreams } = useRttHistory(connectivityRows, dashboard.nowUtc, isPaused)
   const { cycleHistory, cycleLatest } = useCycleLatencyHistory(pmus, dashboard.nowUtc, isPaused)
-  const frameTrendHistory = useFrameTrendHistory(
-    selectedFramePMU,
-    selectedFramePMUName,
-    dashboard.nowUtc,
-    isPaused,
-  )
 
   const onlinePMUs = useMemo(() => pmus.filter((pmu) => pmu.connected), [pmus])
   const anglePairs = useMemo(
@@ -420,24 +413,33 @@ export function useDashboard() {
     [pmus, anglePairs, analyticsRecs],
   )
 
-  const angleHistoryRef = useRef<AngleHistoryPoint[]>([])
-  const [angleHistory, setAngleHistory] = useState<AngleHistoryPoint[]>([])
+  const angleHistory = useMemo(() => {
+    const batches = dashboard.alignedBatches ?? []
+    if (!chartAnglePairs.length || !batches.length) return []
 
-  useEffect(() => {
-    if (!chartAnglePairs.length || isPaused) return
-
-    const point: AngleHistoryPoint = {
-      ts: Date.now(),
-      label: new Date().toLocaleTimeString(),
-    }
-    for (const pair of chartAnglePairs) {
-      point[pair.key] = pair.value
+    const wrap = (deg: number) => {
+      const raw = Math.abs(deg)
+      return raw > 180 ? 360 - raw : raw
     }
 
-    const next = [...angleHistoryRef.current, point].slice(-60)
-    angleHistoryRef.current = next
-    setAngleHistory(next)
-  }, [chartAnglePairs, isPaused, dashboard.nowUtc])
+    return batches.slice(-60).map((batch) => {
+      const point: AngleHistoryPoint = {
+        ts: batch.ts,
+        label: new Date(batch.ts).toLocaleTimeString(),
+      }
+      for (const pair of chartAnglePairs) {
+        const [aKey, bKey] = pair.key.split('__')
+        const aName = pmus.find((p) => pmuKey(p.name) === aKey)?.name
+        const bName = pmus.find((p) => pmuKey(p.name) === bKey)?.name
+        const a = aName ? batch.points?.[aName] : undefined
+        const b = bName ? batch.points?.[bName] : undefined
+        if (a && b && typeof a.vaAngle === 'number' && typeof b.vaAngle === 'number') {
+          point[pair.key] = round(wrap(a.vaAngle - b.vaAngle), 2)
+        }
+      }
+      return point
+    })
+  }, [dashboard.alignedBatches, chartAnglePairs, pmus])
 
   const filteredHelp = HELP_SECTIONS.filter((item) => {
     if (!helpQuery.trim()) return true
@@ -522,7 +524,6 @@ export function useDashboard() {
     rttStreams,
     cycleHistory,
     cycleLatest,
-    frameTrendHistory,
     anglePairs,
     chartAnglePairs,
     angleHistory,

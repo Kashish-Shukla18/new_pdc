@@ -1,10 +1,42 @@
-// Package receiver manages TCP connections to PMUs and implements the
-// IEEE C37.118 connection handshake (request header → config-2 → start data).
+// Package receiver — one phone line to one PMU.
+//
+// # Big picture (read this first)
+//
+// A PMU (Phasor Measurement Unit) is a device that measures the power grid
+// many times per second. This file is the "phone call" code: we call the PMU,
+// ask it how its data is shaped, tell it to start talking, then catch every
+// measurement packet and hand it to the rest of the PDC.
+//
+// Think of it like ordering pizza over the phone:
+//
+//  1. DIAL     — call the PMU's IP:port (TCP or UDP)
+//  2. ASK MENU — send "please send Config Frame 2" (CFG2 = the recipe for DATA)
+//  3. GET MENU — wait until CFG2 arrives; save it in RAM (parser.SetProfile)
+//  4. SAY GO   — send "turn data ON"
+//  5. LISTEN   — read DATA frames forever; on hang-up, wait and redial
+//
+// # Protocol choice (config field "protocol")
+//
+//   - "tcp" (default, used by pmu-1/2/3 and most lab sims)
+//       → connectTCP: everything on one TCP socket
+//   - "udp"
+//       → connectUDPDial  (no tcp_port): commands + DATA on one UDP socket
+//       → connectUDPListen (tcp_port set): commands on TCP, DATA on UDP listen
+//
+// # File map
+//
+//   §1  Constants & frame helpers — frame types, CRC, build/read one frame
+//   §2  Receiver lifecycle        — Run loop = dial, on error sleep & retry
+//   §3  UDP path                  — dial mode & listen mode
+//   §4  TCP path                  — connectTCP + handshakeCFG + DATA loop
+//   §5  Shared send / wait tools  — sendCMD, readFrameOfType, UDP handshake
+//
 package receiver
 
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,35 +50,40 @@ import (
 	"pdc/parser"
 )
 
-// ─── IEEE C37.118 constants ───────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// §1  CONSTANTS & FRAME HELPERS
+//     "What does an IEEE C37.118 packet look like?"
+//     Every packet starts with 0xAA. The next byte says DATA / CFG2 / CMD / …
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const (
-	syncByte = 0xAA // SYNC leading byte for all C37.118 frames
+	syncByte = 0xAA // first byte of every valid frame — like a "start here" flag
 
-	// Frame type in SYNC bits 6-4 (mask with frameTypeMask). Version is bits 3-0.
+	// Frame type lives in SYNC bits 6-4. Version lives in bits 3-0.
 	frameTypeMask = 0x70
-	frameTypeData = 0x00
-	frameTypeHdr  = 0x10
-	frameTypeCfg1 = 0x20
-	frameTypeCfg2 = 0x30
-	frameTypeCmd  = 0x40
-	frameTypeCfg3 = 0x50
+	frameTypeData = 0x00 // measurement sample (what we stream forever)
+	frameTypeHdr  = 0x10 // optional human-readable header text
+	frameTypeCfg1 = 0x20 // "everything this PMU can do"
+	frameTypeCfg2 = 0x30 // "what it is sending right now" ← we need this
+	frameTypeCmd  = 0x40 // our orders TO the PMU
+	frameTypeCfg3 = 0x50 // newer optional config (we rarely use)
 
 	// C37.118.2-2011 version number in SYNC bits 3-0.
 	syncVersion = 0x02
 
-	// CMD word values (sent inside a CMD frame)
-	cmdDataOff  uint16 = 0x0001 // turn off data transmission
-	cmdDataOn   uint16 = 0x0002 // turn on data transmission
-	cmdSendHdr  uint16 = 0x0003 // send header frame
-	cmdSendCfg1 uint16 = 0x0004 // send config-1 frame
-	cmdSendCfg2 uint16 = 0x0005 // send config-2 frame
-	cmdSendCfg3 uint16 = 0x0006 // send config-3 frame
+	// Command words inside a CMD frame (the "order" we write on the pizza slip)
+	cmdDataOff  uint16 = 0x0001 // stop sending DATA
+	cmdDataOn   uint16 = 0x0002 // start sending DATA
+	cmdSendHdr  uint16 = 0x0003 // please send HEADER
+	cmdSendCfg1 uint16 = 0x0004 // please send CFG-1
+	cmdSendCfg2 uint16 = 0x0005 // please send CFG-2  ← main ask
+	cmdSendCfg3 uint16 = 0x0006 // please send CFG-3
 )
 
-// ─── Frame helpers ────────────────────────────────────────────────────────────
+// ─── Frame helpers (build a command, read a frame, check the checksum) ────────
 
-// crc16 computes the CRC-CCITT (0xFFFF) used by C37.118.
+// crc16 is a fingerprint at the end of every frame. If it does not match,
+// the bytes were corrupted on the wire — we reject that frame.
 func crc16(data []byte) uint16 {
 	crc := uint16(0xFFFF)
 	for _, b := range data {
@@ -62,21 +99,30 @@ func crc16(data []byte) uint16 {
 	return crc
 }
 
-// buildCMDFrame constructs a C37.118 CMD frame for the given idcode and command.
+// buildCMDFrame packs one 18-byte "order slip" we send TO the PMU (version 2).
+// Prefer buildCMDFrameVer when talking to Std2005 devices (version 1).
 //
-//	SYNC(2) | FRAMESIZE(2) | IDCODE(2) | SOC(4) | FRACSEC(4) | CMD(2) | CHK(2)
+// Layout:  SYNC | SIZE | IDCODE | SOC | FRACSEC | CMD | CHECKSUM
+//
+// SOC/FRACSEC stay 0 (same as PMU Connection Tester).
 func buildCMDFrame(idcode uint16, cmd uint16) []byte {
+	return buildCMDFrameVer(idcode, cmd, syncVersion)
+}
+
+// buildCMDFrameVer is like buildCMDFrame but sets SYNC version bits (1 = 2005, 2 = 2011).
+// Typhoon / some field PMUs answer CFG2 as Version 1 and ignore CMD frames with version 2.
+func buildCMDFrameVer(idcode uint16, cmd uint16, ver byte) []byte {
 	const frameSize = 18
 	buf := make([]byte, frameSize)
+	if ver < 1 || ver > 2 {
+		ver = syncVersion
+	}
 
 	buf[0] = syncByte
-	buf[1] = frameTypeCmd | syncVersion // type=CMD (100), version=2
+	buf[1] = frameTypeCmd | ver // type=CMD (100b), version in low nibble
 	binary.BigEndian.PutUint16(buf[2:], frameSize)
 	binary.BigEndian.PutUint16(buf[4:], idcode)
-
-	now := uint32(time.Now().Unix())
-	binary.BigEndian.PutUint32(buf[6:], now)   // SOC
-	binary.BigEndian.PutUint32(buf[10:], 0x00) // FRACSEC (quality = 0)
+	// SOC + FRACSEC stay 0 (bytes 6..13)
 	binary.BigEndian.PutUint16(buf[14:], cmd)
 
 	chk := crc16(buf[:frameSize-2])
@@ -85,16 +131,17 @@ func buildCMDFrame(idcode uint16, cmd uint16) []byte {
 	return buf
 }
 
-// readFrame reads one complete C37.118 frame from r, returning the raw bytes.
+// readFrame pulls ONE full frame from a stream (TCP) or datagram (UDP).
 func readFrame(r io.Reader) ([]byte, error) {
 	tf, err := readFrameTimed(r)
 	return tf.raw, err
 }
 
+// timedFrame is a frame plus two stopwatches for latency charts.
 type timedFrame struct {
 	raw  []byte
-	wait time.Duration // blocking until first header byte (PMU inter-sample gap)
-	copy time.Duration // first byte through CRC-verified complete frame
+	wait time.Duration // how long we sat idle before the first byte arrived
+	copy time.Duration // how long to finish copying the whole frame after that
 }
 
 func (t timedFrame) total() time.Duration { return t.wait + t.copy }
@@ -268,6 +315,8 @@ func trimASCII(b []byte) string {
 	return s
 }
 
+// decodeCFG2Details prints a friendly summary of the CFG2 "menu" (station name,
+// rate, how many phasors, …). Parsing for real use is in parser.ParseCFG2Frame.
 func decodeCFG2Details(pmuName string, raw []byte) {
 	if len(raw) < 16 {
 		return
@@ -370,41 +419,45 @@ func decodeCFG2Details(pmuName string, raw []byte) {
 	}
 }
 
-// ─── Receiver ────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// §2  RECEIVER LIFECYCLE
+//     One Receiver = one PMU config + reconnect loop.
+//     Run() keeps calling connect() forever until the program shuts down.
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// FrameHandler is called for every data frame received from the PMU.
-// raw contains the complete, CRC-verified C37.118 frame bytes.
-// Used only in direct mode (no raw Kafka ingress).
-type FrameHandler func(pmuName string, raw []byte)
+// FrameHandler is the "give this packet to someone else" callback.
+// receivedAt = wall clock when the full frame finished arriving (before parse).
+type FrameHandler func(pmuName string, raw []byte, receivedAt time.Time)
 
-// RawFramePublisher publishes CRC-verified frames to the raw Kafka topic.
-// Implementations must be safe for concurrent use from multiple PMU receivers.
-type RawFramePublisher interface {
-	Publish(ctx context.Context, pmuName, frameType string, idCode uint16, raw []byte, tcpWait, tcpCopy time.Duration) error
-}
-
-// Receiver manages a persistent, auto-reconnecting TCP connection to one PMU.
+// Receiver is the worker that owns one PMU connection.
 type Receiver struct {
 	cfg            config.PMUConfig
 	handler        FrameHandler
-	rawPub         RawFramePublisher
-	reconnectFails int
+	reconnectFails int                   // how many times in a row we failed (for backoff)
+	onSessionStart func(pmuName string) // optional: reset charts when stream starts
+	cmdVersion     byte                  // SYNC version for CMDs after CFG2 (1 or 2); 0 = default
 }
 
-// New creates a Receiver for the given PMU configuration.
-// handler, when set, parses/displays in-process (live path).
-// rawPub, when set, also publishes CRC-verified frames to Kafka (durability).
-// Both may be set together in mode=all so Kafka is not on the live hot path.
-func New(cfg config.PMUConfig, handler FrameHandler, rawPub RawFramePublisher) *Receiver {
+// New builds a Receiver (does not dial yet — call Run for that).
+func New(cfg config.PMUConfig, handler FrameHandler) *Receiver {
 	return &Receiver{
 		cfg:     cfg,
 		handler: handler,
-		rawPub:  rawPub,
 	}
 }
 
-// Run connects to the PMU and streams data frames until ctx is cancelled.
-// On any connection or protocol error it waits with backoff and retries.
+// SetOnSessionStart runs after a successful handshake + DATA_ON (and on reconnect).
+func (r *Receiver) SetOnSessionStart(fn func(pmuName string)) {
+	r.onSessionStart = fn
+}
+
+// Run is the outer loop:
+//
+//	for ever {
+//	  try connect()          // dial + handshake + stream until error
+//	  if program quitting → stop
+//	  else sleep a bit (backoff) and try again
+//	}
 func (r *Receiver) Run(ctx context.Context) {
 	for {
 		err := r.connect(ctx)
@@ -429,6 +482,8 @@ func (r *Receiver) Run(ctx context.Context) {
 	}
 }
 
+// reconnectDelay grows after repeated failures (capped), plus a tiny name-based
+// jitter so many PMUs do not all retry at the exact same millisecond.
 func (r *Receiver) reconnectDelay() time.Duration {
 	base := r.cfg.ReconnectInterval()
 	fails := r.reconnectFails
@@ -439,7 +494,6 @@ func (r *Receiver) reconnectDelay() time.Duration {
 	if delay > 30*time.Second {
 		delay = 30 * time.Second
 	}
-	// Stagger PMUs so they don't hammer the device simultaneously.
 	var jitter int
 	for _, c := range r.cfg.Name {
 		jitter += int(c)
@@ -447,8 +501,7 @@ func (r *Receiver) reconnectDelay() time.Duration {
 	return delay + time.Duration(jitter%800)*time.Millisecond
 }
 
-// connect performs the full C37.118 connection handshake and reads data frames
-// until an error occurs or ctx is cancelled.
+// connect picks TCP or UDP from config, then runs that path.
 func (r *Receiver) connect(ctx context.Context) error {
 	if r.cfg.NetworkProtocol() == "udp" {
 		return r.connectUDP(ctx)
@@ -456,10 +509,133 @@ func (r *Receiver) connect(ctx context.Context) error {
 	return r.connectTCP(ctx)
 }
 
-// connectUDP receives spontaneous / unicast UDP DATA.
-// Port = local UDP listen port (matches "Remote UDP Port" in PMU Connection Tester).
-// TCPPort = optional TCP command port (matches "Local TCP Port") for CFG2 + DATA_ON.
+// ═══════════════════════════════════════════════════════════════════════════════
+// §3  UDP PATH
+//     Used when config.protocol == "udp".
+//
+//     Two flavours:
+//       A) Dial   (tcp_port unset) — we call the PMU’s UDP address; commands
+//          and DATA share that one socket (like Connection Tester UDP tab).
+//       B) Listen (tcp_port set)   — we open a local UDP port for DATA, and
+//          use a separate TCP connection only for CFG2 / DATA_ON.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// connectUDP chooses dial vs listen.
 func (r *Receiver) connectUDP(ctx context.Context) error {
+	if r.cfg.TCPPort <= 0 {
+		return r.connectUDPDial(ctx) // flavour A
+	}
+	return r.connectUDPListen(ctx) // flavour B
+}
+
+// connectUDPDial — flavour A (one UDP socket for everything)
+//
+// Steps:
+//  1. DialUDP to IP:port
+//  2. Handshake over UDP (ask CFG2 until it arrives)
+//  3. Send DATA_ON
+//  4. Loop: read datagrams → if DATA, dispatch to the rest of the PDC
+func (r *Receiver) connectUDPDial(ctx context.Context) error {
+	timeout := r.cfg.Timeout()
+	ip := net.ParseIP(strings.TrimSpace(r.cfg.IP))
+	if ip == nil {
+		return fmt.Errorf("udp dial: invalid ip %q", r.cfg.IP)
+	}
+	remote := &net.UDPAddr{IP: ip, Port: r.cfg.Port}
+	dialStart := time.Now()
+	pc, err := net.DialUDP("udp4", nil, remote)
+	if err != nil {
+		return fmt.Errorf("udp dial %s: %w", remote, err)
+	}
+	defer pc.Close()
+	_ = pc.SetReadBuffer(256 * 1024)
+	dialDur := time.Since(dialStart)
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
+
+	log.Printf("[%s] UDP dialed %s (local %s) in %s — Connection Tester style",
+		r.cfg.Name, remote, pc.LocalAddr(), monitoring.FormatMs(dialDur))
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
+		fmt.Sprintf("udp dial %s", remote))
+
+	if err := r.handshakeCFGUDP(ctx, pc, timeout); err != nil {
+		return err
+	}
+	if err := r.sendCMDUDP(pc, cmdDataOn); err != nil {
+		return fmt.Errorf("send CMD_DATA_ON: %w", err)
+	}
+	log.Printf("[%s] sent CMD_DATA_ON on UDP – streaming data from %s", r.cfg.Name, remote)
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok", "sent CMD_DATA_ON via UDP")
+	r.reconnectFails = 0
+	if r.onSessionStart != nil {
+		r.onSessionStart(r.cfg.Name)
+	}
+
+	buf := make([]byte, 65535)
+	dataFrames := 0
+	var lastComplete time.Time
+	idleTimeout := timeout
+	if idleTimeout < 15*time.Second {
+		idleTimeout = 15 * time.Second
+	}
+
+	for {
+		if ctx.Err() != nil {
+			_ = r.sendCMDUDP(pc, cmdDataOff)
+			return nil
+		}
+		_ = pc.SetReadDeadline(time.Now().Add(idleTimeout))
+		start := time.Now()
+		n, err := pc.Read(buf)
+		first := time.Now()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return fmt.Errorf("udp idle timeout from %s (no datagrams — disconnect Connection Tester if it holds the stream)", remote)
+			}
+			return fmt.Errorf("udp read %s: %w", remote, err)
+		}
+		tf, err := parseFrameBytes(buf[:n], first.Sub(start), time.Since(first))
+		if err != nil {
+			log.Printf("[%s] udp bad datagram: %v", r.cfg.Name, err)
+			continue
+		}
+		completeAt := time.Now()
+		ft := frameType(tf.raw)
+		switch ft {
+		case frameTypeCfg2:
+			if profile, perr := parser.ParseCFG2Frame(tf.raw); perr == nil {
+				parser.SetProfile(r.cfg.Name, profile)
+				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
+			}
+		case frameTypeData:
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
+			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPRead, tf.total())
+			if !lastComplete.IsZero() {
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPInterarrival, completeAt.Sub(lastComplete))
+			}
+			lastComplete = completeAt
+			dataFrames++
+			if dataFrames <= 3 {
+				logFrameTrace(r.cfg.Name, fmt.Sprintf("udp rx #%d wait=%s", dataFrames, monitoring.FormatMs(tf.wait)), tf.raw)
+			}
+			payload := append([]byte(nil), tf.raw...)
+			r.dispatchDataFrame(payload, completeAt)
+		default:
+			if dataFrames < 3 {
+				log.Printf("[%s] udp skip %s", r.cfg.Name, frameTypeName(ft))
+			}
+		}
+	}
+}
+
+// connectUDPListen — flavour B (TCP for commands, UDP listen for DATA)
+//
+// Steps:
+//  1. ListenUDP on our local Port (PMU will push DATA here)
+//  2. Dial TCP to IP:tcp_port for the handshake
+//  3. CFG2 + DATA_ON on TCP
+//  4. Loop: ReadFromUDP → only keep packets from the expected IP → dispatch DATA
+func (r *Receiver) connectUDPListen(ctx context.Context) error {
 	timeout := r.cfg.Timeout()
 	listenAddr := &net.UDPAddr{IP: net.IPv4zero, Port: r.cfg.Port}
 	pc, err := net.ListenUDP("udp4", listenAddr)
@@ -477,38 +653,34 @@ func (r *Receiver) connectUDP(ctx context.Context) error {
 
 	tcpPort := r.cfg.TCPPort
 	var tcpConn net.Conn
-	if tcpPort > 0 {
-		tcpAddr := fmt.Sprintf("%s:%d", r.cfg.IP, tcpPort)
-		dialer := &net.Dialer{Timeout: timeout}
-		dialStart := time.Now()
-		tcpConn, err = dialer.DialContext(ctx, "tcp", tcpAddr)
-		dialDur := time.Since(dialStart)
-		monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
-		if err != nil {
-			return fmt.Errorf("tcp dial %s for UDP CFG: %w", tcpAddr, err)
-		}
-		defer tcpConn.Close()
-		configureStreamConn(tcpConn)
-		log.Printf("[%s] UDP mode: TCP control connected to %s in %s",
-			r.cfg.Name, tcpAddr, monitoring.FormatMs(dialDur))
-
-		if err := r.handshakeCFG(ctx, tcpConn, timeout); err != nil {
-			return err
-		}
-		if err := r.sendCMD(tcpConn, cmdDataOn); err != nil {
-			return fmt.Errorf("send CMD_DATA_ON: %w", err)
-		}
-		log.Printf("[%s] sent CMD_DATA_ON on TCP – expecting DATA on UDP :%d", r.cfg.Name, r.cfg.Port)
-		monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok",
-			fmt.Sprintf("DATA_ON via TCP :%d; listening UDP :%d", tcpPort, r.cfg.Port))
-
-		// Drain TCP so the peer is not blocked if it also emits DATA there.
-		go drainTCPQuiet(tcpConn)
-	} else if _, ok := parser.GetProfile(r.cfg.Name); !ok {
-		return fmt.Errorf("udp listen :%d needs tcp_port for CFG2 (set tcp_port to Connection Tester Local TCP Port), or connect TCP once first", r.cfg.Port)
-	} else {
-		log.Printf("[%s] UDP listen :%d using existing CFG2 profile (no tcp_port)", r.cfg.Name, r.cfg.Port)
+	tcpAddr := fmt.Sprintf("%s:%d", r.cfg.IP, tcpPort)
+	dialer := &net.Dialer{Timeout: timeout}
+	dialStart := time.Now()
+	tcpConn, err = dialer.DialContext(ctx, "tcp", tcpAddr)
+	dialDur := time.Since(dialStart)
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
+	if err != nil {
+		return fmt.Errorf("tcp dial %s for UDP CFG: %w", tcpAddr, err)
 	}
+	defer tcpConn.Close()
+	configureStreamConn(tcpConn)
+	log.Printf("[%s] UDP mode: TCP control connected to %s in %s",
+		r.cfg.Name, tcpAddr, monitoring.FormatMs(dialDur))
+
+	if err := r.handshakeCFG(ctx, tcpConn, timeout); err != nil {
+		return err
+	}
+	if err := r.sendCMD(tcpConn, cmdDataOn); err != nil {
+		return fmt.Errorf("send CMD_DATA_ON: %w", err)
+	}
+	log.Printf("[%s] sent CMD_DATA_ON on TCP – expecting DATA on UDP :%d", r.cfg.Name, r.cfg.Port)
+	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok",
+		fmt.Sprintf("DATA_ON via TCP :%d; listening UDP :%d", tcpPort, r.cfg.Port))
+	r.reconnectFails = 0
+	if r.onSessionStart != nil {
+		r.onSessionStart(r.cfg.Name)
+	}
+	go drainTCPQuiet(tcpConn)
 
 	buf := make([]byte, 65535)
 	dataFrames := 0
@@ -551,7 +723,6 @@ func (r *Receiver) connectUDP(ctx context.Context) error {
 				parser.SetProfile(r.cfg.Name, profile)
 				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
 			}
-			_ = r.publishRaw(ctx, "cfg2", tf.raw, 0, 0)
 		case frameTypeData:
 			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
 			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
@@ -565,7 +736,7 @@ func (r *Receiver) connectUDP(ctx context.Context) error {
 				logFrameTrace(r.cfg.Name, fmt.Sprintf("udp rx #%d from=%s wait=%s", dataFrames, src, monitoring.FormatMs(tf.wait)), tf.raw)
 			}
 			payload := append([]byte(nil), tf.raw...)
-			r.dispatchDataFrame(ctx, payload, tf.wait, tf.copy)
+			r.dispatchDataFrame(payload, completeAt)
 		default:
 			if dataFrames < 3 {
 				log.Printf("[%s] udp skip %s from %s", r.cfg.Name, frameTypeName(ft), src)
@@ -574,6 +745,7 @@ func (r *Receiver) connectUDP(ctx context.Context) error {
 	}
 }
 
+// udpSourceAllowed: ignore UDP packets that did not come from our PMU’s IP.
 func udpSourceAllowed(wantIP string, src *net.UDPAddr) bool {
 	if src == nil {
 		return true
@@ -589,6 +761,8 @@ func udpSourceAllowed(wantIP string, src *net.UDPAddr) bool {
 	return src.IP.Equal(net.ParseIP(wantIP))
 }
 
+// drainTCPQuiet quietly reads (and discards) anything left on the TCP control
+// socket so the peer does not stall if it also sends DATA there.
 func drainTCPQuiet(conn net.Conn) {
 	buf := make([]byte, 4096)
 	for {
@@ -600,7 +774,25 @@ func drainTCPQuiet(conn net.Conn) {
 	}
 }
 
-// handshakeCFG runs HDR (optional) + CFG2 on a TCP control connection.
+// ═══════════════════════════════════════════════════════════════════════════════
+// §4  TCP PATH  (default — most lab PMUs / simulators)
+//
+// Steps inside connectTCP:
+//  1. Dial TCP to IP:port
+//  2. handshakeCFG  → keep asking for CFG2 until we get it
+//  3. Send CMD_DATA_ON
+//  4. Loop forever reading DATA frames → dispatchDataFrame
+//     (on error, Run() will sleep and redial)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// handshakeCFG — "ask for the menu" over a TCP (or TCP-control) connection.
+//
+// Default (simple) path:
+//   send CMD_SEND_CFG2 → wait up to 500ms → if no CFG2, send again → …
+// until CFG2 arrives or the handshake timeout runs out.
+//
+// Optional full path (env C37118_SIMPLE_HANDSHAKE=0):
+//   DATA_OFF → ask HEADER (optional) → then same CFG2 retry loop.
 func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time.Duration) error {
 	handshakeStart := time.Now()
 	headerText := ""
@@ -630,19 +822,51 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 			if text, perr := parser.ParseHeaderFrame(hdrRaw); perr == nil {
 				headerText = text
 			}
-			_ = r.publishRaw(ctx, "hdr", hdrRaw, 0, 0)
 		}
 
 		log.Printf("[%s] handshake step 2: sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
 	}
 
-	if err := r.sendCMD(conn, cmdSendCfg2); err != nil {
-		return fmt.Errorf("send CFG2 request: %w", err)
-	}
+	// Step: keep mailing "please send CFG2" until the menu arrives.
+	// Alternate SYNC version 1 (2005) and 2 (2011) — Connection Tester CFG2
+	// from Typhoon reported Version=1 / Std2005 and ignored our AA42 CMDs.
 	cfgWaitStart := time.Now()
-	cfg2, err := readFrameOfType(conn, frameTypeCfg2, timeout)
-	if err != nil {
-		return fmt.Errorf("read CFG2 frame: %w", err)
+	cfgDeadline := cfgWaitStart.Add(timeout)
+	const cfg2RetryWait = 500 * time.Millisecond
+	var cfg2 []byte
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		remain := time.Until(cfgDeadline)
+		if remain <= 0 {
+			return fmt.Errorf("read CFG2 frame: timeout after %d request(s)", attempt-1)
+		}
+		ver := cmdVersionForAttempt(attempt)
+		if err := r.sendCMDVer(conn, cmdSendCfg2, ver); err != nil {
+			return fmt.Errorf("send CFG2 request #%d: %w", attempt, err)
+		}
+		wait := cfg2RetryWait
+		if wait > remain {
+			wait = remain
+		}
+		log.Printf("[%s] CFG2 request #%d sent (sync ver=%d), waiting up to %s for response",
+			r.cfg.Name, attempt, ver, monitoring.FormatMs(wait))
+		raw, err := readFrameOfType(conn, frameTypeCfg2, wait)
+		if err == nil {
+			cfg2 = raw
+			r.rememberCMDVersion(cfg2)
+			log.Printf("[%s] CFG2 received after %d request(s) (using cmd sync ver=%d)",
+				r.cfg.Name, attempt, r.cmdSyncVer())
+			break
+		}
+		if !isTimeoutErr(err) {
+			return fmt.Errorf("read CFG2 frame: %w (after %d request(s))", err, attempt)
+		}
+		if time.Now().After(cfgDeadline) {
+			return fmt.Errorf("read CFG2 frame: %w (after %d request(s))", err, attempt)
+		}
+		log.Printf("[%s] no CFG2 yet (%v) – resending", r.cfg.Name, err)
 	}
 	cfgDur := time.Since(cfgWaitStart)
 	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
@@ -655,18 +879,17 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 		parser.SetProfile(r.cfg.Name, profile)
 		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
 	}
-	if err := r.publishRaw(ctx, "cfg2", cfg2, 0, 0); err != nil {
-		return fmt.Errorf("publish CFG2 to kafka: %w", err)
-	}
 	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, time.Since(handshakeStart))
 	return nil
 }
 
+// connectTCP — full TCP session for one PMU.
 func (r *Receiver) connectTCP(ctx context.Context) error {
 	addr := r.cfg.Addr()
 	proto := r.cfg.NetworkProtocol()
 	timeout := r.cfg.Timeout()
 
+	// ── Step 1: dial ──────────────────────────────────────────────────────────
 	log.Printf("[%s] connecting to %s (%s) …", r.cfg.Name, addr, proto)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "info", fmt.Sprintf("dial %s (%s)", addr, proto))
 
@@ -691,10 +914,12 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
 		fmt.Sprintf("connected to %s in %s", addr, monitoring.FormatMs(dialDur)))
 
+	// ── Step 2: get CFG2 (the menu) ───────────────────────────────────────────
 	if err := r.handshakeCFG(ctx, conn, timeout); err != nil {
 		return err
 	}
 
+	// ── Step 3: tell PMU to start streaming ───────────────────────────────────
 	log.Printf("[%s] handshake step 3: sending %s", r.cfg.Name, cmdName(cmdDataOn))
 	if err := r.sendCMD(conn, cmdDataOn); err != nil {
 		return fmt.Errorf("send CMD_DATA_ON: %w", err)
@@ -702,7 +927,11 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	log.Printf("[%s] sent CMD_DATA_ON – streaming data", r.cfg.Name)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "stream", "ok", "sent CMD_DATA_ON")
 	r.reconnectFails = 0
+	if r.onSessionStart != nil {
+		r.onSessionStart(r.cfg.Name)
+	}
 
+	// ── Step 4: read DATA forever ─────────────────────────────────────────────
 	dataFrames := 0
 	var lastComplete time.Time
 	readTimeout := r.cfg.DataReadTimeout()
@@ -747,45 +976,23 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "stream", "ok", fmt.Sprintf("received %d data frames", dataFrames))
 			}
 			payload := append([]byte(nil), tf.raw...)
-			r.dispatchDataFrame(ctx, payload, tf.wait, tf.copy)
+			r.dispatchDataFrame(payload, completeAt)
 		}
 	}
 }
 
-// dispatchDataFrame parses DATA on this PMU's read goroutine so SOC/fracsec
-// stay in wire order. Kafka raw publish stays async (side path).
-func (r *Receiver) dispatchDataFrame(ctx context.Context, payload []byte, tcpWait, tcpCopy time.Duration) {
+// dispatchDataFrame hands one DATA frame to main.go (parse → quality → aligner).
+// We stay on this goroutine so samples stay in wire order.
+func (r *Receiver) dispatchDataFrame(payload []byte, receivedAt time.Time) {
 	if r.handler != nil {
-		r.handler(r.cfg.Name, payload)
+		r.handler(r.cfg.Name, payload, receivedAt)
 	}
-
-	if r.rawPub == nil {
-		return
-	}
-	pub := r.rawPub
-	name := r.cfg.Name
-	payloadCopy := append([]byte(nil), payload...)
-	go func() {
-		if err := pub.Publish(ctx, name, "data", r.cfg.IDCode, payloadCopy, tcpWait, tcpCopy); err != nil {
-			monitoring.IncQueuePublishErrors()
-			monitoring.IncKafkaErrorForPMU(name)
-			if !strings.Contains(err.Error(), "queue full") {
-				log.Printf("[%s] raw kafka publish error: %v", name, err)
-				monitoring.RecordConversation(name, "PDC", "KAFKA", "raw-publish", "error", err.Error())
-			}
-		} else {
-			monitoring.IncRawFramesPublished()
-		}
-	}()
 }
 
-func (r *Receiver) publishRaw(ctx context.Context, frameType string, raw []byte, tcpWait, tcpCopy time.Duration) error {
-	if r.rawPub == nil {
-		return nil
-	}
-	monitoring.IncRawFramesPublished()
-	return r.rawPub.Publish(ctx, r.cfg.Name, frameType, r.cfg.IDCode, raw, tcpWait, tcpCopy)
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// §5  SHARED SEND / WAIT TOOLS
+//     Used by both TCP and UDP paths to mail commands and wait for answers.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 func hdrWaitTimeout() time.Duration {
 	v := strings.TrimSpace(os.Getenv("C37118_HDR_WAIT"))
@@ -799,8 +1006,8 @@ func hdrWaitTimeout() time.Duration {
 	return d
 }
 
-// simpleHandshakeEnabled uses CFG2→DATA_ON only (same as cmd/capture-pmu).
-// The full DATA_OFF→HDR→CFG2 path can destabilize multi-port field PMUs.
+// simpleHandshakeEnabled: true (default) = just CFG2 then DATA_ON.
+// Set env C37118_SIMPLE_HANDSHAKE=0 for the longer DATA_OFF → HEADER → CFG2 path.
 func simpleHandshakeEnabled() bool {
 	v := strings.TrimSpace(os.Getenv("C37118_SIMPLE_HANDSHAKE"))
 	if v == "" {
@@ -816,6 +1023,7 @@ func simpleHandshakeEnabled() bool {
 	}
 }
 
+// configureStreamConn tunes TCP for low-latency streaming (no Nagle delay, bigger buffers).
 func configureStreamConn(conn net.Conn) {
 	tcp, ok := conn.(*net.TCPConn)
 	if !ok {
@@ -826,8 +1034,24 @@ func configureStreamConn(conn net.Conn) {
 	_ = tcp.SetWriteBuffer(64 * 1024)
 }
 
-// readFrameOfType reads frames until one matching wantType arrives, skipping
-// DATA frames (common when a prior session left transmission enabled).
+// isTimeoutErr: true if we simply ran out of time waiting (safe to retry CFG2).
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "i/o timeout")
+}
+
+// readFrameOfType keeps reading until we see the frame type we want.
+// Stray DATA frames (left over from a previous session) are skipped.
 func readFrameOfType(conn net.Conn, wantType byte, timeout time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
 	skipped := 0
@@ -855,14 +1079,152 @@ func readFrameOfType(conn net.Conn, wantType byte, timeout time.Duration) ([]byt
 	}
 }
 
-// sendCMD writes a C37.118 CMD frame to the connection.
+// sendCMD writes one command frame (uses version learned from CFG2 when known).
 func (r *Receiver) sendCMD(conn net.Conn, cmd uint16) error {
-	frame := buildCMDFrame(r.cfg.IDCode, cmd)
+	return r.sendCMDVer(conn, cmd, r.cmdSyncVer())
+}
+
+// sendCMDVer writes a command with an explicit SYNC version (1 or 2).
+func (r *Receiver) sendCMDVer(conn net.Conn, cmd uint16, ver byte) error {
+	frame := buildCMDFrameVer(r.cfg.IDCode, cmd, ver)
 	logFrameTrace(r.cfg.Name, fmt.Sprintf("tx %s", cmdName(cmd)), frame)
-	log.Printf("[%s] command payload: name=%s word=0x%04X", r.cfg.Name, cmdName(cmd), cmd)
+	log.Printf("[%s] command payload: name=%s word=0x%04X sync_ver=%d", r.cfg.Name, cmdName(cmd), cmd, ver)
 	if err := conn.SetWriteDeadline(time.Now().Add(r.cfg.Timeout())); err != nil {
 		return err
 	}
 	_, err := conn.Write(frame)
 	return err
+}
+
+// sendCMDUDP is the same order slip, mailed as one UDP datagram.
+func (r *Receiver) sendCMDUDP(pc *net.UDPConn, cmd uint16) error {
+	return r.sendCMDUDPVer(pc, cmd, r.cmdSyncVer())
+}
+
+func (r *Receiver) sendCMDUDPVer(pc *net.UDPConn, cmd uint16, ver byte) error {
+	frame := buildCMDFrameVer(r.cfg.IDCode, cmd, ver)
+	logFrameTrace(r.cfg.Name, fmt.Sprintf("tx %s (udp)", cmdName(cmd)), frame)
+	log.Printf("[%s] command payload: name=%s word=0x%04X sync_ver=%d", r.cfg.Name, cmdName(cmd), cmd, ver)
+	if err := pc.SetWriteDeadline(time.Now().Add(r.cfg.Timeout())); err != nil {
+		return err
+	}
+	_, err := pc.Write(frame)
+	return err
+}
+
+func (r *Receiver) cmdSyncVer() byte {
+	if r != nil && r.cmdVersion >= 1 && r.cmdVersion <= 2 {
+		return r.cmdVersion
+	}
+	return syncVersion
+}
+
+// rememberCMDVersion copies the version nibble from a received CFG/DATA frame
+// so later DATA_ON / DATA_OFF match what the device speaks.
+func (r *Receiver) rememberCMDVersion(raw []byte) {
+	if r == nil || len(raw) < 2 {
+		return
+	}
+	ver := raw[1] & 0x0F
+	if ver >= 1 && ver <= 2 {
+		r.cmdVersion = ver
+	}
+}
+
+// cmdVersionForAttempt: odd attempts → v1 (2005), even → v2 (2011).
+func cmdVersionForAttempt(attempt int) byte {
+	if attempt%2 == 1 {
+		return 1
+	}
+	return 2
+}
+
+// handshakeCFGUDP — same "ask for menu until it arrives" idea, over UDP.
+func (r *Receiver) handshakeCFGUDP(ctx context.Context, pc *net.UDPConn, timeout time.Duration) error {
+	handshakeStart := time.Now()
+	log.Printf("[%s] handshake (udp): sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
+
+	cfgWaitStart := time.Now()
+	cfgDeadline := cfgWaitStart.Add(timeout)
+	const cfg2RetryWait = 500 * time.Millisecond
+	var cfg2 []byte
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		remain := time.Until(cfgDeadline)
+		if remain <= 0 {
+			return fmt.Errorf("read CFG2 frame: timeout after %d request(s)", attempt-1)
+		}
+		ver := cmdVersionForAttempt(attempt)
+		if err := r.sendCMDUDPVer(pc, cmdSendCfg2, ver); err != nil {
+			return fmt.Errorf("send CFG2 request #%d: %w", attempt, err)
+		}
+		wait := cfg2RetryWait
+		if wait > remain {
+			wait = remain
+		}
+		log.Printf("[%s] CFG2 request #%d sent (udp, sync ver=%d), waiting up to %s for response",
+			r.cfg.Name, attempt, ver, monitoring.FormatMs(wait))
+		raw, err := readUDPFrameOfType(pc, frameTypeCfg2, wait)
+		if err == nil {
+			cfg2 = raw
+			r.rememberCMDVersion(cfg2)
+			log.Printf("[%s] CFG2 received after %d UDP request(s) (using cmd sync ver=%d)",
+				r.cfg.Name, attempt, r.cmdSyncVer())
+			break
+		}
+		if !isTimeoutErr(err) {
+			return fmt.Errorf("read CFG2 frame: %w (after %d request(s))", err, attempt)
+		}
+		if time.Now().After(cfgDeadline) {
+			return fmt.Errorf("read CFG2 frame: %w (after %d request(s))", err, attempt)
+		}
+		log.Printf("[%s] no CFG2 yet (%v) – resending over UDP", r.cfg.Name, err)
+	}
+	cfgDur := time.Since(cfgWaitStart)
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
+	logFrameTrace(r.cfg.Name, "handshake CFG2 (udp)", cfg2)
+	decodeCFG2Details(r.cfg.Name, cfg2)
+	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
+		return fmt.Errorf("parse CFG2: %w", err)
+	} else {
+		parser.SetProfile(r.cfg.Name, profile)
+		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
+	}
+	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, time.Since(handshakeStart))
+	return nil
+}
+
+// readUDPFrameOfType waits for one UDP datagram of the wanted type (skips DATA).
+func readUDPFrameOfType(pc *net.UDPConn, wantType byte, timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, 65535)
+	skipped := 0
+	for {
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			return nil, fmt.Errorf("timeout waiting for %s (skipped %d data frames)", frameTypeName(wantType), skipped)
+		}
+		if err := pc.SetReadDeadline(time.Now().Add(remain)); err != nil {
+			return nil, err
+		}
+		n, err := pc.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		tf, err := parseFrameBytes(buf[:n], 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		ft := frameType(tf.raw)
+		if ft == wantType {
+			return tf.raw, nil
+		}
+		if ft == frameTypeData {
+			skipped++
+			continue
+		}
+		return nil, fmt.Errorf("expected %s, got %s", frameTypeName(wantType), frameTypeName(ft))
+	}
 }

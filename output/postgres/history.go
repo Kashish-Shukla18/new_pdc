@@ -1,3 +1,7 @@
+// history.go — PARKED TimescaleDB history writer.
+//
+// Batches readings and COPY-inserts them into pmu_readings.
+// Only used when the storage sink in output/sink.go is re-enabled.
 package postgres
 
 import (

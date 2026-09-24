@@ -1,5 +1,7 @@
 package parser
 
+// header.go — decode the optional human-readable Header frame from a PMU.
+
 import (
 	"encoding/binary"
 	"fmt"

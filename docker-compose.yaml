@@ -1,53 +1,13 @@
-# docker-compose.yaml – tuned for high-throughput PMU data ingestion
+# docker-compose.yaml – optional data services for the PDC
+#
+# Required for the live app today: timescaledb (PMU address book only).
+# Redis is only needed when you re-enable the parked storage sink in output/.
 
 version: '3.8'
 
 services:
 
-  # ── KAFKA (message queue) ──────────────────────────────────────────────────
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
-
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    depends_on:
-      - zookeeper
-    ports:
-      - "9093:9093"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:9092,PLAINTEXT_EXTERNAL://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:9092,PLAINTEXT_EXTERNAL://127.0.0.1:9093
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      # ── Throughput tuning ─────────────────────────────────────────────────
-      # Allow large batches; PMU data at 50fps × 20 PMUs ≈ 5-10 KB/s per partition
-      KAFKA_MESSAGE_MAX_BYTES: "2097152"          # 2 MB max message
-      KAFKA_REPLICA_FETCH_MAX_BYTES: "2097152"
-      # Retention: keep 6 hours of data, capped at 10 GB per partition
-      KAFKA_LOG_RETENTION_HOURS: "6"
-      KAFKA_LOG_RETENTION_BYTES: "10737418240"    # 10 GB
-      KAFKA_LOG_SEGMENT_BYTES: "104857600"        # 100 MB segments for faster cleanup
-      KAFKA_LOG_CLEANUP_POLICY: "delete"
-      # Network & I/O threads for higher concurrency
-      KAFKA_NUM_NETWORK_THREADS: "4"
-      KAFKA_NUM_IO_THREADS: "8"
-      # Socket buffers
-      KAFKA_SOCKET_SEND_BUFFER_BYTES: "1048576"   # 1 MB
-      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: "1048576"
-      KAFKA_SOCKET_REQUEST_MAX_BYTES: "2097152"
-      # Reduce leader election timeout for faster recovery
-      KAFKA_LEADER_IMBALANCE_CHECK_INTERVAL_SECONDS: "30"
-
-  # ── REDIS (live state buffer) ──────────────────────────────────────────────
+  # ── REDIS (parked storage sink — not required for live dashboard) ──────────
   redis:
     image: redis:7-alpine
     ports:
@@ -62,7 +22,7 @@ services:
         --save ""
         --appendonly no
 
-  # ── POSTGRES + TIMESCALEDB (config + history) ─────────────────────────────
+  # ── POSTGRES + TIMESCALEDB (PMU address book; history table parked) ────────
   timescaledb:
     image: timescale/timescaledb:latest-pg16
     ports:
@@ -91,7 +51,7 @@ services:
       timescaledb:
         condition: service_healthy
 
-  # ── PROMETHEUS (app monitoring) ────────────────────────────────────────────
+  # ── PROMETHEUS (optional app monitoring) ───────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.47.0
     ports:

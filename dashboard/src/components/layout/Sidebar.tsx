@@ -77,7 +77,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
         </div>
         <div>
           <strong>{systemCounts.totalErrors}</strong>
-          <span>Pipeline errors</span>
+          <span>Quality rejects</span>
         </div>
       </div>
     </aside>

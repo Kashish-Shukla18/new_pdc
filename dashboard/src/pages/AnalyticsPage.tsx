@@ -10,6 +10,7 @@ import { displayPhasors } from '../utils/phasorLabels'
 export function AnalyticsPage() {
   const {
     pmus,
+    dashboard,
     analyticsKpis,
     chartAnglePairs,
     angleHistory,
@@ -40,8 +41,8 @@ export function AnalyticsPage() {
       <AnalyticsKpiGrid items={analyticsKpis} />
 
       <section className="analytics-grid-2">
-        <PhasorMagnitudeChart pmus={pmus} kind="voltage" />
-        <PhasorMagnitudeChart pmus={pmus} kind="current" />
+        <PhasorMagnitudeChart pmus={pmus} kind="voltage" alignedBatches={dashboard.alignedBatches} />
+        <PhasorMagnitudeChart pmus={pmus} kind="current" alignedBatches={dashboard.alignedBatches} />
       </section>
 
       <section className="panel analytics-toolbar">

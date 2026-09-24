@@ -1,3 +1,5 @@
+// Package api is the small REST server used by the React dashboard
+// to add / edit / delete PMUs in the address book.
 package api
 
 import (

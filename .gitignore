@@ -43,15 +43,13 @@ Thumbs.db
 # Logs and runtime files
 *.log
 
-# Local generated data and spool files
-data/spool/*.jsonl
-data/spool/*.tmp
-data/profiles/*.json
-data/profiles/*.tmp
-data/last_100_*
-data/last_1000_*
-data/last_1500_*
-data/*_1min.csv
-data/*_probe.csv
-data/device_frame_dump.json
+# Local generated data: frame dumps, spool, runtime profiles, ad-hoc analysis.
+# Everything under data/ is reproducible output — nothing here belongs in git.
+data/*.csv
+data/*.json
+data/*.jsonl
+data/*.xlsx
+data/*.md
+data/spool/
+data/profiles/
 
