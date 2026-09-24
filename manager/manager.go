@@ -1,14 +1,19 @@
+// Package manager is the "remote control" for PMU connections.
+//
+// Start / stop receivers when the dashboard adds or deletes a device.
 package manager
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
 	"pdc/config"
 	"pdc/monitoring"
+	"pdc/parser"
 	"pdc/receiver"
 )
 
@@ -22,29 +27,61 @@ type PMUManager struct {
 	mu        sync.Mutex
 	receivers map[string]*pmuRun
 	handler   receiver.FrameHandler
-	rawPub    receiver.RawFramePublisher
+	// onSetChanged resets dashboard time alignment when the live PMU set changes.
+	onSetChanged func(active []string)
 }
 
 // NewPMUManager creates a new PMUManager.
-// rawPub, when non-nil, enables ingress mode (TCP → Kafka). handler is used for direct mode.
-func NewPMUManager(handler receiver.FrameHandler, rawPub receiver.RawFramePublisher) *PMUManager {
+func NewPMUManager(handler receiver.FrameHandler) *PMUManager {
 	return &PMUManager{
 		receivers: make(map[string]*pmuRun),
 		handler:   handler,
-		rawPub:    rawPub,
+	}
+}
+
+// SetAlignerHook registers a callback used to reset dashboard time alignment
+// whenever the live (handshaked) PMU set changes.
+func (m *PMUManager) SetAlignerHook(fn func(active []string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onSetChanged = fn
+}
+
+// liveNamesLocked = receivers that have a CFG-2 profile (handshake succeeded).
+// Dead / not-yet-connected PMUs are excluded so they do not poison alignment.
+func (m *PMUManager) liveNamesLocked() []string {
+	names := make([]string, 0, len(m.receivers))
+	for name := range m.receivers {
+		if _, ok := parser.GetProfile(name); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// notifyAligner must be called WITHOUT holding m.mu.
+func (m *PMUManager) notifyAligner() {
+	m.mu.Lock()
+	fn := m.onSetChanged
+	names := m.liveNamesLocked()
+	m.mu.Unlock()
+	if fn != nil {
+		fn(names)
 	}
 }
 
 // StartPMU starts a new PMU receiver if not already running.
 func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
-	if m.rawPub == nil && m.handler == nil {
-		return fmt.Errorf("PMU manager has no ingress publisher or direct handler (processor-only mode?)")
+	if m.handler == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("PMU manager has no frame handler")
 	}
 
 	if _, exists := m.receivers[cfg.Name]; exists {
+		m.mu.Unlock()
 		return fmt.Errorf("PMU %s is already running", cfg.Name)
 	}
 
@@ -52,21 +89,21 @@ func (m *PMUManager) StartPMU(ctx context.Context, cfg config.PMUConfig) error {
 	done := make(chan struct{})
 	m.receivers[cfg.Name] = &pmuRun{cancel: cancel, done: done}
 
-	r := receiver.New(cfg, m.handler, m.rawPub)
+	r := receiver.New(cfg, m.handler)
+	r.SetOnSessionStart(func(_ string) {
+		// Only after CFG-2 + DATA_ON — this PMU is actually live.
+		m.notifyAligner()
+	})
 	go func() {
 		defer close(done)
 		r.Run(pmuCtx)
 	}()
 
-	mode := "direct"
-	if m.rawPub != nil && m.handler != nil {
-		mode = "live+kafka"
-	} else if m.rawPub != nil {
-		mode = "ingress"
-	}
 	monitoring.RecordConversation(cfg.Name, "SYSTEM", "PDC", "manager", "ok",
-		fmt.Sprintf("Started PMU receiver (%s) %s:%d", mode, cfg.IP, cfg.Port))
-	log.Printf("[Manager] Started PMU receiver for %s (%s) %s:%d", cfg.Name, mode, cfg.IP, cfg.Port)
+		fmt.Sprintf("Started PMU receiver %s:%d", cfg.IP, cfg.Port))
+	log.Printf("[Manager] Started PMU receiver for %s %s:%d", cfg.Name, cfg.IP, cfg.Port)
+	m.mu.Unlock()
+	// Do NOT notify aligner here — wait until handshake succeeds (onSessionStart).
 	return nil
 }
 
@@ -82,6 +119,8 @@ func (m *PMUManager) StopPMU(name string) error {
 	delete(m.receivers, name)
 	done := run.done
 	m.mu.Unlock()
+
+	m.notifyAligner()
 
 	select {
 	case <-done:
@@ -104,6 +143,8 @@ func (m *PMUManager) StopAll() {
 	}
 	m.receivers = make(map[string]*pmuRun)
 	m.mu.Unlock()
+
+	m.notifyAligner()
 
 	for _, run := range runs {
 		<-run.done

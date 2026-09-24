@@ -1,5 +1,7 @@
 package instance
 
+// ports.go — bind HTTP ports safely; fail clearly if another process already owns them.
+
 import (
 	"fmt"
 	"net"

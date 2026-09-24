@@ -1,5 +1,8 @@
 package monitoring
 
+// latency.go — stopwatch for each pipeline step (TCP → parse → dashboard).
+// Lets the UI show which hop is slow.
+
 import (
 	"fmt"
 	"log"
@@ -24,13 +27,9 @@ const (
 	StageTCPCopy         = "tcp_copy"
 	StageTCPRead         = "tcp_read"
 	StageTCPInterarrival = "tcp_interarrival"
-	StageRawKafkaEnqueue = "raw_kafka_enqueue"
-	StageRawKafkaPublish = "raw_kafka_publish"
-	StageRawKafkaLag     = "raw_kafka_lag"
 	StageFrameToParse    = "frame_to_parse"
 	StageParse           = "parse"
 	StageQuality         = "quality"
-	StageReadingsPublish = "readings_publish"
 	StageDashboardRecord = "dashboard_record"
 	StageStateSnapshot   = "dashboard_state_json"
 	StageSinkStore       = "sink_store"
@@ -57,13 +56,9 @@ var stageOrder = []stageSpec{
 	{StageTCPCopy, "TCP copy frame bytes", "ingest"},
 	{StageTCPRead, "TCP wait+copy (total)", "idle"},
 	{StageTCPInterarrival, "TCP complete-to-complete", "idle"},
-	{StageRawKafkaEnqueue, "Raw Kafka enqueue", "ingest"},
-	{StageRawKafkaPublish, "Raw Kafka broker write", "ingest"},
-	{StageRawKafkaLag, "Raw Kafka lag", "ingest"},
 	{StageFrameToParse, "Frame complete → parse start", "process"},
 	{StageParse, "Parse DATA", "process"},
 	{StageQuality, "Quality gate", "process"},
-	{StageReadingsPublish, "Readings Kafka publish", "process"},
 	{StageDashboardRecord, "Dashboard RecordReading", "dashboard"},
 	{StageStateSnapshot, "Dashboard /state JSON", "dashboard"},
 	{StageSinkStore, "Redis + Postgres store", "sink"},
@@ -215,11 +210,9 @@ func ApplyTraceHops(pmu string, tr parser.LatencyTrace) {
 		{StageTCPWait, tr.TcpWaitMs},
 		{StageTCPCopy, tr.TcpCopyMs},
 		{StageTCPRead, tr.TcpReadMs},
-		{StageRawKafkaLag, tr.KafkaLagMs},
 		{StageFrameToParse, tr.FrameToParseMs},
 		{StageParse, tr.ParseMs},
 		{StageQuality, tr.QualityMs},
-		{StageReadingsPublish, tr.ReadingsPublishMs},
 	}
 
 	latencyMu.Lock()
@@ -353,8 +346,11 @@ func pickSlowest(stages []StageLatency) (id, label string, avg float64) {
 	return id, label, avg
 }
 
-// FormatLatencySummary is a hop summary. Connection (one-time) is a separate
-// line from per-frame ingest so handshake_total is never mistaken for fps delay.
+var lastConnSummary string // guards repeat-printing unchanged one-time connection stats
+
+// FormatLatencySummary is a hop summary, one line per report tick.
+// Connection (one-time) stats are included only when they've changed since
+// the last report, so handshake_total/tcp_dial don't repeat every interval.
 func FormatLatencySummary() string {
 	snap := SnapshotPipelineLatency()
 	var conn, idle, clock, hops []string
@@ -381,31 +377,28 @@ func FormatLatencySummary() string {
 	if snap.SlowestStage != "" {
 		slow = fmt.Sprintf("%s (avg %.2fms)", snap.SlowestStage, snap.SlowestAvgMs)
 	}
-	var b strings.Builder
-	if len(conn) > 0 {
-		b.WriteString("[latency] connection (one-time, not per-frame): ")
-		b.WriteString(strings.Join(conn, " "))
-		b.WriteByte('\n')
+
+	connStr := strings.Join(conn, " ")
+	showConn := connStr != "" && connStr != lastConnSummary
+	lastConnSummary = connStr
+
+	var parts []string
+	if showConn {
+		parts = append(parts, "conn: "+connStr)
 	}
 	if len(clock) > 0 {
-		b.WriteString("[latency] PMU clock skew (not pipeline delay): ")
-		b.WriteString(strings.Join(clock, " "))
-		b.WriteByte('\n')
+		parts = append(parts, "skew: "+strings.Join(clock, " "))
 	}
 	if len(idle) > 0 {
-		b.WriteString("[latency] wait-for-PMU (inter-sample, not processing): ")
-		b.WriteString(strings.Join(idle, " "))
-		b.WriteByte('\n')
+		parts = append(parts, "idle: "+strings.Join(idle, " "))
 	}
-	b.WriteString("[latency] processing slowest=")
-	b.WriteString(slow)
+	parts = append(parts, "slowest="+slow)
 	if len(hops) > 0 {
-		b.WriteString(" | ")
-		b.WriteString(strings.Join(hops, " "))
+		parts = append(parts, "hops: "+strings.Join(hops, " "))
 	}
-	return strings.TrimRight(b.String(), "\n")
-}
 
+	return "[latency] " + strings.Join(parts, " | ")
+}
 // StartLatencyReporter logs a hop summary every interval so the console
 // shows which function is dominating without opening the dashboard.
 func StartLatencyReporter(ctxDone <-chan struct{}) {

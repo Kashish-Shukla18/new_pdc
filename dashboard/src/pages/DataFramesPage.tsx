@@ -1,7 +1,9 @@
+import { useMemo } from 'react'
 import { FreqChart } from '../components/dataframes/FreqChart'
 import { useDashboardContext } from '../context/DashboardContext'
 import { round } from '../utils/format'
 import { displayPhasors, formatPhasorCfgList } from '../utils/phasorLabels'
+import { trendFromAlignedBatches } from '../utils/alignedChart'
 
 function hexWord(n: number | undefined, width = 4) {
   return `0x${((n ?? 0) >>> 0).toString(16).toUpperCase().padStart(width, '0')}`
@@ -34,14 +36,19 @@ function statFlags(detail: {
 export function DataFramesPage() {
   const {
     pmus,
+    dashboard,
     selectedFramePMU,
     selectedFramePMUName,
     setSelectedFramePMUName,
     isPaused,
     setIsPaused,
     frameLines,
-    frameTrendHistory,
   } = useDashboardContext()
+
+  const frameTrendHistory = useMemo(
+    () => trendFromAlignedBatches(dashboard.alignedBatches, selectedFramePMUName),
+    [dashboard.alignedBatches, selectedFramePMUName],
+  )
 
   if (!selectedFramePMU) return null
 

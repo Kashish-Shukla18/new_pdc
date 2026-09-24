@@ -1,5 +1,10 @@
 package parser
 
+// cfg2.go — decode the CFG-2 "channel map" frame from a PMU.
+//
+// After handshake we remember the layout in RAM (SetProfile).
+// DATA frames are useless without this map — names, scales, format bits.
+
 import (
 	"encoding/binary"
 	"fmt"
@@ -58,9 +63,9 @@ type Profile struct {
 	HeaderText string
 }
 
-var profileRegistry sync.Map // map[string]Profile
+var profileRegistry sync.Map // map[string]Profile — filled from live CFG2 handshake
 
-// GetProfile returns the CFG2 layout if one was registered (handshake or disk hydrate).
+// GetProfile returns the CFG-2 channel layout for a PMU (from the last handshake).
 func GetProfile(pmuName string) (Profile, bool) {
 	v, ok := profileRegistry.Load(pmuName)
 	if !ok {
@@ -68,6 +73,12 @@ func GetProfile(pmuName string) (Profile, bool) {
 	}
 	p, ok := v.(Profile)
 	return p, ok
+}
+
+// SetProfile remembers a CFG-2 layout in RAM after we talk to the PMU.
+// We need this to unpack later DATA frames (they only make sense with CFG-2).
+func SetProfile(pmuName string, p Profile) {
+	profileRegistry.Store(pmuName, p)
 }
 
 // ExpectedDataPayloadSize returns the byte length of one PMU's DATA body

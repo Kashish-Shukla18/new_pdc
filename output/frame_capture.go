@@ -1,3 +1,7 @@
+// Package output keeps a short in-memory tape of recent DATA frames.
+//
+// Think of it like a DVR: the last ~1500 frames stay in RAM so you can
+// dump them to CSV. Nothing here is written to a database.
 package output
 
 import (
@@ -15,34 +19,52 @@ import (
 	"sync"
 	"time"
 
-	"pdc/output/postgres"
+	"pdc/parser"
 )
 
-// capturedFrame pairs one raw C37.118 DATA frame with the postgres row enqueued for history.
+// capturedFrame = one raw frame + the numbers we parsed from it.
 type capturedFrame struct {
-	PMUName    string    `json:"pmu_name"`
-	CapturedAt time.Time `json:"captured_at"`
-	SOC        uint32    `json:"soc"`
-	FracRaw    uint32    `json:"fracsec_raw"`
-	FracCount  uint32    `json:"fracsec_count"`
-	LagMs      float64   `json:"lag_ms"`
-	RawHex     string    `json:"raw_hex"`
-	RawBytes   int       `json:"raw_bytes"`
-	Row        postgres.Row
+	PMUName    string
+	CapturedAt time.Time
+	SOC        uint32
+	FracRaw    uint32
+	FracCount  uint32
+	LagMs      float64 // how late the frame arrived vs its own timestamp
+	RawHex     string
+	RawBytes   int
+	Reading    parser.Reading
+}
+
+// jumpStat counts weird jumps in timestamps (gaps / backwards time).
+type jumpStat struct {
+	count      int64
+	maxGapMs   float64
+	lastGapMs  float64
+	lastFrom   time.Time
+	lastTo     time.Time
+	lastLogged time.Time
 }
 
 type frameCaptureStore struct {
 	mu        sync.Mutex
-	buf       []capturedFrame // last N frames in arrival order (all PMUs combined)
+	buf       []capturedFrame
 	limit     int
 	lastByPMU map[string]capturedFrame
+	jumps     map[string]*jumpStat
 }
 
 var frameCapture = frameCaptureStore{
 	lastByPMU: make(map[string]capturedFrame),
+	jumps:     make(map[string]*jumpStat),
 }
 
-// ConfigureFrameCapture sets the ring-buffer capacity (default 1500, combined arrival order).
+const (
+	jumpForwardMs  = 100 // more than two 50 ms periods → dropped frames
+	jumpBackwardMs = -10 // time went backwards — should not happen
+	jumpLogEvery   = 30 * time.Second
+)
+
+// ConfigureFrameCapture sets how many frames the tape holds (default 1500).
 func ConfigureFrameCapture(limit int) {
 	if limit < 1 {
 		limit = 1500
@@ -62,21 +84,32 @@ func decodeWireTime(raw []byte) (soc, fracRaw, fracCount uint32, ok bool) {
 	return soc, fracRaw, fracCount, true
 }
 
-// RecordSinkFrame stores synchronously (tests / direct calls).
-func RecordSinkFrame(pmuName string, raw []byte, row postgres.Row) {
-	if len(raw) == 0 {
-		return
-	}
+func makeEntry(pmuName string, raw []byte, reading parser.Reading) capturedFrame {
 	now := time.Now().UTC()
 	soc, fracRaw, fracCount, _ := decodeWireTime(raw)
 	lagMs := 0.0
-	if !row.Time.IsZero() {
-		lagMs = now.Sub(row.Time.UTC()).Seconds() * 1000
+	if !reading.Timestamp.IsZero() {
+		lagMs = now.Sub(reading.Timestamp.UTC()).Seconds() * 1000
 	}
-	recordSinkFrameLocked(capturedFrame{
-		PMUName: pmuName, CapturedAt: now, SOC: soc, FracRaw: fracRaw, FracCount: fracCount,
-		LagMs: lagMs, RawHex: hex.EncodeToString(raw), RawBytes: len(raw), Row: row,
-	})
+	return capturedFrame{
+		PMUName:    pmuName,
+		CapturedAt: now,
+		SOC:        soc,
+		FracRaw:    fracRaw,
+		FracCount:  fracCount,
+		LagMs:      lagMs,
+		RawHex:     hex.EncodeToString(raw),
+		RawBytes:   len(raw),
+		Reading:    reading,
+	}
+}
+
+// RecordFrame stores one frame right away (tests / direct calls).
+func RecordFrame(pmuName string, raw []byte, reading parser.Reading) {
+	if len(raw) == 0 {
+		return
+	}
+	recordLocked(makeEntry(pmuName, raw, reading))
 }
 
 var (
@@ -84,7 +117,7 @@ var (
 	frameCaptureCh   chan capturedFrame
 )
 
-func startFrameCaptureWorker() {
+func startWorker() {
 	frameCaptureOnce.Do(func() {
 		cap := 8192
 		if v := strings.TrimSpace(os.Getenv("FRAME_CAPTURE_QUEUE")); v != "" {
@@ -95,69 +128,36 @@ func startFrameCaptureWorker() {
 		frameCaptureCh = make(chan capturedFrame, cap)
 		go func() {
 			for entry := range frameCaptureCh {
-				recordSinkFrameLocked(entry)
+				recordLocked(entry)
 			}
 		}()
 	})
 }
 
-// RecordSinkFrameAsync enqueues frame capture off the parse hot path.
-func RecordSinkFrameAsync(pmuName string, raw []byte, row postgres.Row) {
+// RecordFrameAsync remembers a frame without slowing down the parse path.
+// If the queue is full we drop the sample (live data still flows).
+func RecordFrameAsync(pmuName string, raw []byte, reading parser.Reading) {
 	if len(raw) == 0 {
 		return
 	}
-	startFrameCaptureWorker()
-	now := time.Now().UTC()
-	soc, fracRaw, fracCount, _ := decodeWireTime(raw)
-	lagMs := 0.0
-	if !row.Time.IsZero() {
-		lagMs = now.Sub(row.Time.UTC()).Seconds() * 1000
-	}
-	entry := capturedFrame{
-		PMUName:    pmuName,
-		CapturedAt: now,
-		SOC:        soc,
-		FracRaw:    fracRaw,
-		FracCount:  fracCount,
-		LagMs:      lagMs,
-		RawHex:     hex.EncodeToString(raw),
-		RawBytes:   len(raw),
-		Row:        row,
-	}
+	startWorker()
 	select {
-	case frameCaptureCh <- entry:
+	case frameCaptureCh <- makeEntry(pmuName, raw, reading):
 	default:
-		// Drop capture sample under overload rather than stalling parse.
 	}
 }
 
-func recordSinkFrameLocked(entry capturedFrame) {
-	pmuName := entry.PMUName
-	row := entry.Row
-	now := entry.CapturedAt
-	soc := entry.SOC
-	fracCount := entry.FracCount
-	lagMs := entry.LagMs
-
+func recordLocked(entry capturedFrame) {
 	frameCapture.mu.Lock()
 	defer frameCapture.mu.Unlock()
 
-	if prev, ok := frameCapture.lastByPMU[pmuName]; ok && !prev.Row.Time.IsZero() && !row.Time.IsZero() {
-		dStamp := row.Time.Sub(prev.Row.Time).Seconds() * 1000
-		dArrive := now.Sub(prev.CapturedAt).Seconds() * 1000
-		if dStamp > 100 || dStamp < -10 {
-			log.Printf("[frame-capture] TIMESTAMP JUMP pmu=%s stamp %s -> %s (dStamp=%.0fms) arrive_gap=%.1fms SOC %d->%d (dSOC=%d) frac %d->%d lag_ms=%.0f->%.0f",
-				pmuName,
-				prev.Row.Time.UTC().Format(time.RFC3339Nano),
-				row.Time.UTC().Format(time.RFC3339Nano),
-				dStamp, dArrive,
-				prev.SOC, soc, int64(soc)-int64(prev.SOC),
-				prev.FracCount, fracCount,
-				prev.LagMs, lagMs,
-			)
+	ts := entry.Reading.Timestamp
+	if prev, ok := frameCapture.lastByPMU[entry.PMUName]; ok && !prev.Reading.Timestamp.IsZero() && !ts.IsZero() {
+		if gap := ts.Sub(prev.Reading.Timestamp).Seconds() * 1000; gap > jumpForwardMs || gap < jumpBackwardMs {
+			noteStampJumpLocked(entry.PMUName, gap, prev.Reading.Timestamp.UTC(), ts.UTC())
 		}
 	}
-	frameCapture.lastByPMU[pmuName] = entry
+	frameCapture.lastByPMU[entry.PMUName] = entry
 
 	limit := frameCapture.limit
 	if limit < 1 {
@@ -167,6 +167,27 @@ func recordSinkFrameLocked(entry capturedFrame) {
 	if len(frameCapture.buf) > limit {
 		frameCapture.buf = frameCapture.buf[len(frameCapture.buf)-limit:]
 	}
+}
+
+func noteStampJumpLocked(pmuName string, gapMs float64, from, to time.Time) {
+	st := frameCapture.jumps[pmuName]
+	if st == nil {
+		st = &jumpStat{}
+		frameCapture.jumps[pmuName] = st
+	}
+	st.count++
+	st.lastGapMs = gapMs
+	st.lastFrom, st.lastTo = from, to
+	if gapMs > st.maxGapMs {
+		st.maxGapMs = gapMs
+	}
+	if !st.lastLogged.IsZero() && time.Since(st.lastLogged) < jumpLogEvery {
+		return
+	}
+	st.lastLogged = time.Now()
+	log.Printf("[frame-capture] %s: %d stamp gap(s) since start, max=%.0fms latest=%.0fms (%s -> %s)",
+		pmuName, st.count, st.maxGapMs, st.lastGapMs,
+		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 }
 
 type rawCaptureOut struct {
@@ -184,52 +205,54 @@ type rawCaptureOut struct {
 type parsedCaptureOut struct {
 	Index       int       `json:"index"`
 	Time        time.Time `json:"time"`
-	EntityID    string    `json:"entity_id"`
-	IDCode      int32     `json:"idcode"`
+	PMUName     string    `json:"pmu_name"`
+	IDCode      uint16    `json:"idcode"`
 	SOC         uint32    `json:"soc"`
 	FracCount   uint32    `json:"fracsec_count"`
 	CapturedAt  time.Time `json:"captured_at"`
 	LagMs       float64   `json:"lag_ms"`
-	Freq        float64   `json:"freq"`
-	FreqDev     float64   `json:"freq_dev"`
-	ROCOF       float64   `json:"rocof"`
-	MW          float64   `json:"mw"`
-	MVAR        float64   `json:"mvar"`
-	MVA         float64   `json:"mva"`
-	PowerFactor float64   `json:"power_factor"`
-	VAMag       float64   `json:"va_mag"`
-	VAAng       float64   `json:"va_ang"`
-	VBMag       float64   `json:"vb_mag"`
-	VBAng       float64   `json:"vb_ang"`
-	VCMag       float64   `json:"vc_mag"`
-	VCAng       float64   `json:"vc_ang"`
-	IAMag       float64   `json:"ia_mag"`
-	IAAng       float64   `json:"ia_ang"`
-	Stat        int32     `json:"stat"`
-	Digital     int32     `json:"digital"`
+	Freq        float32   `json:"freq"`
+	FreqDev     float32   `json:"freq_dev"`
+	ROCOF       float32   `json:"rocof"`
+	MW          float32   `json:"mw"`
+	MVAR        float32   `json:"mvar"`
+	MVA         float32   `json:"mva"`
+	PowerFactor float32   `json:"power_factor"`
+	VAMag       float32   `json:"va_mag"`
+	VAAng       float32   `json:"va_ang"`
+	VBMag       float32   `json:"vb_mag"`
+	VBAng       float32   `json:"vb_ang"`
+	VCMag       float32   `json:"vc_mag"`
+	VCAng       float32   `json:"vc_ang"`
+	IAMag       float32   `json:"ia_mag"`
+	IAAng       float32   `json:"ia_ang"`
+	Stat        uint16    `json:"stat"`
+	Digital     uint16    `json:"digital"`
 	CRCValid    bool      `json:"crc_valid"`
-	TimeQuality int32     `json:"time_quality"`
+	TimeQuality uint8     `json:"time_quality"`
 }
 
 func frameToParsedOut(idx int, f capturedFrame) parsedCaptureOut {
-	r := f.Row
+	r := f.Reading
 	return parsedCaptureOut{
-		Index: idx, Time: r.Time, EntityID: r.EntityID, IDCode: r.IDCode,
+		Index: idx, Time: r.Timestamp, PMUName: r.PMUName, IDCode: r.IDCode,
 		SOC: f.SOC, FracCount: f.FracCount, CapturedAt: f.CapturedAt, LagMs: f.LagMs,
-		Freq: r.Freq, FreqDev: r.FreqDev, ROCOF: r.ROCOF,
+		Freq: r.Frequency, FreqDev: r.FrequencyDeviation, ROCOF: r.ROCOF,
 		MW: r.MW, MVAR: r.MVAR, MVA: r.MVA, PowerFactor: r.PowerFactor,
-		VAMag: r.VAMag, VAAng: r.VAAng, VBMag: r.VBMag, VBAng: r.VBAng,
-		VCMag: r.VCMag, VCAng: r.VCAng, IAMag: r.IAMag, IAAng: r.IAAng,
-		Stat: r.Stat, Digital: r.Digital, CRCValid: r.CRCValid, TimeQuality: r.TimeQuality,
+		VAMag: r.VA.Magnitude, VAAng: r.VA.PhaseDegrees,
+		VBMag: r.VB.Magnitude, VBAng: r.VB.PhaseDegrees,
+		VCMag: r.VC.Magnitude, VCAng: r.VC.PhaseDegrees,
+		IAMag: r.IA.Magnitude, IAAng: r.IA.PhaseDegrees,
+		Stat: r.Stat, Digital: r.Digital, CRCValid: r.ChecksumValid, TimeQuality: r.TimeQuality,
 	}
 }
 
-// Snapshot returns up to count most recent captured frames (newest last, arrival order).
-func SnapshotFrames(count int, pmuFilter string) (raw []rawCaptureOut, parsed []parsedCaptureOut, src []capturedFrame) {
+// SnapshotFrames returns up to count recent frames (newest last).
+func SnapshotFrames(count int, pmuFilter string) (raw []rawCaptureOut, parsed []parsedCaptureOut) {
 	frameCapture.mu.Lock()
 	defer frameCapture.mu.Unlock()
 
-	src = frameCapture.buf
+	src := frameCapture.buf
 	if pmuFilter = strings.TrimSpace(pmuFilter); pmuFilter != "" {
 		filtered := make([]capturedFrame, 0, len(src))
 		for _, f := range src {
@@ -243,7 +266,7 @@ func SnapshotFrames(count int, pmuFilter string) (raw []rawCaptureOut, parsed []
 		count = len(src)
 	}
 	if count == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	src = src[len(src)-count:]
 
@@ -258,7 +281,7 @@ func SnapshotFrames(count int, pmuFilter string) (raw []rawCaptureOut, parsed []
 		})
 		parsed = append(parsed, frameToParsedOut(idx, f))
 	}
-	return raw, parsed, src
+	return raw, parsed
 }
 
 func writeRawCSV(path string, frames []rawCaptureOut) error {
@@ -267,10 +290,8 @@ func writeRawCSV(path string, frames []rawCaptureOut) error {
 		return err
 	}
 	defer f.Close()
-
 	w := csv.NewWriter(f)
 	defer w.Flush()
-
 	if err := w.Write([]string{
 		"index", "pmu_name", "captured_at", "soc", "fracsec_raw", "fracsec_count", "lag_ms", "raw_hex", "raw_bytes",
 	}); err != nil {
@@ -278,15 +299,10 @@ func writeRawCSV(path string, frames []rawCaptureOut) error {
 	}
 	for _, r := range frames {
 		if err := w.Write([]string{
-			strconv.Itoa(r.Index),
-			r.PMUName,
-			r.CapturedAt.UTC().Format(time.RFC3339Nano),
-			strconv.FormatUint(uint64(r.SOC), 10),
-			strconv.FormatUint(uint64(r.FracRaw), 10),
-			strconv.FormatUint(uint64(r.FracCount), 10),
-			strconv.FormatFloat(r.LagMs, 'f', 3, 64),
-			r.RawHex,
-			strconv.Itoa(r.RawBytes),
+			strconv.Itoa(r.Index), r.PMUName, r.CapturedAt.UTC().Format(time.RFC3339Nano),
+			strconv.FormatUint(uint64(r.SOC), 10), strconv.FormatUint(uint64(r.FracRaw), 10),
+			strconv.FormatUint(uint64(r.FracCount), 10), strconv.FormatFloat(r.LagMs, 'f', 3, 64),
+			r.RawHex, strconv.Itoa(r.RawBytes),
 		}); err != nil {
 			return err
 		}
@@ -300,12 +316,10 @@ func writeParsedCSV(path string, rows []parsedCaptureOut) error {
 		return err
 	}
 	defer f.Close()
-
 	w := csv.NewWriter(f)
 	defer w.Flush()
-
 	if err := w.Write([]string{
-		"index", "time", "entity_id", "idcode", "soc", "fracsec_count", "captured_at", "lag_ms",
+		"index", "time", "pmu_name", "idcode", "soc", "fracsec_count", "captured_at", "lag_ms",
 		"freq", "freq_dev", "rocof", "mw", "mvar", "mva", "power_factor",
 		"va_mag", "va_ang", "vb_mag", "vb_ang", "vc_mag", "vc_ang", "ia_mag", "ia_ang",
 		"stat", "digital", "crc_valid", "time_quality",
@@ -314,33 +328,27 @@ func writeParsedCSV(path string, rows []parsedCaptureOut) error {
 	}
 	for _, r := range rows {
 		if err := w.Write([]string{
-			strconv.Itoa(r.Index),
-			r.Time.UTC().Format(time.RFC3339Nano),
-			r.EntityID,
-			strconv.FormatInt(int64(r.IDCode), 10),
-			strconv.FormatUint(uint64(r.SOC), 10),
-			strconv.FormatUint(uint64(r.FracCount), 10),
-			r.CapturedAt.UTC().Format(time.RFC3339Nano),
+			strconv.Itoa(r.Index), r.Time.UTC().Format(time.RFC3339Nano), r.PMUName,
+			strconv.FormatUint(uint64(r.IDCode), 10), strconv.FormatUint(uint64(r.SOC), 10),
+			strconv.FormatUint(uint64(r.FracCount), 10), r.CapturedAt.UTC().Format(time.RFC3339Nano),
 			strconv.FormatFloat(r.LagMs, 'f', 3, 64),
-			strconv.FormatFloat(r.Freq, 'f', 6, 64),
-			strconv.FormatFloat(r.FreqDev, 'f', 6, 64),
-			strconv.FormatFloat(r.ROCOF, 'f', 6, 64),
-			strconv.FormatFloat(r.MW, 'f', 6, 64),
-			strconv.FormatFloat(r.MVAR, 'f', 6, 64),
-			strconv.FormatFloat(r.MVA, 'f', 6, 64),
-			strconv.FormatFloat(r.PowerFactor, 'f', 6, 64),
-			strconv.FormatFloat(r.VAMag, 'f', 6, 64),
-			strconv.FormatFloat(r.VAAng, 'f', 6, 64),
-			strconv.FormatFloat(r.VBMag, 'f', 6, 64),
-			strconv.FormatFloat(r.VBAng, 'f', 6, 64),
-			strconv.FormatFloat(r.VCMag, 'f', 6, 64),
-			strconv.FormatFloat(r.VCAng, 'f', 6, 64),
-			strconv.FormatFloat(r.IAMag, 'f', 6, 64),
-			strconv.FormatFloat(r.IAAng, 'f', 6, 64),
-			strconv.Itoa(int(r.Stat)),
-			strconv.Itoa(int(r.Digital)),
-			strconv.FormatBool(r.CRCValid),
-			strconv.Itoa(int(r.TimeQuality)),
+			strconv.FormatFloat(float64(r.Freq), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.FreqDev), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.ROCOF), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.MW), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.MVAR), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.MVA), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.PowerFactor), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.VAMag), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.VAAng), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.VBMag), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.VBAng), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.VCMag), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.VCAng), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.IAMag), 'f', 6, 64),
+			strconv.FormatFloat(float64(r.IAAng), 'f', 6, 64),
+			strconv.Itoa(int(r.Stat)), strconv.Itoa(int(r.Digital)),
+			strconv.FormatBool(r.CRCValid), strconv.Itoa(int(r.TimeQuality)),
 		}); err != nil {
 			return err
 		}
@@ -348,13 +356,12 @@ func writeParsedCSV(path string, rows []parsedCaptureOut) error {
 	return w.Error()
 }
 
-// DumpFrames writes raw + parsed CSV files.
+// DumpFrames writes raw + parsed CSV files from the in-memory tape.
 func DumpFrames(count int, pmuFilter, rawPath, parsedPath string) (int, error) {
-	raw, parsed, _ := SnapshotFrames(count, pmuFilter)
+	raw, parsed := SnapshotFrames(count, pmuFilter)
 	if len(raw) == 0 {
 		return 0, fmt.Errorf("no captured frames in buffer (wait for PDC to receive data)")
 	}
-
 	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
 		return 0, err
 	}
@@ -367,12 +374,11 @@ func DumpFrames(count int, pmuFilter, rawPath, parsedPath string) (int, error) {
 	if err := writeParsedCSV(parsedPath, parsed); err != nil {
 		return 0, fmt.Errorf("write parsed csv: %w", err)
 	}
-
 	log.Printf("[frame-capture] dumped count=%d raw=%s parsed=%s", len(raw), rawPath, parsedPath)
 	return len(raw), nil
 }
 
-// FrameCaptureStatus reports ring-buffer configuration and fill level.
+// FrameCaptureStatus reports how full the tape is.
 func FrameCaptureStatus() map[string]any {
 	frameCapture.mu.Lock()
 	defer frameCapture.mu.Unlock()
@@ -396,7 +402,7 @@ func FrameCaptureStatus() map[string]any {
 	}
 }
 
-// RegisterFrameCaptureHandler exposes frame-capture HTTP endpoints.
+// RegisterFrameCaptureHandler exposes dump / status HTTP endpoints.
 func RegisterFrameCaptureHandler(mux *http.ServeMux) {
 	mux.HandleFunc("/conversation/frame-capture/status", handleFrameCaptureStatus)
 	mux.HandleFunc("/conversation/frame-capture/dump", handleFrameCaptureDump)
@@ -439,15 +445,9 @@ func handleFrameCaptureDump(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":              true,
-		"format":          "csv",
-		"requested":       count,
-		"count":           n,
-		"buffer_limit":    status["limit"],
-		"buffered":        status["buffered"],
+		"ok": true, "format": "csv", "requested": count, "count": n,
+		"buffer_limit": status["limit"], "buffered": status["buffered"],
 		"buffered_by_pmu": status["buffered_by_pmu"],
-		"raw_file":        rawOut,
-		"parsed_file":     parsedOut,
-		"warning":         warn,
+		"raw_file": rawOut, "parsed_file": parsedOut, "warning": warn,
 	})
 }

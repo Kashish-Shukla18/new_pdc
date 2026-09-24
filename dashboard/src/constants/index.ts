@@ -9,6 +9,7 @@ export const emptyDashboardState: DashboardState = {
   pmus: [],
   eventCount: 0,
   latency: { slowestStage: '', slowestLabel: '', slowestAvgMs: 0, stages: [] },
+  alignedBatches: [],
 }
 
 export const defaultNewPMU: NewPMUForm = {
@@ -47,7 +48,7 @@ export const HELP_SECTIONS = [
   {
     title: 'Connectivity',
     content:
-      'Measured hop times (TCP dial, handshake, Kafka, parse, dashboard JSON, UI refresh) plus loss and availability. The slowest function is highlighted.',
+      'Measured hop times (TCP dial, handshake, parse, dashboard JSON, UI refresh) plus loss and availability. The slowest function is highlighted.',
   },
   {
     title: 'Analytics',

@@ -1,3 +1,8 @@
+// Package store keeps the list of PMUs in Postgres.
+//
+// This is NOT the big history database of every reading.
+// It is just the address book: name, IP, port, map location.
+// Readings history stays parked with the storage sink in output/.
 package store
 
 import (
@@ -11,6 +16,7 @@ import (
 	"pdc/config"
 )
 
+// Only the address-book table is created at startup.
 var schemaStatements = []string{
 	`CREATE EXTENSION IF NOT EXISTS timescaledb`,
 	`CREATE TABLE IF NOT EXISTS pmu_config (
@@ -28,34 +34,6 @@ var schemaStatements = []string{
     active         BOOLEAN NOT NULL DEFAULT TRUE,
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`,
-	`CREATE TABLE IF NOT EXISTS pmu_readings (
-    time           TIMESTAMPTZ NOT NULL,
-    entity_id      TEXT NOT NULL,
-    idcode         INTEGER,
-    freq           DOUBLE PRECISION,
-    freq_dev       DOUBLE PRECISION,
-    rocof          DOUBLE PRECISION,
-    mw             DOUBLE PRECISION,
-    mvar           DOUBLE PRECISION,
-    mva            DOUBLE PRECISION,
-    power_factor   DOUBLE PRECISION,
-    va_mag         DOUBLE PRECISION,
-    va_ang         DOUBLE PRECISION,
-    vb_mag         DOUBLE PRECISION,
-    vb_ang         DOUBLE PRECISION,
-    vc_mag         DOUBLE PRECISION,
-    vc_ang         DOUBLE PRECISION,
-    ia_mag         DOUBLE PRECISION,
-    ia_ang         DOUBLE PRECISION,
-    stat           INTEGER,
-    digital        INTEGER,
-    crc_valid      BOOLEAN,
-    time_quality   INTEGER,
-    PRIMARY KEY (time, entity_id)
-)`,
-	`SELECT create_hypertable('pmu_readings', 'time', if_not_exists => TRUE)`,
-	`CREATE INDEX IF NOT EXISTS pmu_readings_entity_time_idx
-    ON pmu_readings (entity_id, time DESC)`,
 }
 
 type Store struct {
@@ -70,7 +48,7 @@ func env(key, fallback string) string {
 	return v
 }
 
-// DSN returns POSTGRES_DSN (compose maps host 5433 → container 5432).
+// DSN is the Postgres connection string (compose maps host 5433 → container 5432).
 func DSN() string {
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {
 		return v

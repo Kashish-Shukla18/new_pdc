@@ -1,3 +1,7 @@
+// sink.go — PARKED storage writer (Redis latest + Postgres history).
+//
+// Not wired into main.go today. When you turn storage back on, NewSinkFromEnv
+// writes each reading to Redis (latest) and TimescaleDB (history).
 package output
 
 import (

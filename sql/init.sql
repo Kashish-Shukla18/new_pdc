@@ -1,5 +1,6 @@
--- TimescaleDB init for PDC config + history.
--- Mounted at /docker-entrypoint-initdb.d/ so it runs once on first volume create.
+-- First-boot schema for the PDC.
+-- This is the PMU address book only.
+-- Reading history (pmu_readings) stays parked with the storage sink in output/.
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
@@ -19,33 +20,6 @@ CREATE TABLE IF NOT EXISTS pmu_config (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS pmu_readings (
-    time           TIMESTAMPTZ NOT NULL,
-    entity_id      TEXT NOT NULL,
-    idcode         INTEGER,
-    freq           DOUBLE PRECISION,
-    freq_dev       DOUBLE PRECISION,
-    rocof          DOUBLE PRECISION,
-    mw             DOUBLE PRECISION,
-    mvar           DOUBLE PRECISION,
-    mva            DOUBLE PRECISION,
-    power_factor   DOUBLE PRECISION,
-    va_mag         DOUBLE PRECISION,
-    va_ang         DOUBLE PRECISION,
-    vb_mag         DOUBLE PRECISION,
-    vb_ang         DOUBLE PRECISION,
-    vc_mag         DOUBLE PRECISION,
-    vc_ang         DOUBLE PRECISION,
-    ia_mag         DOUBLE PRECISION,
-    ia_ang         DOUBLE PRECISION,
-    stat           INTEGER,
-    digital        INTEGER,
-    crc_valid      BOOLEAN,
-    time_quality   INTEGER,
-    PRIMARY KEY (time, entity_id)
-);
-
-SELECT create_hypertable('pmu_readings', 'time', if_not_exists => TRUE);
-
-CREATE INDEX IF NOT EXISTS pmu_readings_entity_time_idx
-    ON pmu_readings (entity_id, time DESC);
+-- PARKED: readings history (re-enable with the storage sink in output/).
+-- CREATE TABLE IF NOT EXISTS pmu_readings ( ... );
+-- SELECT create_hypertable('pmu_readings', 'time', if_not_exists => TRUE);
