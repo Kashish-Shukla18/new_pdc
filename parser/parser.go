@@ -247,7 +247,7 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	socRaw := binary.BigEndian.Uint32(raw[6:10])
 	fracsec := binary.BigEndian.Uint32(raw[10:14])
 	checksumRx := binary.BigEndian.Uint16(raw[len(raw)-2:])
-	checksumCalc := crc16(raw[:len(raw)-2])
+	checksumCalc := CRC16(raw[:len(raw)-2])
 	if checksumRx != checksumCalc {
 		return Reading{}, fmt.Errorf("CRC mismatch: rx=0x%04X calc=0x%04X", checksumRx, checksumCalc)
 	}
@@ -537,8 +537,8 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	}, nil
 }
 
-// crc16 is the CRC-CCITT check used by C37.118 (seed 0xFFFF, poly 0x1021).
-func crc16(data []byte) uint16 {
+// CRC16 is the CRC-CCITT check used by C37.118 (seed 0xFFFF, poly 0x1021).
+func CRC16(data []byte) uint16 {
 	crc := uint16(0xFFFF)
 	for _, b := range data {
 		crc ^= uint16(b) << 8

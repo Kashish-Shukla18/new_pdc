@@ -7,7 +7,7 @@ import (
 )
 
 func putCRC(buf []byte) {
-	c := crc16(buf[:len(buf)-2])
+	c := CRC16(buf[:len(buf)-2])
 	binary.BigEndian.PutUint16(buf[len(buf)-2:], c)
 }
 
@@ -224,7 +224,7 @@ func TestBuildCMDVersion(t *testing.T) {
 	// Ensure CRC helper works on version-2 style header bytes
 	buf := []byte{0xAA, 0x42, 0, 18, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0}
 	putCRC(buf)
-	if crc16(buf[:16]) != binary.BigEndian.Uint16(buf[16:]) {
+	if CRC16(buf[:16]) != binary.BigEndian.Uint16(buf[16:]) {
 		t.Fatal("crc")
 	}
 }

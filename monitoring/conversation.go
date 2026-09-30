@@ -1,13 +1,12 @@
+// conversation.go — live PMU state for the dashboard (JSON / SSE).
+// Operational chatter goes through RecordConversation → slog (+ thin UI alerts).
 package monitoring
-
-// conversation.go — live "what each PMU is doing" state for the dashboard (JSON / SSE).
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -156,6 +155,8 @@ type AlignedPoint struct {
 	VBAngle      float64 `json:"vbAngle"`
 	VCAngle      float64 `json:"vcAngle"`
 	IAAngle      float64 `json:"iaAngle"`
+	IBAngle      float64 `json:"ibAngle"`
+	ICAngle      float64 `json:"icAngle"`
 	// Analogs keyed by CFG-2 channel names (e.g. Analog1) — no invented labels.
 	Analogs map[string]float64 `json:"analogs,omitempty"`
 }
@@ -217,7 +218,7 @@ type pmuRuntime struct {
 	lastTrendAt    time.Time
 }
 
-const maxConversationEvents = 1000
+const maxConversationEvents = 200
 const maxTrendPoints = 180 // ~18s at 10 Hz dashboard sample rate
 const dashboardTrendExport = 120
 const trendMinInterval = 100 * time.Millisecond // keep charts smooth without 50–60 Hz SVG load
@@ -247,6 +248,33 @@ func trendPhasorMags(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
 			ib = mag
 		case n == "IC" || strings.HasSuffix(n, "CI"):
 			ic = mag
+		}
+	}
+	return
+}
+
+// trendPhasorAngles maps CFG channel names onto VA–IC phase angles (degrees).
+func trendPhasorAngles(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
+	va = float64(r.VA.PhaseDegrees)
+	vb = float64(r.VB.PhaseDegrees)
+	vc = float64(r.VC.PhaseDegrees)
+	ia = float64(r.IA.PhaseDegrees)
+	for _, p := range r.Phasors {
+		n := strings.ToUpper(strings.TrimSpace(p.Name))
+		deg := float64(p.Phasor.PhaseDegrees)
+		switch {
+		case n == "VA" || strings.HasSuffix(n, "AV"):
+			va = deg
+		case n == "VB" || strings.HasSuffix(n, "BV"):
+			vb = deg
+		case n == "VC" || strings.HasSuffix(n, "CV"):
+			vc = deg
+		case n == "IA" || strings.HasSuffix(n, "AI"):
+			ia = deg
+		case n == "IB" || strings.HasSuffix(n, "BI"):
+			ib = deg
+		case n == "IC" || strings.HasSuffix(n, "CI"):
+			ic = deg
 		}
 	}
 	return
@@ -401,6 +429,7 @@ func RecordAlignedFrame(tsMs int64, present map[string]parser.Reading, missing [
 			fnom = float64(prof.FnomHz)
 		}
 		va, vb, vc, ia, ib, ic := trendPhasorMags(r)
+		vaA, vbA, vcA, iaA, ibA, icA := trendPhasorAngles(r)
 		freq := float64(r.Frequency)
 		freqDev := float64(r.FrequencyDeviation)
 		if fnom > 0 {
@@ -423,10 +452,12 @@ func RecordAlignedFrame(tsMs int64, present map[string]parser.Reading, missing [
 			IA:           ia,
 			IB:           ib,
 			IC:           ic,
-			VAAngle:      float64(r.VA.PhaseDegrees),
-			VBAngle:      float64(r.VB.PhaseDegrees),
-			VCAngle:      float64(r.VC.PhaseDegrees),
-			IAAngle:      float64(r.IA.PhaseDegrees),
+			VAAngle:      vaA,
+			VBAngle:      vbA,
+			VCAngle:      vcA,
+			IAAngle:      iaA,
+			IBAngle:      ibA,
+			ICAngle:      icA,
 			Analogs:      analogs,
 		}
 	}
@@ -476,7 +507,6 @@ func RecordAlignedFrame(tsMs int64, present map[string]parser.Reading, missing [
 	}
 	msg := fmt.Sprintf("summary N=%d fps=%.1f wait=%s max_open=%d emitted=%d complete=%d (%.1f%%) timeout=%d cap=%d",
 		n, fps, wait, maxOpen, emitted, completeN, pct, timeoutN, capN)
-	log.Printf("[aligner] %s", msg)
 	RecordConversation("SYSTEM", "PDC", "ALIGN", "summary", "ok", msg)
 }
 
@@ -701,15 +731,17 @@ func RecordConversation(pmu, from, to, stage, status, message string) {
 		pmu = "SYSTEM"
 	}
 	now := time.Now().UTC()
-	e := ConversationEvent{
-		Time:      now,
-		PMU:       pmu,
-		From:      from,
-		To:        to,
-		Stage:     stage,
-		Status:    status,
-		Message:   message,
-		Direction: fmt.Sprintf("%s -> %s", from, to),
+
+	// Structured slog (rate-limited). Dropped samples skip the UI ring too.
+	if !logEvent(pmu, from, to, stage, status, message) {
+		if isErrorish(status) {
+			conversationBus.mu.Lock()
+			st := getOrCreatePMU(pmu)
+			st.lastError = message
+			st.lastEventTime = now
+			conversationBus.mu.Unlock()
+		}
+		return
 	}
 
 	conversationBus.mu.Lock()
@@ -721,10 +753,26 @@ func RecordConversation(pmu, from, to, stage, status, message string) {
 	if strings.Contains(strings.ToLower(stage), "connect") && strings.EqualFold(status, "error") {
 		st.lastError = message
 	}
-	if strings.Contains(strings.ToLower(status), "error") {
+	if isErrorish(status) {
 		st.lastError = message
 	}
 
+	// Thin UI alert feed — not a second copy of every OK heartbeat.
+	if !uiWorthy(stage, status) {
+		conversationBus.mu.Unlock()
+		return
+	}
+
+	e := ConversationEvent{
+		Time:      now,
+		PMU:       pmu,
+		From:      from,
+		To:        to,
+		Stage:     stage,
+		Status:    status,
+		Message:   message,
+		Direction: fmt.Sprintf("%s -> %s", from, to),
+	}
 	if len(conversationBus.events) == maxConversationEvents {
 		copy(conversationBus.events, conversationBus.events[1:])
 		conversationBus.events = conversationBus.events[:maxConversationEvents-1]
@@ -774,11 +822,9 @@ func handleConversationRecent(w http.ResponseWriter, _ *http.Request) {
 }
 
 func handleConversationState(w http.ResponseWriter, _ *http.Request) {
-	t0 := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(snapshotDashboard())
-	ObserveStage("SYSTEM", StageStateSnapshot, time.Since(t0))
 }
 
 func handleConversationLatency(w http.ResponseWriter, _ *http.Request) {
@@ -883,6 +929,14 @@ func snapshotDashboard() DashboardState {
 			copy(trendCopy, st.trends[n-exportN:])
 		}
 
+		lastPhasor := st.lastPhasor
+		lastChannels := st.lastChannels
+		if !connected {
+			// Do not export frozen phasors as if they were live — UI must not paint stale vectors.
+			lastPhasor = PhasorSnapshot{}
+			lastChannels = ChannelSnapshot{}
+		}
+
 		pmus = append(pmus, PMUState{
 			Name:           st.name,
 			Connected:      connected,
@@ -897,8 +951,8 @@ func snapshotDashboard() DashboardState {
 			SinkErrors:     st.sinkErrors,
 			SpoolQueued:    st.spoolQueued,
 			LastReading:    last,
-			LastPhasor:     st.lastPhasor,
-			LastChannels:   st.lastChannels,
+			LastPhasor:     lastPhasor,
+			LastChannels:   lastChannels,
 			LastFrame:      st.lastFrame,
 			CFG:            cfg,
 			Trends:         trendCopy,
@@ -916,13 +970,10 @@ func snapshotDashboard() DashboardState {
 			continue
 		}
 		// Fill cold counter from inter-frame wait only. Do not overwrite a real
-		// 1s window rate with instantaneous tcp_wait (that inflated FPS vs CFG).
+		// 1s window rate with instantaneous frame_gap (that inflated FPS vs CFG).
 		wait := 0.0
 		if h := hops[pmus[i].Name]; len(h) > 0 {
-			wait = h["tcp_wait"]
-			if wait <= 0 {
-				wait = h["tcp_interarrival"]
-			}
+			wait = h[StageFrameGap]
 		}
 		cfgRate := float64(pmus[i].CFG.DataRate)
 		if cfgRate < 0 {

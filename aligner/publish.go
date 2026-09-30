@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"pdc/monitoring"
 	"pdc/parser"
 )
 
@@ -204,7 +205,7 @@ func (p *Publisher) stepOnce() bool {
 	}
 
 	// Accept stamps within ±half period (25 fps → ±20 ms). Exact-only matching
-	// left ~half the ticks empty for Typhoon-style 39/40/41 ms jitter.
+	// left ~half the ticks empty for 25 fps-style 39/40/41 ms jitter.
 	half := period / 2
 	present, missing := p.bank.TakeTickWindow(tick, half)
 	if len(present) == 0 {
@@ -224,6 +225,16 @@ func (p *Publisher) stepOnce() bool {
 	}
 
 	p.emit(tick, present, missing, complete, reason)
+	now := time.Now()
+	for name, r := range present {
+		if r.Trace.ReceivedAtUnixNano <= 0 {
+			continue
+		}
+		recv := time.Unix(0, r.Trace.ReceivedAtUnixNano)
+		if dwell := now.Sub(recv); dwell >= 0 && dwell < 5*time.Minute {
+			monitoring.ObserveStage(name, monitoring.StageAlignWait, dwell)
+		}
+	}
 	p.bank.PruneBefore(tick)
 
 	p.mu.Lock()

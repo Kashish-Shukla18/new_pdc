@@ -12,6 +12,12 @@ import {
 } from 'recharts'
 import type { CycleHistoryPoint } from '../../hooks/useCycleLatencyHistory'
 import type { CycleLatency } from '../../utils/pmu'
+import {
+  CHART_AXIS_TICK,
+  CHART_GRID_STROKE,
+  CHART_LEGEND_STYLE,
+  ChartSeriesTooltip,
+} from '../../utils/chartTooltip'
 import { formatTS, round } from '../../utils/format'
 
 type Props = {
@@ -96,27 +102,34 @@ export const EndToEndLatencyPanel = memo(function EndToEndLatencyPanel({ history
           ) : (
             <ResponsiveContainer width="99%" height={300} minWidth={1} minHeight={300}>
               <ComposedChart data={history} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
                   type="number"
                   domain={['dataMin', 'dataMax']}
                   tickFormatter={(v) => formatTS(Number(v))}
-                  tick={{ fill: '#9eb0c5', fontSize: 10 }}
+                  tick={CHART_AXIS_TICK}
                   minTickGap={36}
+                  stroke="#94a3b8"
                 />
                 <YAxis
-                  tick={{ fill: '#9eb0c5', fontSize: 11 }}
+                  tick={CHART_AXIS_TICK}
                   domain={[0, (max: number) => Math.max(25, Math.ceil((max || 1) * 1.1))]}
                   width={52}
                   tickFormatter={(v) => `${round(Number(v), 0)}`}
                   unit=" ms"
+                  stroke="#94a3b8"
                 />
                 <Tooltip
-                  labelFormatter={(v) => formatTS(Number(v))}
-                  formatter={(value, name) => [`${round(Number(value ?? 0), 2)} ms`, String(name)]}
+                  content={(props) => (
+                    <ChartSeriesTooltip
+                      {...props}
+                      labelFormatter={(v) => formatTS(Number(v))}
+                      formatter={(value, name) => [`${round(Number(value ?? 0), 2)} ms`, String(name)]}
+                    />
+                  )}
                 />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
                 <Area
                   type="monotone"
                   dataKey="pmuWait"
