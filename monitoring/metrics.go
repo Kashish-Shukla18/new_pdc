@@ -33,7 +33,7 @@ var (
 		prometheus.CounterOpts{Name: "pdc_quality_rejected_total", Help: "Total readings rejected by time/quality checks."},
 	)
 	storeErrors = prometheus.NewCounter(
-		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Redis/Postgres store errors."},
+		prometheus.CounterOpts{Name: "pdc_store_errors_total", Help: "Total Postgres store errors."},
 	)
 	spoolQueued = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "pdc_spool_queued_total", Help: "Total readings queued to local durable spool."},

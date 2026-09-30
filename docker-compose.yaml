@@ -1,26 +1,10 @@
 # docker-compose.yaml – optional data services for the PDC
 #
 # Required for the live app today: timescaledb (PMU address book only).
-# Redis is only needed when you re-enable the parked storage sink in output/.
 
 version: '3.8'
 
 services:
-
-  # ── REDIS (parked storage sink — not required for live dashboard) ──────────
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6380:6379"
-    command: >
-      redis-server
-        --maxmemory 2gb
-        --maxmemory-policy allkeys-lru
-        --tcp-backlog 511
-        --hz 20
-        --aof-use-rdb-preamble yes
-        --save ""
-        --appendonly no
 
   # ── POSTGRES + TIMESCALEDB (PMU address book; history table parked) ────────
   timescaledb:

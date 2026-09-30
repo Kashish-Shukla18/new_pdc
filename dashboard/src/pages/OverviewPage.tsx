@@ -22,6 +22,12 @@ import 'leaflet/dist/leaflet.css'
 import { MapContainer, TileLayer, Marker, Popup, Tooltip as LeafletTooltip, useMap } from 'react-leaflet'
 import { CHART_COLORS, INDIA_CENTER } from '../constants'
 import { useDashboardContext } from '../context/DashboardContext'
+import {
+  CHART_AXIS_TICK,
+  CHART_GRID_STROKE,
+  CHART_LEGEND_STYLE,
+  ChartSeriesTooltip,
+} from '../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../utils/format'
 import { packetLossOf, pmuKey } from '../utils/pmu'
 import { rowsFromAlignedBatches, ALIGNED_CHART_WINDOW } from '../utils/alignedChart'
@@ -286,29 +292,36 @@ export function OverviewPage() {
           <div className="chart-wrap overview-chart">
             <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
               <LineChart data={chartTrend}>
-                <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
                   tickFormatter={formatTS}
-                  tick={{ fill: '#9eb0c5', fontSize: 11 }}
+                  tick={CHART_AXIS_TICK}
                   minTickGap={32}
                   interval="preserveStartEnd"
+                  stroke="#94a3b8"
                 />
                 <YAxis
-                  tick={{ fill: '#9eb0c5', fontSize: 11 }}
+                  tick={CHART_AXIS_TICK}
                   domain={['auto', 'auto']}
                   scale="linear"
                   tickFormatter={(v) => round(Number(v), freqMode === 'absolute' ? 3 : 4).toString()}
                   width={56}
+                  stroke="#94a3b8"
                 />
                 <Tooltip
-                  labelFormatter={(value) => formatTSMs(Number(value))}
-                  formatter={(value, name) => [
-                    `${round(Number(value ?? 0), 4)} ${freqMode === 'absolute' ? 'Hz' : 'Hz Δ'}`,
-                    String(name),
-                  ]}
+                  content={(props) => (
+                    <ChartSeriesTooltip
+                      {...props}
+                      labelFormatter={(value) => formatTSMs(Number(value))}
+                      formatter={(value, name) => [
+                        `${round(Number(value ?? 0), 4)} ${freqMode === 'absolute' ? 'Hz' : 'Hz Δ'}`,
+                        String(name),
+                      ]}
+                    />
+                  )}
                 />
-                <Legend />
+                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
                 {freqMode === 'absolute' ? (
                   <>
                     <ReferenceLine y={fleetFnom} stroke="#7dd3a7" strokeDasharray="4 4" label={`FNOM ${fleetFnom}`} />
@@ -350,24 +363,36 @@ export function OverviewPage() {
           <div className="chart-wrap overview-chart">
             <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
               <LineChart data={chartTrend}>
-                <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
+                <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
                   tickFormatter={formatTS}
-                  tick={{ fill: '#9eb0c5', fontSize: 11 }}
+                  tick={CHART_AXIS_TICK}
                   minTickGap={32}
                   interval="preserveStartEnd"
+                  stroke="#94a3b8"
                 />
-                <YAxis tick={{ fill: '#9eb0c5', fontSize: 11 }} domain={['auto', 'auto']} scale="linear" width={56} />
+                <YAxis
+                  tick={CHART_AXIS_TICK}
+                  domain={['auto', 'auto']}
+                  scale="linear"
+                  width={56}
+                  stroke="#94a3b8"
+                />
                 <Tooltip
-                  labelFormatter={(value) => formatTSMs(Number(value))}
-                  formatter={(value, name) => [
-                    `${round(Number(value ?? 0), 5)} Hz/s`,
-                    String(name),
-                  ]}
+                  content={(props) => (
+                    <ChartSeriesTooltip
+                      {...props}
+                      labelFormatter={(value) => formatTSMs(Number(value))}
+                      formatter={(value, name) => [
+                        `${round(Number(value ?? 0), 5)} Hz/s`,
+                        String(name),
+                      ]}
+                    />
+                  )}
                 />
-                <Legend />
-                <ReferenceLine y={0} stroke="rgba(255,255,255,0.25)" strokeDasharray="4 4" />
+                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.35)" strokeDasharray="4 4" />
                 {plotPMUs.map((pmu) => {
                   const idx = pmus.findIndex((p) => p.name === pmu.name)
                   const color = CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length]

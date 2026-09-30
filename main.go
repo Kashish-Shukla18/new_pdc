@@ -9,7 +9,7 @@
 //  6. Show everything on the live dashboard
 //
 // Layout (CFG-2) always comes from the PMU connection — never from disk files.
-// Saving readings to Redis/Postgres stays parked in output/ (kept, not wired yet).
+// Saving readings to Postgres/Timescale stays parked in output/ (kept, not wired yet).
 package main
 
 import (
@@ -156,10 +156,7 @@ func (p *pipeline) HandleFrame(pmuName string, raw []byte, receivedAt time.Time)
 		logFirstFrames(pmuName, idx, reading)
 	}
 
-	qualityStart := time.Now()
 	qerr := p.checker.Validate(reading)
-	qualityDur := time.Since(qualityStart)
-	monitoring.ObserveStage(pmuName, monitoring.StageQuality, qualityDur)
 	if qerr != nil {
 		monitoring.IncQualityRejected()
 		monitoring.IncQualityRejectForPMU(pmuName)
@@ -178,7 +175,6 @@ func (p *pipeline) HandleFrame(pmuName string, raw []byte, receivedAt time.Time)
 	reading.Trace = parser.LatencyTrace{
 		ReceivedAtUnixNano: receivedAt.UnixNano(),
 		ParseMs:            monitoring.Ms(parseDur),
-		QualityMs:          monitoring.Ms(qualityDur),
 	}
 	if !reading.Timestamp.IsZero() {
 		monitoring.UpdateClockOffset(pmuName, receivedAt, reading.Timestamp)

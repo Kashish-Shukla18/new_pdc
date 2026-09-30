@@ -178,7 +178,7 @@ func TestPublisherDoesNotRaceAheadOfSlowPMU(t *testing.T) {
 	t.Fatalf("expected tick 1050 after b caught up, ticks=%v", ticks)
 }
 
-// Typhoon-style 25 fps: samples at …159, …200, …240 on a 40 ms ruler.
+// 25 fps-style samples: …159, …200, …240 on a 40 ms ruler.
 // Exact matching emitted empty "gap" rows (~54% complete). Nearest+skip should
 // publish only real samples as complete.
 func TestPublisherOffGridSinglePMU(t *testing.T) {

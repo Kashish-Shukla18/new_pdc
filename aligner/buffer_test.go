@@ -84,7 +84,7 @@ func TestBankIngestAndSnapshot(t *testing.T) {
 func TestTakeTickWindowNearest(t *testing.T) {
 	bank := NewBank(50)
 	bank.SetExpected([]string{"pmu-t"})
-	// Off-grid stamp like Typhoon 25 fps (…159 next to a 40 ms ruler mark …160).
+	// Off-grid stamp like 25 fps (…159 next to a 40 ms ruler mark …160).
 	bank.Ingest(makeReading("pmu-t", 9159))
 
 	present, missing := bank.TakeTickWindow(9160, 20)

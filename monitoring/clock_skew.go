@@ -109,25 +109,13 @@ func CorrectedPMULag(pmu string, pmuTime time.Time) time.Duration {
 	return time.Since(CorrectedTime(pmu, pmuTime))
 }
 
-// ObservePMUClockMetrics updates skew estimate and records raw/corrected PMU E2E.
+// ObservePMUClockMetrics updates skew estimate (no longer a latency stage).
 func ObservePMUClockMetrics(pmu string, receivedAt, pmuTime time.Time) {
 	if pmuTime.IsZero() {
 		return
 	}
 	if !receivedAt.IsZero() {
 		UpdateClockOffset(pmu, receivedAt, pmuTime)
-	}
-	offset := ClockOffset(pmu)
-	if offset != 0 {
-		ObserveStage(pmu, StageClockSkewPMU, offset)
-	}
-	rawLag := time.Since(pmuTime)
-	if rawLag >= 0 && rawLag < 10*time.Second {
-		ObserveStage(pmu, StageE2EPMUToDash, rawLag)
-	}
-	corrected := CorrectedPMULag(pmu, pmuTime)
-	if corrected >= 0 && corrected < 5*time.Minute {
-		ObserveStage(pmu, StageE2EPMUCorrected, corrected)
 	}
 }
 

@@ -11,6 +11,12 @@ import {
   YAxis,
 } from 'recharts'
 import type { TrendPoint } from '../../types/dashboard'
+import {
+  CHART_AXIS_TICK,
+  CHART_GRID_STROKE,
+  CHART_LEGEND_STYLE,
+  ChartSeriesTooltip,
+} from '../../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../../utils/format'
 
 type Props = {
@@ -30,19 +36,34 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
       <div className="chart-wrap small">
         <ResponsiveContainer width="99%" height={320} minWidth={1} minHeight={320}>
           <LineChart data={data}>
-            <CartesianGrid stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-            <XAxis dataKey="ts" tickFormatter={formatTS} tick={{ fill: '#9eb0c5', fontSize: 9 }} interval={8} />
+            <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
+            <XAxis
+              dataKey="ts"
+              tickFormatter={formatTS}
+              tick={CHART_AXIS_TICK}
+              interval={8}
+              stroke="#94a3b8"
+            />
             <YAxis
               domain={['auto', 'auto']}
-              tick={{ fill: '#60a5fa', fontSize: 9 }}
+              tick={CHART_AXIS_TICK}
               tickFormatter={(v) => `${round(Number(v), 3)}`}
               width={56}
+              stroke="#94a3b8"
             />
             <Tooltip
-              labelFormatter={(value) => formatTSMs(Number(value))}
-              formatter={(value) => [`${round(Number(value ?? 0), 4)} Hz`, 'Frequency']}
+              content={(props) => (
+                <ChartSeriesTooltip
+                  {...props}
+                  labelFormatter={(value) => formatTSMs(Number(value))}
+                  formatter={(value, name) => [
+                    `${round(Number(value ?? 0), 4)} Hz`,
+                    String(name ?? 'Freq (Hz)'),
+                  ]}
+                />
+              )}
             />
-            <Legend wrapperStyle={{ fontSize: 10 }} />
+            <Legend wrapperStyle={CHART_LEGEND_STYLE} />
             <ReferenceLine y={fnomHz} stroke="#15803d" strokeDasharray="4 4" label={`FNOM ${fnomHz}`} />
             <Line
               type="linear"
