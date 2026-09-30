@@ -1,7 +1,12 @@
 package monitoring
 
-// latency.go — stopwatch for each pipeline step (TCP → parse → dashboard).
-// Lets the UI show which hop is slow.
+// latency.go — five hop stopwatches for the live pipeline.
+//
+//	frame_gap         → idle time between DATA frames (NOT PDC work)
+//	parse             → decode DATA
+//	align_wait        → sample sat in aligner until tick emit
+//	dashboard_record  → RecordReading into live inventory
+//	e2e_recv_to_dashboard → receive-complete → dashboard done
 
 import (
 	"fmt"
@@ -19,24 +24,11 @@ import (
 
 // Pipeline stage IDs — keep stable; they are Prometheus labels and JSON keys.
 const (
-	StageDial            = "tcp_dial"
-	StageHandshakeHDR    = "handshake_hdr"
-	StageHandshakeCFG2   = "handshake_cfg2"
-	StageHandshakeTotal  = "handshake_total"
-	StageTCPWait         = "tcp_wait"
-	StageTCPCopy         = "tcp_copy"
-	StageTCPRead         = "tcp_read"
-	StageTCPInterarrival = "tcp_interarrival"
-	StageFrameToParse    = "frame_to_parse"
+	StageFrameGap        = "frame_gap"
 	StageParse           = "parse"
-	StageQuality         = "quality"
+	StageAlignWait       = "align_wait"
 	StageDashboardRecord = "dashboard_record"
-	StageStateSnapshot   = "dashboard_state_json"
-	StageSinkStore       = "sink_store"
 	StageE2ERecvToDash   = "e2e_recv_to_dashboard"
-	StageClockSkewPMU    = "clock_skew_pmu"
-	StageE2EPMUToDash    = "e2e_pmu_to_dashboard_raw"
-	StageE2EPMUCorrected = "e2e_pmu_to_dashboard"
 )
 
 const latencyWindow = 256
@@ -44,28 +36,15 @@ const latencyWindow = 256
 type stageSpec struct {
 	ID    string
 	Label string
-	Group string // connection | ingest | process | dashboard | sink | e2e
+	Group string // idle | process | dashboard | e2e
 }
 
 var stageOrder = []stageSpec{
-	{StageDial, "TCP dial", "connection"},
-	{StageHandshakeHDR, "Handshake HDR wait", "connection"},
-	{StageHandshakeCFG2, "Handshake CFG-2 wait", "connection"},
-	{StageHandshakeTotal, "Handshake total (one-time)", "connection"},
-	{StageTCPWait, "TCP wait for first byte", "idle"},
-	{StageTCPCopy, "TCP copy frame bytes", "ingest"},
-	{StageTCPRead, "TCP wait+copy (total)", "idle"},
-	{StageTCPInterarrival, "TCP complete-to-complete", "idle"},
-	{StageFrameToParse, "Frame complete → parse start", "process"},
+	{StageFrameGap, "Frame gap (inter-arrival)", "idle"},
 	{StageParse, "Parse DATA", "process"},
-	{StageQuality, "Quality gate", "process"},
+	{StageAlignWait, "Align wait (buffer to emit)", "process"},
 	{StageDashboardRecord, "Dashboard RecordReading", "dashboard"},
-	{StageStateSnapshot, "Dashboard /state JSON", "dashboard"},
-	{StageSinkStore, "Redis + Postgres store", "sink"},
-	{StageE2ERecvToDash, "E2E TCP-complete → dashboard", "e2e"},
-	{StageClockSkewPMU, "PMU clock skew (receive − SOC)", "clock"},
-	{StageE2EPMUToDash, "E2E PMU SOC → dashboard (raw, includes skew)", "clock"},
-	{StageE2EPMUCorrected, "E2E PMU → dashboard (skew corrected)", "e2e"},
+	{StageE2ERecvToDash, "E2E receive to dashboard", "e2e"},
 }
 
 var stageByID = func() map[string]stageSpec {
@@ -127,7 +106,7 @@ func init() {
 	}
 }
 
-// Ms converts a duration to milliseconds (0 if d <= 0).
+// Ms converts a duration to milliseconds (float).
 func Ms(d time.Duration) float64 {
 	if d <= 0 {
 		return 0
@@ -135,17 +114,11 @@ func Ms(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
-// FormatMs is a compact duration for logs and conversation messages.
+// FormatMs is a short human string for logs.
 func FormatMs(d time.Duration) string {
-	if d <= 0 {
-		return "0ms"
-	}
 	ms := Ms(d)
-	if ms < 1 {
-		return fmt.Sprintf("%.2fms", ms)
-	}
 	if ms < 1000 {
-		return fmt.Sprintf("%.1fms", ms)
+		return fmt.Sprintf("%.2fms", ms)
 	}
 	return fmt.Sprintf("%.2fs", ms/1000)
 }
@@ -194,8 +167,7 @@ func ObserveStage(pmu, stage string, d time.Duration) {
 	hops[stage] = ms
 }
 
-// ApplyTraceHops copies hop times stamped on a reading (from another process)
-// into the per-PMU last-hop map without double-counting Prometheus.
+// ApplyTraceHops copies hop times stamped on a reading into the per-PMU map.
 func ApplyTraceHops(pmu string, tr parser.LatencyTrace) {
 	pmu = strings.TrimSpace(pmu)
 	if pmu == "" {
@@ -207,12 +179,8 @@ func ApplyTraceHops(pmu string, tr parser.LatencyTrace) {
 		ms    float64
 	}
 	pairs := []pair{
-		{StageTCPWait, tr.TcpWaitMs},
-		{StageTCPCopy, tr.TcpCopyMs},
-		{StageTCPRead, tr.TcpReadMs},
-		{StageFrameToParse, tr.FrameToParseMs},
+		{StageFrameGap, tr.TcpWaitMs},
 		{StageParse, tr.ParseMs},
-		{StageQuality, tr.QualityMs},
 	}
 
 	latencyMu.Lock()
@@ -258,7 +226,7 @@ func copyAllLastHops() map[string]map[string]float64 {
 	return out
 }
 
-// SnapshotPipelineLatency returns last/avg/p95/max for every known stage.
+// SnapshotPipelineLatency builds the fleet-wide hop table for /conversation/state.
 func SnapshotPipelineLatency() PipelineLatency {
 	latencyMu.Lock()
 	defer latencyMu.Unlock()
@@ -279,7 +247,6 @@ func SnapshotPipelineLatency() PipelineLatency {
 		}
 		stages = append(stages, st)
 	}
-
 	slowID, slowLabel, slowAvg := pickSlowest(stages)
 	return PipelineLatency{
 		SlowestStage: slowID,
@@ -332,9 +299,8 @@ func pickSlowest(stages []StageLatency) (id, label string, avg float64) {
 		if st.Count == 0 {
 			continue
 		}
-		// Connection = one-time setup. idle = waiting for the next PMU sample.
-		// clock = PMU vs PDC wall clock. e2e = end-to-end delivery metrics.
-		if st.Group == "connection" || st.Group == "e2e" || st.Group == "idle" || st.Group == "clock" {
+		// idle = waiting for the next PMU sample; e2e = wrap-up metric.
+		if st.Group == "idle" || st.Group == "e2e" {
 			continue
 		}
 		if st.AvgMs >= avg {
@@ -346,31 +312,23 @@ func pickSlowest(stages []StageLatency) (id, label string, avg float64) {
 	return id, label, avg
 }
 
-var lastConnSummary string // guards repeat-printing unchanged one-time connection stats
-
-// FormatLatencySummary is a hop summary, one line per report tick.
-// Connection (one-time) stats are included only when they've changed since
-// the last report, so handshake_total/tcp_dial don't repeat every interval.
+// FormatLatencySummary is a hop summary for the console reporter.
 func FormatLatencySummary() string {
 	snap := SnapshotPipelineLatency()
-	var conn, idle, clock, hops []string
+	var idle, hops []string
 	for _, st := range snap.Stages {
 		if st.Count == 0 {
 			continue
 		}
 		part := fmt.Sprintf("%s=%.2fms", st.ID, st.AvgMs)
 		switch st.Group {
-		case "connection":
-			conn = append(conn, part)
 		case "idle":
 			idle = append(idle, part)
-		case "clock":
-			clock = append(clock, part)
 		default:
 			hops = append(hops, part)
 		}
 	}
-	if len(conn) == 0 && len(idle) == 0 && len(clock) == 0 && len(hops) == 0 {
+	if len(idle) == 0 && len(hops) == 0 {
 		return "[latency] no samples yet"
 	}
 	slow := "n/a"
@@ -378,17 +336,7 @@ func FormatLatencySummary() string {
 		slow = fmt.Sprintf("%s (avg %.2fms)", snap.SlowestStage, snap.SlowestAvgMs)
 	}
 
-	connStr := strings.Join(conn, " ")
-	showConn := connStr != "" && connStr != lastConnSummary
-	lastConnSummary = connStr
-
 	var parts []string
-	if showConn {
-		parts = append(parts, "conn: "+connStr)
-	}
-	if len(clock) > 0 {
-		parts = append(parts, "skew: "+strings.Join(clock, " "))
-	}
 	if len(idle) > 0 {
 		parts = append(parts, "idle: "+strings.Join(idle, " "))
 	}
@@ -396,11 +344,10 @@ func FormatLatencySummary() string {
 	if len(hops) > 0 {
 		parts = append(parts, "hops: "+strings.Join(hops, " "))
 	}
-
 	return "[latency] " + strings.Join(parts, " | ")
 }
-// StartLatencyReporter logs a hop summary every interval so the console
-// shows which function is dominating without opening the dashboard.
+
+// StartLatencyReporter logs a hop summary every interval.
 func StartLatencyReporter(ctxDone <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)

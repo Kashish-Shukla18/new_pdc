@@ -36,24 +36,25 @@ func TestObserveStageAndSnapshot(t *testing.T) {
 	if hops[StageParse] <= 0 {
 		t.Fatalf("last hops missing parse: %v", hops)
 	}
+	if len(snap.Stages) != 5 {
+		t.Fatalf("expected 5 stages, got %d", len(snap.Stages))
+	}
 }
 
-func TestFormatLatencySummarySeparatesConnection(t *testing.T) {
-	ObserveStage("TEST-PMU", StageHandshakeTotal, 3300*time.Millisecond)
-	ObserveStage("TEST-PMU", StageClockSkewPMU, 620*time.Millisecond)
-	ObserveStage("TEST-PMU", StageTCPWait, 22*time.Millisecond)
+func TestFormatLatencySummaryFiveStages(t *testing.T) {
+	ObserveStage("TEST-PMU", StageFrameGap, 40*time.Millisecond)
 	ObserveStage("TEST-PMU", StageParse, 1*time.Millisecond)
+	ObserveStage("TEST-PMU", StageAlignWait, 3*time.Millisecond)
+	ObserveStage("TEST-PMU", StageDashboardRecord, 2*time.Millisecond)
+	ObserveStage("TEST-PMU", StageE2ERecvToDash, 5*time.Millisecond)
 	s := FormatLatencySummary()
-	if !strings.Contains(s, "conn:") || !strings.Contains(s, "handshake_total=") {
-		t.Fatalf("expected conn/handshake segment, got:\n%s", s)
-	}
-	if !strings.Contains(s, "skew:") || !strings.Contains(s, "clock_skew_pmu=") {
-		t.Fatalf("expected clock skew segment, got:\n%s", s)
-	}
-	if !strings.Contains(s, "idle:") || !strings.Contains(s, "tcp_wait=") {
-		t.Fatalf("expected idle/wait segment, got:\n%s", s)
+	if !strings.Contains(s, "idle:") || !strings.Contains(s, "frame_gap=") {
+		t.Fatalf("expected idle/frame_gap segment, got:\n%s", s)
 	}
 	if !strings.Contains(s, "slowest=") {
 		t.Fatalf("expected slowest segment, got:\n%s", s)
+	}
+	if !strings.Contains(s, "parse=") {
+		t.Fatalf("expected parse hop, got:\n%s", s)
 	}
 }

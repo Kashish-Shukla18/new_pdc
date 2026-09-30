@@ -19,7 +19,7 @@ export function ConnectivityGuide() {
         <article>
           <h4>PMU wait (~20 ms @ 50 FPS)</h4>
           <p>
-            Measured as <code>tcp_wait</code> / inter-arrival. The PDC is idle on the socket waiting
+            Measured as <code>frame_gap</code> (inter-arrival). The PDC is idle on the socket waiting
             for the next DATA frame. Formula: 1000 ms ÷ FPS ≈ interval.
           </p>
         </article>
