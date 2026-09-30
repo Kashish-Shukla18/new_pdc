@@ -20,7 +20,7 @@ const PAGE_COPY: Record<string, { title: string; subtitle: string }> = {
   },
   connectivity: {
     title: 'Connectivity & pipeline latency',
-    subtitle: 'Measured connection, receive, parse, storage, and dashboard timing.',
+    subtitle: 'Frame gap, parse, align wait, dashboard record, and end-to-end timing.',
   },
   help: {
     title: 'Help & Support',

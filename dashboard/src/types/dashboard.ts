@@ -174,6 +174,8 @@ export type AlignedPoint = {
   vbAngle?: number
   vcAngle?: number
   iaAngle?: number
+  ibAngle?: number
+  icAngle?: number
   /** CFG-2 analog channel names → values (e.g. Analog1). */
   analogs?: Record<string, number>
 }

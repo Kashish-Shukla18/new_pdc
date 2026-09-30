@@ -32,7 +32,7 @@ export function toneFromStatus(connected: boolean, loss: number): 'ok' | 'warn' 
 export function effectiveFps(pmu: LivePMUState): number {
   const approx = pmu.approxFps || 0
   if (approx >= 5) return approx
-  const wait = hopMs(pmu, 'tcp_wait') ?? hopMs(pmu, 'tcp_interarrival')
+  const wait = hopMs(pmu, 'frame_gap')
   if (wait != null && wait > 1 && wait < 500) return 1000 / wait
   return approx
 }
@@ -118,8 +118,7 @@ export function cycleLatencyOf(pmu: LivePMUState): CycleLatency | null {
   if (!pmu.connected) return null
 
   const wait =
-    hopMs(pmu, 'tcp_wait') ??
-    hopMs(pmu, 'tcp_interarrival') ??
+    hopMs(pmu, 'frame_gap') ??
     (pmu.approxFps > 1 ? 1000 / pmu.approxFps : undefined)
   const parse = hopMs(pmu, 'parse')
   const pipeline = hopMs(pmu, 'e2e_recv_to_dashboard') ?? latencyOf(pmu)

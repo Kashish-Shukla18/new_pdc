@@ -82,23 +82,6 @@ const (
 
 // ─── Frame helpers (build a command, read a frame, check the checksum) ────────
 
-// crc16 is a fingerprint at the end of every frame. If it does not match,
-// the bytes were corrupted on the wire — we reject that frame.
-func crc16(data []byte) uint16 {
-	crc := uint16(0xFFFF)
-	for _, b := range data {
-		crc ^= uint16(b) << 8
-		for i := 0; i < 8; i++ {
-			if crc&0x8000 != 0 {
-				crc = (crc << 1) ^ 0x1021
-			} else {
-				crc <<= 1
-			}
-		}
-	}
-	return crc
-}
-
 // buildCMDFrame packs one 18-byte "order slip" we send TO the PMU (version 2).
 // Prefer buildCMDFrameVer when talking to Std2005 devices (version 1).
 //
@@ -110,7 +93,7 @@ func buildCMDFrame(idcode uint16, cmd uint16) []byte {
 }
 
 // buildCMDFrameVer is like buildCMDFrame but sets SYNC version bits (1 = 2005, 2 = 2011).
-// Typhoon / some field PMUs answer CFG2 as Version 1 and ignore CMD frames with version 2.
+// Some field PMUs answer CFG2 as Version 1 and ignore CMD frames with version 2.
 func buildCMDFrameVer(idcode uint16, cmd uint16, ver byte) []byte {
 	const frameSize = 18
 	buf := make([]byte, frameSize)
@@ -125,7 +108,7 @@ func buildCMDFrameVer(idcode uint16, cmd uint16, ver byte) []byte {
 	// SOC + FRACSEC stay 0 (bytes 6..13)
 	binary.BigEndian.PutUint16(buf[14:], cmd)
 
-	chk := crc16(buf[:frameSize-2])
+	chk := parser.CRC16(buf[:frameSize-2])
 	binary.BigEndian.PutUint16(buf[frameSize-2:], chk)
 
 	return buf
@@ -163,7 +146,7 @@ func parseFrameBytes(pkt []byte, wait, copyDur time.Duration) (timedFrame, error
 	}
 	buf := append([]byte(nil), pkt[:frameSize]...)
 	want := binary.BigEndian.Uint16(buf[frameSize-2:])
-	got := crc16(buf[:frameSize-2])
+	got := parser.CRC16(buf[:frameSize-2])
 	if want != got {
 		return timedFrame{}, fmt.Errorf("CRC mismatch: want 0x%04X got 0x%04X", want, got)
 	}
@@ -217,7 +200,7 @@ func readFrameTimed(r io.Reader) (timedFrame, error) {
 	done := time.Now()
 
 	want := binary.BigEndian.Uint16(buf[frameSize-2:])
-	got := crc16(buf[:frameSize-2])
+	got := parser.CRC16(buf[:frameSize-2])
 	if want != got {
 		return timedFrame{}, fmt.Errorf("CRC mismatch: want 0x%04X got 0x%04X", want, got)
 	}
@@ -298,125 +281,6 @@ func logFrameTrace(pmuName, stage string, raw []byte) {
 		fracCount,
 		checksum,
 	)
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func trimASCII(b []byte) string {
-	s := string(b)
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == 0) {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-// decodeCFG2Details prints a friendly summary of the CFG2 "menu" (station name,
-// rate, how many phasors, …). Parsing for real use is in parser.ParseCFG2Frame.
-func decodeCFG2Details(pmuName string, raw []byte) {
-	if len(raw) < 16 {
-		return
-	}
-	p := raw[14 : len(raw)-2]
-	if len(p) < 34 {
-		log.Printf("[%s] cfg2 decode: payload too short (%d)", pmuName, len(p))
-		return
-	}
-
-	o := 0
-	timeBase := binary.BigEndian.Uint32(p[o : o+4])
-	o += 4
-	numPMU := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	if numPMU < 1 {
-		log.Printf("[%s] cfg2 decode: NUM_PMU=%d", pmuName, numPMU)
-		return
-	}
-	if len(p) < o+26 {
-		log.Printf("[%s] cfg2 decode: missing PMU block", pmuName)
-		return
-	}
-
-	station := trimASCII(p[o : o+16])
-	o += 16
-	idCode := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	format := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	phnmr := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	annmr := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	dgnmr := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-
-	chnCount := int(phnmr) + int(annmr) + int(16*dgnmr)
-	chnBytes := chnCount * 16
-	if len(p) < o+chnBytes {
-		log.Printf("[%s] cfg2 decode: channel labels truncated", pmuName)
-		return
-	}
-	channelNames := make([]string, 0, minInt(8, chnCount))
-	for i := 0; i < chnCount; i++ {
-		name := trimASCII(p[o+i*16 : o+(i+1)*16])
-		if i < 8 {
-			channelNames = append(channelNames, name)
-		}
-	}
-	o += chnBytes
-
-	unitsBytes := int(phnmr)*4 + int(annmr)*4
-	if len(p) < o+unitsBytes {
-		log.Printf("[%s] cfg2 decode: unit block truncated", pmuName)
-		return
-	}
-	o += unitsBytes
-
-	var digNormal, digValid uint16
-	if dgnmr > 0 {
-		if len(p) < o+4 {
-			log.Printf("[%s] cfg2 decode: digital unit block truncated", pmuName)
-			return
-		}
-		digNormal = binary.BigEndian.Uint16(p[o : o+2])
-		digValid = binary.BigEndian.Uint16(p[o+2 : o+4])
-		o += int(dgnmr) * 4
-	}
-
-	if len(p) < o+6 {
-		log.Printf("[%s] cfg2 decode: fnom/cfgcnt/rate block truncated", pmuName)
-		return
-	}
-	fnomWord := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	cfgCnt := binary.BigEndian.Uint16(p[o : o+2])
-	o += 2
-	dataRate := int16(binary.BigEndian.Uint16(p[o : o+2]))
-
-	fnomHz := 60
-	if fnomWord&0x0001 == 1 {
-		fnomHz = 50
-	}
-
-	phasorFloat := (format & 0x0002) != 0
-	phasorRect := (format & 0x0001) == 0
-	analogFloat := (format & 0x0004) != 0
-	freqFloat := (format & 0x0008) != 0
-
-	log.Printf("[%s] cfg2 details: station=%q idcode=%d time_base=%d num_pmu=%d fnom=%dHz data_rate=%d cfgcnt=%d",
-		pmuName, station, idCode, timeBase, numPMU, fnomHz, dataRate, cfgCnt)
-	log.Printf("[%s] cfg2 format: phasor_float=%t phasor_rect=%t analog_float=%t freq_float=%t phnmr=%d annmr=%d dgnmr=%d",
-		pmuName, phasorFloat, phasorRect, analogFloat, freqFloat, phnmr, annmr, dgnmr)
-	if dgnmr > 0 {
-		log.Printf("[%s] cfg2 digital masks: normal=0x%04X valid=0x%04X", pmuName, digNormal, digValid)
-	}
-	if len(channelNames) > 0 {
-		log.Printf("[%s] cfg2 first channel labels: %v", pmuName, channelNames)
-	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -550,7 +414,6 @@ func (r *Receiver) connectUDPDial(ctx context.Context) error {
 	defer pc.Close()
 	_ = pc.SetReadBuffer(256 * 1024)
 	dialDur := time.Since(dialStart)
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
 
 	log.Printf("[%s] UDP dialed %s (local %s) in %s — Connection Tester style",
 		r.cfg.Name, remote, pc.LocalAddr(), monitoring.FormatMs(dialDur))
@@ -607,11 +470,10 @@ func (r *Receiver) connectUDPDial(ctx context.Context) error {
 				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
 			}
 		case frameTypeData:
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPRead, tf.total())
 			if !lastComplete.IsZero() {
-				monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPInterarrival, completeAt.Sub(lastComplete))
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, completeAt.Sub(lastComplete))
+			} else {
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, tf.wait)
 			}
 			lastComplete = completeAt
 			dataFrames++
@@ -649,7 +511,6 @@ func (r *Receiver) connectUDPListen(ctx context.Context) error {
 		r.cfg.Name, pc.LocalAddr(), r.cfg.IP)
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
 		fmt.Sprintf("udp listen %s", pc.LocalAddr()))
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, 0)
 
 	tcpPort := r.cfg.TCPPort
 	var tcpConn net.Conn
@@ -658,7 +519,6 @@ func (r *Receiver) connectUDPListen(ctx context.Context) error {
 	dialStart := time.Now()
 	tcpConn, err = dialer.DialContext(ctx, "tcp", tcpAddr)
 	dialDur := time.Since(dialStart)
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
 	if err != nil {
 		return fmt.Errorf("tcp dial %s for UDP CFG: %w", tcpAddr, err)
 	}
@@ -724,11 +584,10 @@ func (r *Receiver) connectUDPListen(ctx context.Context) error {
 				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
 			}
 		case frameTypeData:
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPRead, tf.total())
 			if !lastComplete.IsZero() {
-				monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPInterarrival, completeAt.Sub(lastComplete))
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, completeAt.Sub(lastComplete))
+			} else {
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, tf.wait)
 			}
 			lastComplete = completeAt
 			dataFrames++
@@ -794,7 +653,6 @@ func drainTCPQuiet(conn net.Conn) {
 // Optional full path (env C37118_SIMPLE_HANDSHAKE=0):
 //   DATA_OFF → ask HEADER (optional) → then same CFG2 retry loop.
 func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time.Duration) error {
-	handshakeStart := time.Now()
 	headerText := ""
 
 	if simpleHandshakeEnabled() {
@@ -812,13 +670,10 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 		}
 		hdrWaitStart := time.Now()
 		if hdrRaw, err := readFrameOfType(conn, frameTypeHdr, hdrDeadline); err != nil {
-			hdrDur := time.Since(hdrWaitStart)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
 			log.Printf("[%s] optional HEADER not received after %s (%v) – continuing with CFG2",
-				r.cfg.Name, monitoring.FormatMs(hdrDur), err)
+				r.cfg.Name, monitoring.FormatMs(time.Since(hdrWaitStart)), err)
 		} else {
-			hdrDur := time.Since(hdrWaitStart)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeHDR, hdrDur)
+			_ = time.Since(hdrWaitStart)
 			if text, perr := parser.ParseHeaderFrame(hdrRaw); perr == nil {
 				headerText = text
 			}
@@ -828,8 +683,8 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 	}
 
 	// Step: keep mailing "please send CFG2" until the menu arrives.
-	// Alternate SYNC version 1 (2005) and 2 (2011) — Connection Tester CFG2
-	// from Typhoon reported Version=1 / Std2005 and ignored our AA42 CMDs.
+	// Alternate SYNC version 1 (2005) and 2 (2011) — some devices report
+	// Version=1 / Std2005 and ignore our AA42 (v2) CMDs.
 	cfgWaitStart := time.Now()
 	cfgDeadline := cfgWaitStart.Add(timeout)
 	const cfg2RetryWait = 500 * time.Millisecond
@@ -869,9 +724,8 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 		log.Printf("[%s] no CFG2 yet (%v) – resending", r.cfg.Name, err)
 	}
 	cfgDur := time.Since(cfgWaitStart)
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
+	log.Printf("[%s] CFG2 handshake done in %s", r.cfg.Name, monitoring.FormatMs(cfgDur))
 	logFrameTrace(r.cfg.Name, "handshake CFG2", cfg2)
-	decodeCFG2Details(r.cfg.Name, cfg2)
 	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
 		return fmt.Errorf("parse CFG2: %w", err)
 	} else {
@@ -879,7 +733,6 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 		parser.SetProfile(r.cfg.Name, profile)
 		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
 	}
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, time.Since(handshakeStart))
 	return nil
 }
 
@@ -898,8 +751,7 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	conn, err := dialer.DialContext(ctx, proto, addr)
 	dialDur := time.Since(dialStart)
 	if err != nil {
-		monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
-		return fmt.Errorf("dial %s %s: %w", proto, addr, err)
+			return fmt.Errorf("dial %s %s: %w", proto, addr, err)
 	}
 	defer conn.Close()
 	go func() {
@@ -909,7 +761,6 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 
 	configureStreamConn(conn)
 
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageDial, dialDur)
 	log.Printf("[%s] connected to %s in %s", r.cfg.Name, addr, monitoring.FormatMs(dialDur))
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
 		fmt.Sprintf("connected to %s in %s", addr, monitoring.FormatMs(dialDur)))
@@ -959,11 +810,10 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 		}
 
 		if frameType(tf.raw) == frameTypeData {
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPWait, tf.wait)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPCopy, tf.copy)
-			monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPRead, tf.total())
 			if !lastComplete.IsZero() {
-				monitoring.ObserveStage(r.cfg.Name, monitoring.StageTCPInterarrival, completeAt.Sub(lastComplete))
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, completeAt.Sub(lastComplete))
+			} else {
+				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, tf.wait)
 			}
 			lastComplete = completeAt
 
@@ -1141,7 +991,6 @@ func cmdVersionForAttempt(attempt int) byte {
 
 // handshakeCFGUDP — same "ask for menu until it arrives" idea, over UDP.
 func (r *Receiver) handshakeCFGUDP(ctx context.Context, pc *net.UDPConn, timeout time.Duration) error {
-	handshakeStart := time.Now()
 	log.Printf("[%s] handshake (udp): sending %s", r.cfg.Name, cmdName(cmdSendCfg2))
 
 	cfgWaitStart := time.Now()
@@ -1183,16 +1032,14 @@ func (r *Receiver) handshakeCFGUDP(ctx context.Context, pc *net.UDPConn, timeout
 		log.Printf("[%s] no CFG2 yet (%v) – resending over UDP", r.cfg.Name, err)
 	}
 	cfgDur := time.Since(cfgWaitStart)
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeCFG2, cfgDur)
+	log.Printf("[%s] CFG2 UDP handshake done in %s", r.cfg.Name, monitoring.FormatMs(cfgDur))
 	logFrameTrace(r.cfg.Name, "handshake CFG2 (udp)", cfg2)
-	decodeCFG2Details(r.cfg.Name, cfg2)
 	if profile, err := parser.ParseCFG2Frame(cfg2); err != nil {
 		return fmt.Errorf("parse CFG2: %w", err)
 	} else {
 		parser.SetProfile(r.cfg.Name, profile)
 		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
 	}
-	monitoring.ObserveStage(r.cfg.Name, monitoring.StageHandshakeTotal, time.Since(handshakeStart))
 	return nil
 }
 

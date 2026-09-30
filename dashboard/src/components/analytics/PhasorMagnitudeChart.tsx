@@ -1,5 +1,16 @@
 import { useMemo, useState } from 'react'
 import {
+  Box,
+  Card,
+  CardContent,
+  CardHeader,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  Typography,
+} from '@mui/material'
+import {
   CartesianGrid,
   Legend,
   Line,
@@ -11,7 +22,12 @@ import {
 } from 'recharts'
 import { CHART_COLORS } from '../../constants'
 import type { AlignedBatch, PMUWithMeta } from '../../types/dashboard'
-import { CHART_TOOLTIP_STYLE } from '../../utils/chartTooltip'
+import {
+  CHART_AXIS_TICK,
+  CHART_GRID_STROKE,
+  CHART_LEGEND_STYLE,
+  ChartSeriesTooltip,
+} from '../../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../../utils/format'
 import { pmuKey } from '../../utils/pmu'
 
@@ -44,7 +60,6 @@ type SeriesOption = {
   kind: 'phase' | 'analog'
 }
 
-/** Union of CFG-2 analog channel names across selected PMUs (order preserved). */
 function cfgAnalogNames(pmus: PMUWithMeta[]): string[] {
   const out: string[] = []
   const seen = new Set<string>()
@@ -86,7 +101,6 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
 
   const defaultKey = kind === 'voltage' ? 'va' : 'ia'
   const [selectedKey, setSelectedKey] = useState(defaultKey)
-  const [excludedPMUNames, setExcludedPMUNames] = useState<string[]>([])
 
   const selected =
     seriesOptions.find((opt) => opt.key === selectedKey) ?? seriesOptions[0] ?? {
@@ -96,27 +110,26 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
       kind: 'phase' as const,
     }
 
-  // Keep selection valid when CFG analog list changes.
   const activeKey = seriesOptions.some((opt) => opt.key === selected.key)
     ? selected.key
     : defaultKey
   const active = seriesOptions.find((opt) => opt.key === activeKey) ?? selected
 
-  const selectedPMUs = pmus.filter((pmu) => !excludedPMUNames.includes(pmu.name))
   const analogName = active.kind === 'analog' ? active.key.slice('analog:'.length) : ''
   const seriesSuffix = active.kind === 'analog' ? pmuKey(analogName) : active.key
 
-  const chartSeries = selectedPMUs.map((pmu) => ({
+  // One line per PMU — click legend labels to show/hide (Recharts default).
+  const chartSeries = pmus.map((pmu, idx) => ({
     dataKey: `${pmuKey(pmu.name)}__${seriesSuffix}`,
     name: pmu.name,
-    color: CHART_COLORS[pmus.findIndex((candidate) => candidate.name === pmu.name) % CHART_COLORS.length],
+    color: CHART_COLORS[idx % CHART_COLORS.length],
   }))
 
   const data = useMemo(() => {
     const batches = alignedBatches.slice(-PHASOR_TREND_WINDOW)
     return batches.map((batch) => {
       const row: Record<string, number | undefined> & { ts: number } = { ts: batch.ts }
-      for (const pmu of selectedPMUs) {
+      for (const pmu of pmus) {
         const key = `${pmuKey(pmu.name)}__${seriesSuffix}`
         const point = batch.points?.[pmu.name]
         let value: number | undefined
@@ -131,7 +144,7 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
       }
       return row
     })
-  }, [alignedBatches, selectedPMUs, seriesSuffix, active.kind, active.key, analogName])
+  }, [alignedBatches, pmus, seriesSuffix, active.kind, active.key, analogName])
 
   const hasNumeric = data.some((row) =>
     chartSeries.some((series) => typeof row[series.dataKey] === 'number'),
@@ -139,116 +152,107 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
   const hasSeries = data.length > 0 && chartSeries.length > 0
   const isAnalog = active.kind === 'analog'
 
-  const togglePMU = (name: string) => {
-    setExcludedPMUNames((current) => {
-      const isExcluded = current.includes(name)
-      if (isExcluded) return current.filter((item) => item !== name)
-      if (selectedPMUs.length === 1) return current
-      return [...current, name]
-    })
-  }
+  const subtitle = data.length
+    ? isAnalog
+      ? `${active.label} · CFG analog · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'} · click legend to toggle`
+      : `${active.label} magnitude · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'} · click legend to toggle`
+    : `Waiting for aligned ${kind} ticks…`
+
+  const valueFmt = (value: unknown) =>
+    value == null || Number.isNaN(Number(value))
+      ? '—'
+      : `${round(Number(value), isAnalog ? 3 : 2)}${active.unit ? ` ${active.unit}` : ''}`
 
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">
-        <div>
-          <h3>{kind === 'voltage' ? 'Voltage Phasors' : 'Current Phasors'}</h3>
-          <p className="panel-sub">
-            {data.length
-              ? isAnalog
-                ? `${active.label} · CFG analog · ${selectedPMUs.length} of ${pmus.length} PMUs · time-aligned`
-                : `${active.label} magnitude · ${selectedPMUs.length} of ${pmus.length} PMUs · time-aligned ticks`
-              : `Waiting for aligned ${kind} ticks…`}
-          </p>
-        </div>
-        <div className="phasor-chart-controls">
-          <select
-            value={activeKey}
-            onChange={(event) => setSelectedKey(event.target.value)}
-            aria-label={`Select ${kind} series`}
-          >
-            {seriesOptions.map((opt) => (
-              <option key={opt.key} value={opt.key}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-          <details className="pmu-multiselect">
-            <summary>
-              PMUs ({selectedPMUs.length}/{pmus.length})
-            </summary>
-            <div className="pmu-multiselect-menu">
-              <button type="button" onClick={() => setExcludedPMUNames([])}>
-                Select all
-              </button>
-              {pmus.map((pmu) => (
-                <label key={pmu.name}>
-                  <input
-                    type="checkbox"
-                    checked={!excludedPMUNames.includes(pmu.name)}
-                    onChange={() => togglePMU(pmu.name)}
-                  />
-                  <span>{pmu.name}</span>
-                </label>
+    <Card variant="outlined" sx={{ height: '100%' }}>
+      <CardHeader
+        title={kind === 'voltage' ? 'Voltage Phasors' : 'Current Phasors'}
+        subheader={subtitle}
+        action={
+          <FormControl size="small" sx={{ minWidth: 88, mr: 1, mt: 0.5 }}>
+            <InputLabel id={`${kind}-series-label`}>Series</InputLabel>
+            <Select
+              labelId={`${kind}-series-label`}
+              label="Series"
+              value={activeKey}
+              onChange={(e) => setSelectedKey(e.target.value)}
+            >
+              {seriesOptions.map((opt) => (
+                <MenuItem key={opt.key} value={opt.key}>
+                  {opt.label}
+                </MenuItem>
               ))}
-            </div>
-          </details>
-        </div>
-      </div>
-      <div className="chart-wrap small">
-        {!hasSeries ? (
-          <div className="frame-box-react" style={{ margin: 12 }}>
-            Waiting for aligned {kind} phasor ticks…
-          </div>
-        ) : !hasNumeric && isAnalog ? (
-          <div className="frame-box-react" style={{ margin: 12 }}>
-            No values yet for CFG analog “{analogName}”. Waiting for aligned ticks…
-          </div>
-        ) : (
-          <ResponsiveContainer width="99%" height={280} minWidth={1} minHeight={1}>
-            <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="rgba(158, 176, 197, 0.1)" strokeDasharray="3 3" />
-              <XAxis
-                dataKey="ts"
-                tickFormatter={formatTS}
-                tick={{ fill: '#8a9aab', fontSize: 10 }}
-                interval="preserveStartEnd"
-                minTickGap={28}
-              />
-              <YAxis
-                tick={{ fill: '#8a9aab', fontSize: 11 }}
-                domain={isAnalog ? ['auto', 'auto'] : [0, 'auto']}
-                tickFormatter={(v) => `${round(Number(v), 1)}`}
-                width={48}
-              />
-              <Tooltip
-                {...CHART_TOOLTIP_STYLE}
-                labelFormatter={(value) => formatTSMs(Number(value))}
-                formatter={(value, name) => [
-                  value == null || Number.isNaN(Number(value))
-                    ? '—'
-                    : `${round(Number(value), isAnalog ? 3 : 2)}${active.unit ? ` ${active.unit}` : ''}`,
-                  String(name),
-                ]}
-              />
-              <Legend />
-              {chartSeries.map((series) => (
-                <Line
-                  key={series.dataKey}
-                  type="monotone"
-                  dataKey={series.dataKey}
-                  name={series.name}
-                  stroke={series.color}
-                  dot={false}
-                  strokeWidth={2}
-                  isAnimationActive={false}
-                  connectNulls={false}
+            </Select>
+          </FormControl>
+        }
+        slotProps={{
+          title: { variant: 'h6', sx: { fontSize: '1rem' } },
+          subheader: { sx: { color: 'text.secondary', fontSize: 13 } },
+        }}
+        sx={{
+          flexWrap: 'wrap',
+          gap: 1,
+          '& .MuiCardHeader-action': { m: 0, alignSelf: 'center' },
+        }}
+      />
+      <CardContent sx={{ pt: 0 }}>
+        <Box sx={{ width: '100%', height: { xs: 240, sm: 280 }, minWidth: 0 }}>
+          {!hasSeries ? (
+            <Typography sx={{ p: 2, color: 'text.secondary' }}>
+              Waiting for aligned {kind} phasor ticks…
+            </Typography>
+          ) : !hasNumeric && isAnalog ? (
+            <Typography sx={{ p: 2, color: 'text.secondary' }}>
+              No values yet for CFG analog “{analogName}”. Waiting for aligned ticks…
+            </Typography>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+              <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="ts"
+                  tickFormatter={formatTS}
+                  tick={CHART_AXIS_TICK}
+                  interval="preserveStartEnd"
+                  minTickGap={28}
+                  stroke="#94a3b8"
                 />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </div>
-    </div>
+                <YAxis
+                  tick={CHART_AXIS_TICK}
+                  domain={isAnalog ? ['auto', 'auto'] : [0, 'auto']}
+                  tickFormatter={(v) => `${round(Number(v), 1)}`}
+                  width={52}
+                  stroke="#94a3b8"
+                />
+                <Tooltip
+                  content={(props) => (
+                    <ChartSeriesTooltip
+                      {...props}
+                      labelFormatter={(value) => formatTSMs(Number(value))}
+                      formatter={(value, name) => [valueFmt(value), String(name)]}
+                    />
+                  )}
+                />
+                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
+                {chartSeries.map((series) => (
+                  <Line
+                    key={series.dataKey}
+                    type="monotone"
+                    dataKey={series.dataKey}
+                    name={series.name}
+                    stroke={series.color}
+                    dot={false}
+                    activeDot={{ r: 4, strokeWidth: 2, fill: '#0f172a' }}
+                    strokeWidth={2.25}
+                    isAnimationActive={false}
+                    connectNulls={false}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </Box>
+      </CardContent>
+    </Card>
   )
 }

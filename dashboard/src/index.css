@@ -7,9 +7,9 @@
   --surface-3: #334155;
   --border: #374151;
   --border-strong: #4b5563;
-  --text: #f3f4f6;
-  --text-2: #cbd5e1;
-  --text-3: #94a3b8;
+  --text: #f8fafc;
+  --text-2: #e2e8f0;
+  --text-3: #cbd5e1;
 
   --cyan: #60a5fa;
   --cyan-glow: transparent;
@@ -320,10 +320,10 @@ body {
 }
 
 .nav-section {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
   padding: 12px 12px 7px;
 }
 
@@ -372,7 +372,7 @@ body {
   display: grid;
   gap: 8px;
   padding: 8px 12px;
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--text-2);
 }
 
@@ -389,7 +389,7 @@ body {
 .status-box strong {
   font-family: var(--mono);
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .status-box span {
@@ -2642,6 +2642,24 @@ tbody tr.row-click {
   padding-bottom: 12px;
 }
 
+.analytics-diagram-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.analytics-diagram-filter {
+  justify-content: flex-end;
+  padding: 0 2px;
+}
+
+.analytics-diagram-filter label {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
 .phasor-chart-controls {
   display: flex;
   align-items: center;
@@ -2826,16 +2844,16 @@ tbody tr.row-click {
 
 .panel-sub {
   margin: 4px 0 0;
-  font-size: 11.5px;
-  color: var(--text-3);
+  font-size: 13px;
+  color: var(--text-2);
 }
 
 .legend-row {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
-  font-size: 11px;
-  color: var(--text-3);
+  font-size: 12.5px;
+  color: var(--text-2);
   margin-top: 8px;
 }
 
