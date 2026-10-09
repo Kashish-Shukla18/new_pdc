@@ -13,9 +13,14 @@ import (
 	"pdc/parser"
 )
 
-// DefaultCapacity is how many timestamps one PMU may keep in RAM.
-// Think of it as a short sticky-note pad: when it is full, the oldest note is thrown away.
-const DefaultCapacity = 200
+// Buffer capacity bounds (timestamps kept per PMU in RAM).
+const (
+	// DefaultCapacity is the sticky-note pad size when none is configured.
+	DefaultCapacity = 200
+	// MinCapacity / MaxCapacity clamp live UI / API changes.
+	MinCapacity = 1
+	MaxCapacity = 5000
+)
 
 // pmuBuffer is one PMU's notebook: each page is keyed by measurement time (ms).
 // recent keeps the last N frames in arrival order for the sheets dumps
@@ -51,6 +56,24 @@ func (b *pmuBuffer) put(ts int64, r parser.Reading) {
 	b.byTS[ts] = r
 
 	b.recent = append(b.recent, r)
+	if len(b.recent) > b.capacity {
+		b.recent = append([]parser.Reading(nil), b.recent[len(b.recent)-b.capacity:]...)
+	}
+}
+
+// setCapacity updates the pad size and drops oldest samples if shrinking.
+func (b *pmuBuffer) setCapacity(capacity int) {
+	if capacity < 1 {
+		capacity = DefaultCapacity
+	}
+	b.capacity = capacity
+	for len(b.byTS) > b.capacity {
+		oldest, ok := b.oldestTS()
+		if !ok {
+			break
+		}
+		delete(b.byTS, oldest)
+	}
 	if len(b.recent) > b.capacity {
 		b.recent = append([]parser.Reading(nil), b.recent[len(b.recent)-b.capacity:]...)
 	}
@@ -163,6 +186,37 @@ func (b *Bank) Capacity() int {
 	if b == nil {
 		return DefaultCapacity
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.capacity
+}
+
+// ClampCapacity bounds a requested per-PMU buffer size.
+func ClampCapacity(capacity int) int {
+	if capacity < MinCapacity {
+		return MinCapacity
+	}
+	if capacity > MaxCapacity {
+		return MaxCapacity
+	}
+	return capacity
+}
+
+// SetCapacity changes how many timestamps each live PMU may keep.
+// Existing buffers are trimmed immediately when shrinking. Returns the applied value.
+func (b *Bank) SetCapacity(capacity int) int {
+	if b == nil {
+		return DefaultCapacity
+	}
+	capacity = ClampCapacity(capacity)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.capacity = capacity
+	for _, buf := range b.buffers {
+		if buf != nil {
+			buf.setCapacity(capacity)
+		}
+	}
 	return b.capacity
 }
 
@@ -193,10 +247,73 @@ func (b *Bank) Expected() []string {
 	return append([]string(nil), b.expected...)
 }
 
-// SetExpected rebuilds buffers for the active PMU set (add / delete / reconnect).
+// SetExpected rebuilds buffers for the active (live) PMU set.
+// Prefer AddExpected / RemoveExpected when only one PMU joins or leaves so
+// peer buffers are not wiped.
 func (b *Bank) SetExpected(names []string) {
 	b.mu.Lock()
 
+	next := normalizeNames(names)
+	buffers := make(map[string]*pmuBuffer, len(next))
+	for _, name := range next {
+		buffers[name] = newPMUBuffer(b.capacity)
+	}
+	b.expected = next
+	b.buffers = buffers
+	cb := b.onReset
+	b.mu.Unlock()
+
+	if cb != nil {
+		cb()
+	}
+}
+
+// AddExpected adds one live PMU with a fresh buffer. Peer buffers are kept.
+// No-op if already expected. Does not fire onReset (publisher keeps its tick).
+func (b *Bank) AddExpected(name string) {
+	if b == nil || name == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, n := range b.expected {
+		if n == name {
+			return
+		}
+	}
+	b.expected = append(b.expected, name)
+	sort.Strings(b.expected)
+	if b.buffers == nil {
+		b.buffers = make(map[string]*pmuBuffer)
+	}
+	b.buffers[name] = newPMUBuffer(b.capacity)
+}
+
+// RemoveExpected drops one live PMU and its buffer. Peer buffers are kept.
+// No-op if not expected. Does not fire onReset (publisher keeps its tick).
+func (b *Bank) RemoveExpected(name string) {
+	if b == nil || name == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	next := b.expected[:0]
+	found := false
+	for _, n := range b.expected {
+		if n == name {
+			found = true
+			continue
+		}
+		next = append(next, n)
+	}
+	if !found {
+		return
+	}
+	b.expected = next
+	delete(b.buffers, name)
+}
+
+func normalizeNames(names []string) []string {
 	next := make([]string, 0, len(names))
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
@@ -210,19 +327,48 @@ func (b *Bank) SetExpected(names []string) {
 		next = append(next, name)
 	}
 	sort.Strings(next)
+	return next
+}
 
-	buffers := make(map[string]*pmuBuffer, len(next))
-	for _, name := range next {
-		buffers[name] = newPMUBuffer(b.capacity)
+// SyncExpected applies a full live-set target using Add/Remove so unchanged
+// PMUs keep their buffers. Returns whether the set actually changed.
+func (b *Bank) SyncExpected(names []string) bool {
+	if b == nil {
+		return false
 	}
-	b.expected = next
-	b.buffers = buffers
-	cb := b.onReset
-	b.mu.Unlock()
-
-	if cb != nil {
-		cb()
+	want := normalizeNames(names)
+	cur := b.Expected()
+	if len(cur) == len(want) {
+		same := true
+		for i := range cur {
+			if cur[i] != want[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return false
+		}
 	}
+	curSet := make(map[string]struct{}, len(cur))
+	for _, n := range cur {
+		curSet[n] = struct{}{}
+	}
+	wantSet := make(map[string]struct{}, len(want))
+	for _, n := range want {
+		wantSet[n] = struct{}{}
+	}
+	for _, n := range cur {
+		if _, ok := wantSet[n]; !ok {
+			b.RemoveExpected(n)
+		}
+	}
+	for _, n := range want {
+		if _, ok := curSet[n]; !ok {
+			b.AddExpected(n)
+		}
+	}
+	return true
 }
 
 // MinOldest = oldest timestamp sitting in any PMU buffer right now.
@@ -434,11 +580,11 @@ type PMUBufferView struct {
 
 // BankSnapshot is what /conversation/aligner-buffers returns.
 type BankSnapshot struct {
-	AtUTC      string          `json:"atUtc"`
-	Capacity   int             `json:"capacityPerPMU"`
-	Expected   []string        `json:"expected"`
-	Note       string          `json:"note"`
-	PMUs       []PMUBufferView `json:"pmus"`
+	AtUTC    string          `json:"atUtc"`
+	Capacity int             `json:"capacityPerPMU"`
+	Expected []string        `json:"expected"`
+	Note     string          `json:"note"`
+	PMUs     []PMUBufferView `json:"pmus"`
 	// Hint: next tick the publisher will emit (min oldest across PMUs).
 	CandidatePublishMs int64 `json:"candidatePublishMs,omitempty"`
 }
@@ -483,20 +629,20 @@ func (b *Bank) Snapshot() BankSnapshot {
 				newestMs = ts
 			}
 			view.Slots = append(view.Slots, SlotView{
-				TSMs:    ts,
-				TimeUTC: time.UnixMilli(ts).UTC().Format(time.RFC3339Nano),
+				TSMs:    ts / 1000,
+				TimeUTC: time.UnixMicro(ts).UTC().Format(time.RFC3339Nano),
 				Reading: r,
 			})
 		}
 		if view.Count > 0 {
-			view.OldestMs = oldestMs
-			view.NewestMs = newestMs
+			view.OldestMs = oldestMs / 1000
+			view.NewestMs = newestMs / 1000
 		}
 		out.PMUs = append(out.PMUs, view)
 	}
 
 	if haveCandidate {
-		out.CandidatePublishMs = candidate
+		out.CandidatePublishMs = candidate / 1000
 	}
 	return out
 }

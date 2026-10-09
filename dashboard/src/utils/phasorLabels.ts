@@ -7,15 +7,67 @@ export type DisplayPhasor = NamedPhasorView & {
 
 const STANDARD_ORDER = ['VA', 'VB', 'VC', 'IA', 'IB', 'IC'] as const
 
-/** Map CFG channel names (e.g. PZR.AV, VA) to standard labels. */
+/**
+ * Map CFG channel names onto VA–IC.
+ * Mirrors parser.ClassifyPhasorName (V1/I1, "PHASOR CH 1:V1", …AV/…AI, etc.).
+ */
 export function standardPhasorLabel(cfgName: string): string | null {
-  const n = cfgName.trim().toUpperCase()
-  if (n === 'VA' || /(^|[.\-_])AV$/.test(n) || n.endsWith('AV')) return 'VA'
-  if (n === 'VB' || /(^|[.\-_])BV$/.test(n) || n.endsWith('BV')) return 'VB'
-  if (n === 'VC' || /(^|[.\-_])CV$/.test(n) || n.endsWith('CV')) return 'VC'
-  if (n === 'IA' || /(^|[.\-_])AI$/.test(n) || n.endsWith('AI')) return 'IA'
-  if (n === 'IB' || /(^|[.\-_])BI$/.test(n) || n.endsWith('BI')) return 'IB'
-  if (n === 'IC' || /(^|[.\-_])CI$/.test(n) || n.endsWith('CI')) return 'IC'
+  let n = cfgName.trim().toUpperCase()
+  const colon = n.lastIndexOf(':')
+  if (colon >= 0 && colon + 1 < n.length) {
+    n = n.slice(colon + 1)
+  }
+  n = n.replace(/[\s_\-.]/g, '')
+  if (!n) return null
+
+  switch (n) {
+    case 'VA':
+    case 'VAN':
+    case 'V1':
+    case 'PHASEA':
+    case 'PHASEAV':
+    case 'VOLTAGEA':
+      return 'VA'
+    case 'VB':
+    case 'VBN':
+    case 'V2':
+    case 'PHASEB':
+    case 'PHASEBV':
+    case 'VOLTAGEB':
+      return 'VB'
+    case 'VC':
+    case 'VCN':
+    case 'V3':
+    case 'PHASEC':
+    case 'PHASECV':
+    case 'VOLTAGEC':
+      return 'VC'
+    case 'IA':
+    case 'IAN':
+    case 'I1':
+    case 'CURRENTA':
+    case 'PHASEAI':
+      return 'IA'
+    case 'IB':
+    case 'IBN':
+    case 'I2':
+    case 'CURRENTB':
+    case 'PHASEBI':
+      return 'IB'
+    case 'IC':
+    case 'ICN':
+    case 'I3':
+    case 'CURRENTC':
+    case 'PHASECI':
+      return 'IC'
+  }
+
+  if (n.endsWith('AV') || n.startsWith('VA') || n.startsWith('V1') || n.endsWith('V1')) return 'VA'
+  if (n.endsWith('BV') || n.startsWith('VB') || n.startsWith('V2') || n.endsWith('V2')) return 'VB'
+  if (n.endsWith('CV') || n.startsWith('VC') || n.startsWith('V3') || n.endsWith('V3')) return 'VC'
+  if (n.endsWith('AI') || n.startsWith('IA') || n.startsWith('I1') || n.endsWith('I1')) return 'IA'
+  if (n.endsWith('BI') || n.startsWith('IB') || n.startsWith('I2') || n.endsWith('I2')) return 'IB'
+  if (n.endsWith('CI') || n.startsWith('IC') || n.startsWith('I3') || n.endsWith('I3')) return 'IC'
   return null
 }
 

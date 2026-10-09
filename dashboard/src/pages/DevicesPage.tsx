@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { BufferCapacityControl } from '../components/devices/BufferCapacityControl'
 import { DeviceInventoryTable } from '../components/devices/DeviceInventoryTable'
 import { DeviceSummaryGrid } from '../components/devices/DeviceSummaryGrid'
 import { useDashboardContext } from '../context/DashboardContext'
@@ -7,7 +8,9 @@ import { EditDevicePage } from './EditDevicePage'
 
 export function DevicesPage() {
   const {
+    dashboard,
     pmus,
+    enabledPmus,
     filteredDevices,
     deviceSearch,
     setDeviceSearch,
@@ -17,13 +20,20 @@ export function DevicesPage() {
     setStatusFilter,
     setShowAddPMU,
     setDrawerPMUName,
-    handleDeletePMU,
+    handleDisconnectPMU,
+    handleConnectPMU,
     deletingPMUName,
+    connectingPMUName,
+    deviceInventoryTab,
+    setDeviceInventoryTab,
+    deviceTabCounts,
     editingPMUName,
     openEditPMU,
+    setNotice,
   } = useDashboardContext()
 
-  const summary = useMemo(() => computeDeviceSummary(pmus), [pmus])
+  const summary = useMemo(() => computeDeviceSummary(enabledPmus), [enabledPmus])
+  const liveCapacity = dashboard.aligner?.maxOpen
 
   if (editingPMUName) {
     return <EditDevicePage />
@@ -38,7 +48,14 @@ export function DevicesPage() {
             Registered PMUs — connection details, region, IP, and live operational status
           </p>
         </div>
-        <div className="page-actions">
+        <div className="page-actions devices-page-actions">
+          <BufferCapacityControl
+            liveCapacity={liveCapacity}
+            onApplied={(capacity) =>
+              setNotice({ type: 'success', message: `Aligner buffer capacity set to ${capacity} samples/PMU` })
+            }
+            onError={(message) => setNotice({ type: 'error', message })}
+          />
           <button type="button" className="btn primary" onClick={() => setShowAddPMU(true)}>
             + Register New PMU
           </button>
@@ -56,10 +73,15 @@ export function DevicesPage() {
         setRegionFilter={setRegionFilter}
         statusFilter={statusFilter}
         setStatusFilter={setStatusFilter}
+        inventoryTab={deviceInventoryTab}
+        setInventoryTab={setDeviceInventoryTab}
+        tabCounts={deviceTabCounts}
         onRowClick={setDrawerPMUName}
         onEdit={openEditPMU}
-        onDelete={handleDeletePMU}
+        onDisconnect={handleDisconnectPMU}
+        onConnect={handleConnectPMU}
         deletingPMUName={deletingPMUName}
+        connectingPMUName={connectingPMUName}
       />
 
     </>

@@ -1,5 +1,15 @@
-import { useMemo, useState } from 'react'
-import { Box, Card, CardContent, CardHeader, Stack, Typography } from '@mui/material'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  Box,
+  Card,
+  CardContent,
+  CardHeader,
+  FormControl,
+  MenuItem,
+  Select,
+  Stack,
+  Typography,
+} from '@mui/material'
 import { round } from '../../utils/format'
 
 type Kind = 'voltage' | 'current'
@@ -8,6 +18,8 @@ type Kind = 'voltage' | 'current'
 export type DiagramVector = {
   id: string
   pmuName: string
+  /** CFG station (or endpoint fallback) for legends / compare UI. */
+  pmuLabel: string
   label: string
   cfgName: string
   magnitude: number
@@ -16,10 +28,8 @@ export type DiagramVector = {
 }
 
 type Props = {
-  /** All candidate vectors (typically every online PMU). Legend toggles visibility. */
   vectors: DiagramVector[]
   kind: Kind
-  subtitle?: string
   emptyMessage?: string
 }
 
@@ -28,7 +38,6 @@ function toXY(mag: number, angleDeg: number, scale: number) {
   return { x: mag * scale * Math.cos(rad), y: mag * scale * Math.sin(rad) }
 }
 
-/** Stable PMU order → dash pattern so overlapping arrows stay distinguishable. */
 const DASH_BY_INDEX = ['', '6 4', '2 3', '8 3 2 3', '1 4']
 
 type Placed = DiagramVector & {
@@ -78,7 +87,21 @@ function pmuMeta(vectors: DiagramVector[]) {
   return { order, meta }
 }
 
-export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) {
+function stationLabels(vectors: DiagramVector[]): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const v of vectors) {
+    if (!out.has(v.pmuName)) {
+      out.set(v.pmuName, v.pmuLabel || v.pmuName)
+    }
+  }
+  return out
+}
+
+function formatPhaseLine(p: DiagramVector) {
+  return `${p.label} ${round(p.magnitude, 1)}∠${round(p.angleDeg, 0)}°`
+}
+
+export function PhasorDiagram({ vectors, kind, emptyMessage }: Props) {
   const size = 300
   const cx = size / 2
   const cy = size / 2
@@ -86,37 +109,58 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
 
   const title = kind === 'voltage' ? 'Voltage Phasor Diagram' : 'Current Phasor Diagram'
   const { order: allPmuNames, meta: pmuInfo } = useMemo(() => pmuMeta(vectors), [vectors])
+  const labels = useMemo(() => stationLabels(vectors), [vectors])
 
-  // Legend-style hide (like ECharts / Chart.js). Never hide the last visible PMU.
   const [hidden, setHidden] = useState<Set<string>>(() => new Set())
+  const [compareA, setCompareA] = useState('')
+  const [compareB, setCompareB] = useState('')
+  const [hoverPmu, setHoverPmu] = useState<string | null>(null)
+
   const visibleNames = allPmuNames.filter((n) => !hidden.has(n))
   const visibleVectors = useMemo(
     () => vectors.filter((v) => !hidden.has(v.pmuName)),
     [vectors, hidden],
   )
 
+  // Keep compare picks on visible streams; seed defaults from the first two visible.
+  useEffect(() => {
+    if (!visibleNames.length) {
+      setCompareA('')
+      return
+    }
+    setCompareA((prev) => (prev && visibleNames.includes(prev) ? prev : visibleNames[0]))
+  }, [visibleNames.join('|')])
+
+  useEffect(() => {
+    if (!visibleNames.length) {
+      setCompareB('')
+      return
+    }
+    setCompareB((prev) => {
+      if (prev && visibleNames.includes(prev) && prev !== compareA) return prev
+      return visibleNames.find((n) => n !== compareA) ?? ''
+    })
+  }, [visibleNames.join('|'), compareA])
+
   const maxMag = Math.max(...visibleVectors.map((p) => p.magnitude), 1e-9)
   const scale = plotR / maxMag
   const ticks = [0.33, 0.66, 1]
-  const pmuCount = visibleNames.length
-  const defaultSub = visibleVectors.length
-    ? `${pmuCount} PMU${pmuCount === 1 ? '' : 's'} · ${visibleVectors.length} vector${visibleVectors.length === 1 ? '' : 's'}`
-    : vectors.length
-      ? 'All PMUs hidden — click a legend label to show'
-      : 'Waiting for phasor channels'
 
   const placed = useMemo(() => placeVectors(visibleVectors), [visibleVectors])
 
-  const byPmu = new Map<string, { color: string; items: DiagramVector[] }>()
-  for (const v of visibleVectors) {
-    const cur = byPmu.get(v.pmuName) ?? { color: v.color, items: [] }
-    cur.items.push(v)
-    byPmu.set(v.pmuName, cur)
-  }
+  const byPmu = useMemo(() => {
+    const map = new Map<string, { color: string; items: DiagramVector[] }>()
+    for (const v of vectors) {
+      const cur = map.get(v.pmuName) ?? { color: v.color, items: [] }
+      cur.items.push(v)
+      map.set(v.pmuName, cur)
+    }
+    return map
+  }, [vectors])
 
-  const [hoverId, setHoverId] = useState<string | null>(null)
+  const compareNames = [compareA, compareB].filter(Boolean)
 
-  const togglePmu = (name: string) => {
+  const toggleVisibility = (name: string) => {
     setHidden((prev) => {
       const next = new Set(prev)
       if (next.has(name)) {
@@ -133,14 +177,86 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
   const gridStroke = 'rgba(226, 232, 240, 0.35)'
   const axisStroke = 'rgba(226, 232, 240, 0.45)'
 
+  const renderCompareCard = (
+    slot: 'A' | 'B',
+    value: string,
+    onChange: (name: string) => void,
+  ) => {
+    if (visibleNames.length === 0) return null
+    if (slot === 'B' && visibleNames.length < 2) return null
+
+    const options = visibleNames.filter((n) => (slot === 'A' ? n !== compareB : n !== compareA) || n === value)
+    const name = value && options.includes(value) ? value : options[0] ?? ''
+    const group = name ? byPmu.get(name) : undefined
+    const color = name ? pmuInfo.get(name)?.color ?? '#94a3b8' : '#94a3b8'
+
+    return (
+      <Box
+        key={slot}
+        onMouseEnter={() => name && setHoverPmu(name)}
+        onMouseLeave={() => setHoverPmu(null)}
+        sx={{
+          px: 1,
+          py: 0.85,
+          borderRadius: 1.5,
+          border: '1px solid',
+          borderColor: hoverPmu === name ? 'primary.main' : 'divider',
+          bgcolor: 'action.hover',
+        }}
+      >
+        <FormControl size="small" fullWidth sx={{ mb: 0.75 }}>
+          <Select
+            value={name}
+            onChange={(e) => onChange(String(e.target.value))}
+            sx={{
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              fontSize: 12,
+              fontWeight: 700,
+              '.MuiSelect-select': { py: 0.6, display: 'flex', alignItems: 'center', gap: 1 },
+            }}
+            renderValue={(selected) => (
+              <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center' }}>
+                <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: color, flex: 'none' }} />
+                <span>{labels.get(selected) ?? selected}</span>
+              </Stack>
+            )}
+          >
+            {options.map((n) => (
+              <MenuItem key={n} value={n} sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 }}>
+                {labels.get(n) ?? n}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <Stack spacing={0.2}>
+          {(group?.items ?? []).map((p) => (
+            <Typography
+              key={p.id}
+              variant="caption"
+              sx={{
+                color: 'text.primary',
+                fontVariantNumeric: 'tabular-nums',
+                lineHeight: 1.35,
+                display: 'block',
+              }}
+            >
+              <Box component="span" sx={{ fontWeight: 700, color: p.color, mr: 0.5 }}>
+                {p.label}
+              </Box>
+              {round(p.magnitude, 1)}∠{round(p.angleDeg, 0)}°
+            </Typography>
+          ))}
+        </Stack>
+      </Box>
+    )
+  }
+
   return (
     <Card variant="outlined" sx={{ height: '100%' }}>
       <CardHeader
         title={title}
-        subheader={subtitle ?? defaultSub}
         slotProps={{
           title: { variant: 'h6', sx: { fontSize: '1rem' } },
-          subheader: { sx: { color: 'text.secondary', fontSize: 13 } },
         }}
       />
       <CardContent sx={{ pt: 0 }}>
@@ -149,13 +265,13 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
             {emptyMessage ?? `No live ${kind} phasors for the selected online PMUs / channels.`}
           </Typography>
         ) : (
-          <Stack spacing={1.5} sx={{ alignItems: 'stretch' }}>
+          <Stack spacing={1.25} sx={{ alignItems: 'stretch' }}>
             <Stack
               direction={{ xs: 'column', sm: 'row' }}
-              spacing={2}
-              sx={{ alignItems: 'center', justifyContent: 'center' }}
+              spacing={1.5}
+              sx={{ alignItems: { xs: 'stretch', sm: 'flex-start' }, justifyContent: 'center' }}
             >
-              <Box sx={{ width: '100%', maxWidth: 300 }}>
+              <Box sx={{ width: '100%', maxWidth: 300, flex: '0 0 auto', mx: { xs: 'auto', sm: 0 } }}>
                 <Box
                   component="svg"
                   viewBox={`0 0 ${size} ${size}`}
@@ -189,11 +305,11 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
                     const { x, y } = toXY(p.magnitude, p.angleDeg, scale)
                     const x2 = cx + x
                     const y2 = cy - y
-                    const dim = hoverId != null && hoverId !== p.id
+                    const inCompare = compareNames.includes(p.pmuName)
+                    const dim = hoverPmu != null && p.pmuName !== hoverPmu
                     const dash = DASH_BY_INDEX[p.pmuIndex % DASH_BY_INDEX.length]
-                    // Multi-PMU: skip tip text (side list + legend). Single PMU: phase at tip, pushed out if tiny.
                     const tipR = Math.hypot(x, y)
-                    const showTip = pmuCount === 1
+                    const showTip = visibleNames.length === 1
                     let lx = x2 + (x >= 0 ? 10 : -10)
                     let ly = y2 + (y >= 0 ? -6 : 14)
                     if (showTip && tipR < plotR * 0.35 && tipR > 0) {
@@ -206,9 +322,9 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
                       <g
                         key={p.id}
                         style={{ cursor: 'default' }}
-                        opacity={dim ? 0.22 : 1}
-                        onMouseEnter={() => setHoverId(p.id)}
-                        onMouseLeave={() => setHoverId(null)}
+                        opacity={dim ? 0.2 : 1}
+                        onMouseEnter={() => setHoverPmu(p.pmuName)}
+                        onMouseLeave={() => setHoverPmu(null)}
                       >
                         <line
                           x1={cx}
@@ -216,12 +332,12 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
                           x2={x2}
                           y2={y2}
                           stroke={p.color}
-                          strokeWidth={hoverId === p.id ? 3.2 : 2.4}
+                          strokeWidth={inCompare || hoverPmu === p.pmuName ? 3 : 2.3}
                           strokeOpacity={0.95}
                           strokeDasharray={dash || undefined}
                         />
                         <line x1={cx} y1={cy} x2={x2} y2={y2} stroke="transparent" strokeWidth={14} />
-                        <circle cx={x2} cy={y2} r={hoverId === p.id ? 4 : 3.1} fill={p.color} />
+                        <circle cx={x2} cy={y2} r={3.1} fill={p.color} />
                         {showTip && (
                           <text
                             x={lx}
@@ -241,102 +357,63 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
                 </Box>
               </Box>
 
-              <Stack spacing={1.25} sx={{ minWidth: { sm: 160 }, width: { xs: '100%', sm: 'auto' } }}>
-                {visibleVectors.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary">
-                    Click a PMU label below to show vectors.
-                  </Typography>
-                ) : (
-                  [...byPmu.entries()].map(([pmuName, group]) => (
-                    <Box key={pmuName}>
-                      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 0.5 }}>
-                        <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: group.color, flex: 'none' }} />
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            letterSpacing: '0.06em',
-                            textTransform: 'uppercase',
-                            color: 'text.secondary',
-                            fontWeight: 700,
-                          }}
-                        >
-                          {pmuName}
-                        </Typography>
-                      </Stack>
-                      <Stack spacing={0.75}>
-                        {group.items.map((p) => (
-                          <Stack
-                            key={p.id}
-                            direction="row"
-                            spacing={1}
-                            onMouseEnter={() => setHoverId(p.id)}
-                            onMouseLeave={() => setHoverId(null)}
-                            sx={{
-                              alignItems: 'center',
-                              cursor: 'default',
-                              opacity: hoverId && hoverId !== p.id ? 0.45 : 1,
-                            }}
-                          >
-                            <Box
-                              sx={{
-                                width: 8,
-                                height: 8,
-                                borderRadius: '50%',
-                                bgcolor: p.color,
-                                flex: 'none',
-                              }}
-                            />
-                            <Typography variant="body2" sx={{ color: 'text.primary' }}>
-                              <Box component="strong" sx={{ mr: 0.5 }}>
-                                {p.label}
-                              </Box>
-                              {round(p.magnitude, 1)}∠{round(p.angleDeg, 0)}°
-                            </Typography>
-                          </Stack>
-                        ))}
-                      </Stack>
-                    </Box>
-                  ))
-                )}
+              <Stack
+                spacing={1}
+                sx={{
+                  flex: '1 1 180px',
+                  minWidth: { sm: 168 },
+                  maxWidth: { sm: 220 },
+                }}
+              >
+                {renderCompareCard('A', compareA, setCompareA)}
+                {renderCompareCard('B', compareB, setCompareB)}
               </Stack>
             </Stack>
 
-            {/* Clickable legend — toggle streams like ECharts / Chart.js */}
             <Stack
               direction="row"
-              spacing={1}
+              spacing={0.75}
               useFlexGap
               sx={{
                 flexWrap: 'wrap',
                 justifyContent: 'center',
-                pt: 0.75,
+                pt: 0.5,
                 borderTop: '1px solid',
                 borderColor: 'divider',
+                maxHeight: 80,
+                overflowY: 'auto',
               }}
             >
               {allPmuNames.map((pmuName) => {
                 const info = pmuInfo.get(pmuName)!
                 const isOn = !hidden.has(pmuName)
                 const dash = DASH_BY_INDEX[info.index % DASH_BY_INDEX.length]
+                const short = labels.get(pmuName) ?? pmuName
+                const group = byPmu.get(pmuName)
+                const tip = group
+                  ? `${short}\n${group.items.map(formatPhaseLine).join('\n')}`
+                  : short
                 return (
                   <Box
                     key={pmuName}
                     component="button"
                     type="button"
-                    onClick={() => togglePmu(pmuName)}
-                    title={isOn ? `Hide ${pmuName}` : `Show ${pmuName}`}
+                    onClick={() => toggleVisibility(pmuName)}
+                    onMouseEnter={() => setHoverPmu(pmuName)}
+                    onMouseLeave={() => setHoverPmu(null)}
+                    title={isOn ? tip : `Show ${short}`}
                     sx={{
                       display: 'inline-flex',
                       alignItems: 'center',
-                      gap: 0.75,
-                      px: 1,
-                      py: 0.5,
+                      gap: 0.6,
+                      px: 0.85,
+                      py: 0.35,
                       borderRadius: 1,
                       bgcolor: isOn ? 'action.hover' : 'transparent',
                       border: '1px solid',
                       borderColor: isOn ? 'divider' : 'transparent',
                       cursor: 'pointer',
-                      opacity: isOn ? 1 : 0.45,
+                      opacity: isOn ? 1 : 0.4,
                       color: 'text.primary',
                       font: 'inherit',
                       '&:hover': { bgcolor: 'action.selected' },
@@ -344,19 +421,19 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
                   >
                     <Box
                       component="svg"
-                      width={22}
-                      height={10}
-                      viewBox="0 0 22 10"
+                      width={18}
+                      height={8}
+                      viewBox="0 0 18 8"
                       aria-hidden
                       sx={{ flex: 'none', display: 'block' }}
                     >
                       <line
                         x1={1}
-                        y1={5}
-                        x2={21}
-                        y2={5}
+                        y1={4}
+                        x2={17}
+                        y2={4}
                         stroke={info.color}
-                        strokeWidth={3}
+                        strokeWidth={2.5}
                         strokeLinecap="round"
                         strokeDasharray={dash || undefined}
                         strokeOpacity={isOn ? 1 : 0.4}
@@ -366,11 +443,12 @@ export function PhasorDiagram({ vectors, kind, subtitle, emptyMessage }: Props) 
                       variant="caption"
                       sx={{
                         fontWeight: 700,
+                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                         color: 'text.primary',
                         textDecoration: isOn ? 'none' : 'line-through',
                       }}
                     >
-                      {pmuName}
+                      {short}
                     </Typography>
                   </Box>
                 )

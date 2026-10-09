@@ -8,12 +8,19 @@ bin/
 *.test
 *.out
 
+# Local Go scratch / compile-out (tests, ad-hoc builds, chat helpers)
+.gotmp/
+gotmp/
+tmp/
+temp/
+
 # Go coverage and profiles
 *.coverprofile
 coverage.out
 *.prof
 data/spool/
 *.corrupt*
+
 # Python artifacts
 __pycache__/
 *.py[cod]
@@ -42,6 +49,12 @@ Thumbs.db
 
 # Logs and runtime files
 *.log
+
+# Local planning / architecture notes (keep off remote until ready)
+docs/
+*.plan.md
+*PLAN*.md
+*ARCHITECTURE*.md
 
 # Local generated data: frame dumps, spool, runtime profiles, ad-hoc analysis.
 # Everything under data/ is reproducible output — nothing here belongs in git.

@@ -5,9 +5,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,6 +18,14 @@ import (
 	"pdc/manager"
 	"pdc/store"
 )
+
+func writeStoreErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrUnavailable) {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
 
 // corsMiddleware adds basic CORS headers.
 func corsMiddleware(next http.Handler) http.Handler {
@@ -30,6 +40,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// saveBody is POST /api/pmus. Name is ignored; identity comes from ip/port/protocol.
+// Replace is the previous endpoint identity when the operator changes IP/port.
+type saveBody struct {
+	config.PMUConfig
+	Replace string `json:"replace,omitempty"`
 }
 
 // StartServer starts the REST API server on the given address.
@@ -47,7 +64,7 @@ func StartServer(ctx context.Context, addr string, db *store.Store, m *manager.P
 			pmus, err := db.GetAllPMUs(r.Context())
 			if err != nil {
 				log.Printf("api GET /api/pmus error: %v", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeStoreErr(w, err)
 				return
 			}
 			if pmus == nil {
@@ -55,23 +72,37 @@ func StartServer(ctx context.Context, addr string, db *store.Store, m *manager.P
 			}
 			json.NewEncoder(w).Encode(pmus)
 		} else if r.Method == "POST" {
-			var cfg config.PMUConfig
-			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			var body saveBody
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if cfg.Name == "" {
-				http.Error(w, "pmu name is required", http.StatusBadRequest)
-				return
-			}
-			if err := validatePMUPorts(r.Context(), db, cfg); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
+			cfg := body.PMUConfig
 			cfg.Normalize()
+			if cfg.Name == "" {
+				http.Error(w, "ip and port are required", http.StatusBadRequest)
+				return
+			}
+			if err := validateEndpointUnique(r.Context(), db, cfg, body.Replace); err != nil {
+				if errors.Is(err, store.ErrUnavailable) {
+					writeStoreErr(w, err)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			replace := strings.TrimSpace(body.Replace)
+			if replace != "" && replace != cfg.Name {
+				_ = m.StopPMU(replace)
+				if err := db.DeletePMU(r.Context(), replace); err != nil {
+					writeStoreErr(w, err)
+					return
+				}
+			}
 
 			if err := db.SavePMU(r.Context(), cfg); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeStoreErr(w, err)
 				return
 			}
 
@@ -84,28 +115,81 @@ func StartServer(ctx context.Context, addr string, db *store.Store, m *manager.P
 				return
 			}
 
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(cfg)
 		} else {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	})
 
 	mux.HandleFunc("/api/pmus/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "DELETE" {
-			name := strings.TrimPrefix(r.URL.Path, "/api/pmus/")
-			if name == "" {
-				http.Error(w, "missing pmu name", http.StatusBadRequest)
+		raw := strings.TrimPrefix(r.URL.Path, "/api/pmus/")
+		raw = strings.Trim(raw, "/")
+		if raw == "" {
+			http.Error(w, "missing pmu identity", http.StatusBadRequest)
+			return
+		}
+
+		// /api/pmus/{name}/disconnect|connect
+		action := ""
+		namePart := raw
+		if i := strings.LastIndex(raw, "/"); i >= 0 {
+			action = raw[i+1:]
+			namePart = raw[:i]
+		}
+		name, err := url.PathUnescape(namePart)
+		if err != nil {
+			name = namePart
+		}
+		if name == "" {
+			http.Error(w, "missing pmu identity", http.StatusBadRequest)
+			return
+		}
+
+		switch {
+		case r.Method == "POST" && action == "disconnect":
+			if err := db.SetPMUActive(r.Context(), name, false); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				writeStoreErr(w, err)
 				return
 			}
+			_ = m.StopPMU(name) // ok if already stopped
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "active": false})
 
+		case r.Method == "POST" && action == "connect":
+			cfg, err := db.GetPMU(r.Context(), name)
+			if err != nil {
+				writeStoreErr(w, err)
+				return
+			}
+			if err := db.SetPMUActive(r.Context(), name, true); err != nil {
+				writeStoreErr(w, err)
+				return
+			}
+			cfg.Active = true
+			if !m.IsConfigured(cfg.Name) {
+				if err := m.StartPMU(ctx, cfg); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+
+		case r.Method == "DELETE" && action == "":
 			if err := db.DeletePMU(r.Context(), name); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeStoreErr(w, err)
 				return
 			}
-
-			m.StopPMU(name) // Ignore error if not running
+			_ = m.StopPMU(name) // Ignore error if not running
 			w.WriteHeader(http.StatusNoContent)
-		} else {
+
+		default:
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	})
@@ -125,17 +209,21 @@ func StartServer(ctx context.Context, addr string, db *store.Store, m *manager.P
 	return nil
 }
 
-func validatePMUPorts(ctx context.Context, db *store.Store, incoming config.PMUConfig) error {
+func validateEndpointUnique(ctx context.Context, db *store.Store, incoming config.PMUConfig, replace string) error {
 	pmus, err := db.GetAllPMUs(ctx)
 	if err != nil {
 		return err
 	}
+	key := incoming.EndpointKey()
 	for _, p := range pmus {
 		if p.Name == incoming.Name {
 			continue
 		}
-		if incoming.Port > 0 && p.Port == incoming.Port {
-			return fmt.Errorf("port %d already used by %s", incoming.Port, p.Name)
+		if replace != "" && p.Name == replace {
+			continue
+		}
+		if p.EndpointKey() == key {
+			return fmt.Errorf("endpoint %s already registered as %s", incoming.Name, p.DisplayLabel())
 		}
 	}
 	return nil

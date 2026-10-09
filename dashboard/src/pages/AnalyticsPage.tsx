@@ -19,6 +19,7 @@ import { useDashboardContext } from '../context/DashboardContext'
 import type { PMUWithMeta } from '../types/dashboard'
 import { PHASOR_I_COLORS, PHASOR_V_COLORS } from '../utils/analyticsColors'
 import { displayPhasors } from '../utils/phasorLabels'
+import { chartLabel } from '../utils/pmu'
 
 type PhaseFilter = 'all' | 'VA' | 'VB' | 'VC' | 'IA' | 'IB' | 'IC'
 
@@ -79,6 +80,7 @@ function buildVectors(
       out.push({
         id: `${pmu.name}::${r.label}::${r.cfgName}`,
         pmuName: pmu.name,
+        pmuLabel: chartLabel(pmu),
         label: r.label,
         cfgName: r.cfgName,
         magnitude: r.magnitude,
@@ -92,14 +94,13 @@ function buildVectors(
 
 export function AnalyticsPage() {
   const {
-    pmus,
+    enabledPmus: pmus,
     dashboard,
     analyticsKpis,
     analyticsRecs,
   } = useDashboardContext()
 
   const onlinePMUs = useMemo(() => pmus.filter((p) => p.connected), [pmus])
-  const onlineCount = onlinePMUs.length
 
   const [voltagePhase, setVoltagePhase] = useState<PhaseFilter>('all')
   const [currentPhase, setCurrentPhase] = useState<PhaseFilter>('all')
@@ -113,11 +114,7 @@ export function AnalyticsPage() {
     [onlinePMUs, pmus, currentPhase],
   )
 
-  const diagramSub = !onlineCount
-    ? 'No online PMUs'
-    : `${onlineCount} online PMU${onlineCount === 1 ? '' : 's'} · click legend to toggle`
-
-  const emptyHint = !onlineCount
+  const emptyHint = !onlinePMUs.length
     ? 'No online PMUs — connect a stream to plot live phasors.'
     : undefined
 
@@ -147,13 +144,10 @@ export function AnalyticsPage() {
           <Typography variant="h6" component="h3">
             Phasor diagrams
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Live overlay of online PMUs — click a legend label under each diagram to show/hide a stream
-          </Typography>
         </Box>
 
         <Grid container spacing={2}>
-          <Grid size={{ xs: 12, md: 6 }}>
+          <Grid size={{ xs: 12, lg: 6 }}>
             <Stack spacing={1}>
               <FormControl size="small" sx={{ maxWidth: 220, alignSelf: { xs: 'stretch', sm: 'flex-end' } }}>
                 <InputLabel id="voltage-phase-filter-label">Voltage channels</InputLabel>
@@ -173,12 +167,11 @@ export function AnalyticsPage() {
               <PhasorDiagram
                 kind="voltage"
                 vectors={voltageVectors}
-                subtitle={`${diagramSub} · ${voltagePhase === 'all' ? 'All V' : voltagePhase}`}
                 emptyMessage={emptyHint}
               />
             </Stack>
           </Grid>
-          <Grid size={{ xs: 12, md: 6 }}>
+          <Grid size={{ xs: 12, lg: 6 }}>
             <Stack spacing={1}>
               <FormControl size="small" sx={{ maxWidth: 220, alignSelf: { xs: 'stretch', sm: 'flex-end' } }}>
                 <InputLabel id="current-phase-filter-label">Current channels</InputLabel>
@@ -198,7 +191,6 @@ export function AnalyticsPage() {
               <PhasorDiagram
                 kind="current"
                 vectors={currentVectors}
-                subtitle={`${diagramSub} · ${currentPhase === 'all' ? 'All I' : currentPhase}`}
                 emptyMessage={emptyHint}
               />
             </Stack>
