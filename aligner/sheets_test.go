@@ -23,7 +23,7 @@ func TestSheetsIncludeFullReadingColumns(t *testing.T) {
 	snap := bank.Snapshot()
 	_, _, headers := sheetColumns(snap)
 	joined := strings.Join(headers, ",")
-	if !strings.Contains(joined, "frequency_hz") || !strings.Contains(joined, "mw") || !strings.Contains(joined, "VA_mag") || !strings.Contains(joined, "received_at_utc") {
+	if !strings.Contains(joined, "frequency_hz") || !strings.Contains(joined, "mw") || !strings.Contains(joined, "VA_mag") || !strings.Contains(joined, "received_at_utc") || !strings.Contains(joined, "wire_soc") || !strings.Contains(joined, "fnom_hz") {
 		t.Fatalf("headers missing fields: %s", joined)
 	}
 	row := sheetRow(snap.PMUs[0].Slots[0].TSMs, snap.PMUs[0].Slots[0].TimeUTC, snap.PMUs[0].Slots[0].Reading, []string{"VA"}, nil)

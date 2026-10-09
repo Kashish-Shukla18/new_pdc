@@ -1,7 +1,6 @@
 import { memo } from 'react'
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -14,7 +13,6 @@ import type { TrendPoint } from '../../types/dashboard'
 import {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
-  CHART_LEGEND_STYLE,
   ChartSeriesTooltip,
 } from '../../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../../utils/format'
@@ -34,8 +32,8 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
         </div>
       </div>
       <div className="chart-wrap small">
-        <ResponsiveContainer width="99%" height={320} minWidth={1} minHeight={320}>
-          <LineChart data={data}>
+        <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
+          <LineChart data={data} margin={{ top: 8, right: 12, left: 4, bottom: 4 }}>
             <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
             <XAxis
               dataKey="ts"
@@ -63,7 +61,6 @@ export const FreqChart = memo(function FreqChart({ data, fnomHz = 60 }: Props) {
                 />
               )}
             />
-            <Legend wrapperStyle={CHART_LEGEND_STYLE} />
             <ReferenceLine y={fnomHz} stroke="#15803d" strokeDasharray="4 4" label={`FNOM ${fnomHz}`} />
             <Line
               type="linear"

@@ -9,11 +9,19 @@ export function ConnectivityGuide() {
       </div>
       <div className="connectivity-guide-grid">
         <article>
-          <h4>End-to-end cycle (new chart)</h4>
+          <h4>End-to-end cycle</h4>
           <p>
             Plots <strong>PMU wait + parse + other pipeline</strong>. At 50 FPS the wait is ~20 ms
             (time until the next frame arrives). That 20 ms is the PMU sample interval — not PDC
             parse time. Parse is usually ~0.5 ms; dashboard/quality add a little more.
+          </p>
+        </article>
+        <article>
+          <h4>Dynamic relative delay</h4>
+          <p>
+            <strong>(max − min)</strong> TCP receive time of each live stream’s latest frame, plus
+            the <strong>average parse</strong> of those streams. Captures arrival unevenness and
+            typical decode cost together.
           </p>
         </article>
         <article>
@@ -35,6 +43,14 @@ export function ConnectivityGuide() {
           <p>
             Per-PMU plot of receive→dashboard only (no PMU wait). Use it to compare streams; use the
             cycle chart to see wait + processing together.
+          </p>
+        </article>
+        <article>
+          <h4>TCP unread</h4>
+          <p>
+            Bytes sitting in the <strong>OS TCP receive queue</strong> for that stream — arrived on
+            the wire, not yet <code>Read()</code> by the PDC. Not C37 frame count. UDP DATA paths
+            show —. Rising values mean the app is falling behind the network.
           </p>
         </article>
         <article>

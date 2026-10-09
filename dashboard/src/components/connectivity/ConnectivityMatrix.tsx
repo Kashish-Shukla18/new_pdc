@@ -1,5 +1,5 @@
 import type { ConnectivityRow } from '../../types/dashboard'
-import { ageText, round } from '../../utils/format'
+import { ageText, formatByteSize, round } from '../../utils/format'
 
 type Props = {
   rows: ConnectivityRow[]
@@ -18,10 +18,14 @@ export function ConnectivityMatrix({ rows, onRowClick }: Props) {
       <div className="panel-head">
         <div>
           <h3>Per-PMU Connectivity Matrix</h3>
-          <p className="panel-sub">Sorted worst-first · click a row to inspect</p>
+          <p className="panel-sub">
+            Sorted worst-first · click a row to inspect
+            {rows.length ? ` · ${rows.length} PMUs` : ''}
+            {' · '}TCP unread = kernel bytes waiting to be Read
+          </p>
         </div>
       </div>
-      <div className="table-wrap scrollx">
+      <div className="table-wrap scrollx rows-5">
         <table>
           <thead>
             <tr>
@@ -30,6 +34,7 @@ export function ConnectivityMatrix({ rows, onRowClick }: Props) {
               <th>Link</th>
               <th>Latency (ms)</th>
               <th>Jitter (ms)</th>
+              <th>TCP unread</th>
               <th>Pkt Loss %</th>
               <th>Avail %</th>
               <th>Last Frame</th>
@@ -38,26 +43,43 @@ export function ConnectivityMatrix({ rows, onRowClick }: Props) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.name} className="row-click" onClick={() => onRowClick(row.name)}>
-                <td><strong>{row.name}</strong></td>
-                <td>{row.meta.region}</td>
-                <td>{row.link}</td>
-                <td>
-                  {row.connected && Number.isFinite(row.latency) && row.latency < 900
-                    ? round(row.latency, 2)
-                    : '—'}
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={11} className="device-empty">
+                  No connectivity rows yet.
                 </td>
-                <td>{row.connected ? round(row.jitter, 1) : '—'}</td>
-                <td>{row.connected ? round(row.loss, 2) : '—'}</td>
-                <td>{row.connected ? round(row.avail, 1) : '0.0'}</td>
-                <td>{row.connected ? ageText(row.lastFrameTime) : '—'}</td>
-                <td>
-                  <span className={`status-chip ${statusChip(row)}`}>{row.statusLabel}</span>
-                </td>
-                <td className="conn-rec-cell">{row.tableRecommendation}</td>
               </tr>
-            ))}
+            ) : (
+              rows.map((row) => (
+                <tr key={row.name} className="row-click" onClick={() => onRowClick(row.name)}>
+                  <td><strong>{row.name}</strong></td>
+                  <td>{row.meta.region}</td>
+                  <td>{row.link}</td>
+                  <td>
+                    {row.connected && Number.isFinite(row.latency) && row.latency < 900
+                      ? round(row.latency, 2)
+                      : '—'}
+                  </td>
+                  <td>{row.connected ? round(row.jitter, 1) : '—'}</td>
+                  <td
+                    title={
+                      row.tcpUnreadBytes != null && row.tcpRecvBufMax
+                        ? `Kernel TCP Rx queue · max ${formatByteSize(row.tcpRecvBufMax)}`
+                        : 'TCP DATA only (UDP streams show —)'
+                    }
+                  >
+                    {row.connected ? formatByteSize(row.tcpUnreadBytes) : '—'}
+                  </td>
+                  <td>{row.connected ? round(row.loss, 2) : '—'}</td>
+                  <td>{row.connected ? round(row.avail, 1) : '0.0'}</td>
+                  <td>{row.connected ? ageText(row.lastFrameTime) : '—'}</td>
+                  <td>
+                    <span className={`status-chip ${statusChip(row)}`}>{row.statusLabel}</span>
+                  </td>
+                  <td className="conn-rec-cell">{row.tableRecommendation}</td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

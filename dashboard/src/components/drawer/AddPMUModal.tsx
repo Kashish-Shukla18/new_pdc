@@ -25,16 +25,9 @@ export function AddPMUModal() {
         </div>
         <div className="drawer-body-react">
           <form onSubmit={handleAddPMU} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <div>
-              <label style={{ display: 'block', marginBottom: '4px' }}>Name</label>
-              <input
-                required
-                aria-label="PMU name"
-                value={newPMU.name}
-                onChange={(e) => setNewPMU({ ...newPMU, name: e.target.value })}
-                style={{ width: '100%', padding: '8px' }}
-              />
-            </div>
+            <p className="panel-sub" style={{ margin: 0 }}>
+              Identity is the IP and port. After connect, the device station name from CFG-2 is shown as the label.
+            </p>
             <div>
               <label style={{ display: 'block', marginBottom: '4px' }}>IP Address</label>
               <input

@@ -167,6 +167,58 @@ func TestParseCFG2AndData_FloatPolar(t *testing.T) {
 	}
 }
 
+func TestCFG2TimeBaseMasksReservedBits(t *testing.T) {
+	// Same minimal CFG2 as above, but TIME_BASE has reserved upper bits set.
+	payloadLen := 4 + 2 + 16 + 2 + 2 + 2 + 2 + 2 + 16 + 4 + 2 + 2 + 2
+	frame := make([]byte, 14+payloadLen+2)
+	frame[0] = 0xAA
+	frame[1] = 0x31
+	binary.BigEndian.PutUint16(frame[2:], uint16(len(frame)))
+	binary.BigEndian.PutUint16(frame[4:], 1)
+	binary.BigEndian.PutUint32(frame[6:], 1000)
+	binary.BigEndian.PutUint32(frame[10:], 0)
+
+	p := frame[14:]
+	o := 0
+	dirty := uint32(0xAB000000 | 1_000_000)
+	binary.BigEndian.PutUint32(p[o:], dirty)
+	o += 4
+	binary.BigEndian.PutUint16(p[o:], 1)
+	o += 2
+	copy(p[o:], []byte("TEST-STATION    "))
+	o += 16
+	binary.BigEndian.PutUint16(p[o:], 1)
+	o += 2
+	binary.BigEndian.PutUint16(p[o:], 0x000B)
+	o += 2
+	binary.BigEndian.PutUint16(p[o:], 1)
+	o += 2
+	binary.BigEndian.PutUint16(p[o:], 0)
+	o += 2
+	binary.BigEndian.PutUint16(p[o:], 0)
+	o += 2
+	copy(p[o:], []byte("VA              "))
+	o += 16
+	binary.BigEndian.PutUint32(p[o:], 0)
+	o += 4
+	binary.BigEndian.PutUint16(p[o:], 0)
+	o += 2
+	binary.BigEndian.PutUint16(p[o:], 7)
+	o += 2
+	binary.BigEndian.PutUint16(p[o:], 30)
+	o += 2
+	_ = o
+	putCRC(frame)
+
+	prof, err := ParseCFG2Frame(frame)
+	if err != nil {
+		t.Fatalf("ParseCFG2Frame: %v", err)
+	}
+	if prof.TimeBase != 1_000_000 {
+		t.Fatalf("TimeBase=0x%X want 1_000_000 (24-bit mask)", prof.TimeBase)
+	}
+}
+
 func TestIntegerPolarScaling(t *testing.T) {
 	cfg := Profile{
 		Station: "I", IDCode: 1, TimeBase: 1_000_000, NumPMU: 1,

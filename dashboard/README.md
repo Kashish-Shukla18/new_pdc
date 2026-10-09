@@ -9,7 +9,7 @@ Adding/editing devices goes to the REST API on `:8081`.
 
 ```powershell
 # from repo root first:
-docker compose up -d timescaledb
+docker compose -f docker-compose.local.yaml up -d timescaledb
 .\start.ps1
 
 # then here:

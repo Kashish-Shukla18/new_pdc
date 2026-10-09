@@ -30,10 +30,12 @@ import (
 	"pdc/aligner"
 	"pdc/api"
 	"pdc/config"
+	"pdc/internal/envfile"
 	"pdc/internal/instance"
 	"pdc/manager"
 	"pdc/monitoring"
 	"pdc/output"
+	"pdc/output/history"
 	"pdc/parser"
 	"pdc/store"
 )
@@ -44,6 +46,9 @@ type pipeline struct {
 	buffers             *aligner.Bank      // per-PMU timestamp tables
 	publisher           *aligner.Publisher // tick-grid align emit
 	dropQualityRejected bool
+	history             *history.Recorder
+	timeLocMu           sync.RWMutex
+	timeLoc             map[string]*time.Location // per-PMU SOC interpretation
 	traceMu             sync.Mutex
 	traceCounts         map[string]int // print first few frames in detail
 }
@@ -80,32 +85,39 @@ func envInt(key string, fallback int) int {
 	return n
 }
 
-func validatePMUPorts(pmus []config.PMUConfig) error {
-	byPort := make(map[int]string, len(pmus))
-	for _, p := range pmus {
-		if p.Port <= 0 {
-			continue
+func validatePMUEndpoints(pmus []config.PMUConfig) error {
+	seen := make(map[string]string, len(pmus))
+	for i := range pmus {
+		p := &pmus[i]
+		p.Normalize()
+		if p.Name == "" {
+			return fmt.Errorf("PMU missing ip/port")
 		}
-		if other, ok := byPort[p.Port]; ok {
-			return fmt.Errorf("duplicate TCP port %d: %s and %s (each PMU needs its own device port)", p.Port, p.Name, other)
+		key := p.EndpointKey()
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("duplicate endpoint %s: %s and %s", p.Name, other, p.Name)
 		}
-		byPort[p.Port] = p.Name
+		seen[key] = p.Name
 	}
 	return nil
 }
 
 func newPipeline() *pipeline {
-	maxClockSkew := envDuration("MAX_CLOCK_SKEW", 24*time.Hour)
-	dropQualityRejected := envBool("DROP_QUALITY_REJECTED", false)
+	maxClockSkew := envDuration("MAX_CLOCK_SKEW", 5*time.Second)
+	dropQualityRejected := envBool("DROP_QUALITY_REJECTED", true)
 	log.Printf("quality gate: max_clock_skew=%s drop_rejected=%t", maxClockSkew, dropQualityRejected)
+	log.Printf("timestamp: fleet default TZ=%s (field SOC reinterpreted → UTC; loopback sims stay UTC)", config.DefaultTimestampTZ())
 
 	// Keep a short in-memory tape of recent frames (for dump-frames tool).
 	output.ConfigureFrameCapture(envInt("FRAME_CAPTURE_SIZE", 1500))
 
 	cap := envInt("ALIGN_BUFFER_CAPACITY", aligner.DefaultCapacity)
-	periodMs := int64(envInt("ALIGN_PERIOD_MS", int(aligner.DefaultPeriodMs)))
+	periodUs := int64(envInt("ALIGN_PERIOD_US", 0))
+	if periodUs < 1 {
+		periodUs = int64(envInt("ALIGN_PERIOD_MS", int(aligner.DefaultPeriodMs))) * 1000
+	}
 	buf := aligner.NewBank(cap)
-	pub := aligner.NewPublisher(buf, periodMs, 0, monitoring.RecordAlignedFrame)
+	pub := aligner.NewPublisher(buf, periodUs, 0, monitoring.RecordAlignedFrame)
 	buf.OnReset(func() {
 		monitoring.ClearAlignedBatches()
 	})
@@ -114,9 +126,11 @@ func newPipeline() *pipeline {
 		buffers:             buf,
 		publisher:           pub,
 		dropQualityRejected: dropQualityRejected,
+		timeLoc:             make(map[string]*time.Location),
 		traceCounts:         make(map[string]int),
 	}
-	log.Printf("aligner: capacity=%d period=%dms (no wait, head=MinNewest)", cap, periodMs)
+	log.Printf("aligner: capacity=%d period=%dµs (≈%.3fms, no wait, head=MinNewest)",
+		cap, periodUs, float64(periodUs)/1000.0)
 	return p
 }
 
@@ -130,6 +144,43 @@ func (p *pipeline) nextTraceIndex(pmuName string) (int, bool) {
 	count++
 	p.traceCounts[pmuName] = count
 	return count, true
+}
+
+// RegisterPMUTimeZone caches how this endpoint's SOC should be interpreted.
+func (p *pipeline) RegisterPMUTimeZone(cfg config.PMUConfig) {
+	if p == nil {
+		return
+	}
+	cfg.Normalize()
+	tz := cfg.EffectiveTimestampTZ()
+	loc, err := config.LoadLocation(tz)
+	if err != nil {
+		log.Printf("[%s] timestamp_tz %q invalid (%v) — using UTC", cfg.Name, tz, err)
+		loc = time.UTC
+		tz = "UTC"
+	}
+	p.timeLocMu.Lock()
+	p.timeLoc[cfg.Name] = loc
+	p.timeLocMu.Unlock()
+	log.Printf("[%s] measurement time zone: %s (fleet default %s)", cfg.Name, tz, config.DefaultTimestampTZ())
+}
+
+func (p *pipeline) correctTimestamp(pmuName string, ts time.Time) time.Time {
+	if p == nil || ts.IsZero() {
+		return ts
+	}
+	p.timeLocMu.RLock()
+	loc := p.timeLoc[pmuName]
+	p.timeLocMu.RUnlock()
+	if loc == nil {
+		// Unknown PMU: apply fleet default (not loopback heuristic without IP).
+		var err error
+		loc, err = config.LoadLocation(config.DefaultTimestampTZ())
+		if err != nil {
+			return ts.UTC()
+		}
+	}
+	return config.ReinterpretAsTimezone(ts, loc)
 }
 
 func (p *pipeline) HandleFrame(pmuName string, raw []byte, receivedAt time.Time) {
@@ -149,6 +200,9 @@ func (p *pipeline) HandleFrame(pmuName string, raw []byte, receivedAt time.Time)
 		monitoring.RecordConversation(pmuName, "PMU", "PDC", "parse", "error", err.Error())
 		return
 	}
+	// Fleet IST (or per-PMU TZ) → UTC before quality / align / history.
+	reading.Timestamp = p.correctTimestamp(pmuName, reading.Timestamp)
+
 	monitoring.IncFramesParsed()
 	monitoring.NoteFrameParseOK(pmuName)
 
@@ -157,25 +211,38 @@ func (p *pipeline) HandleFrame(pmuName string, raw []byte, receivedAt time.Time)
 	}
 
 	qerr := p.checker.Validate(reading)
-	if qerr != nil {
-		monitoring.IncQualityRejected()
-		monitoring.IncQualityRejectForPMU(pmuName)
-		monitoring.NoteFrameQualityFlag(pmuName, qerr.Error(), reading)
-		log.Printf("[%s] quality reject: %v", pmuName, qerr)
-		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", qerr.Error())
-		if p.dropQualityRejected {
-			monitoring.NoteFrameQualityDrop(pmuName, qerr.Error(), reading)
-			return
-		}
-	} else {
-		monitoring.NoteFrameQualityOK(pmuName)
-	}
 
 	// receivedAt = wire arrival (from receiver), not "after parse".
+	// Set before history tap so rejected frames still get received_at.
 	reading.Trace = parser.LatencyTrace{
 		ReceivedAtUnixNano: receivedAt.UnixNano(),
 		ParseMs:            monitoring.Ms(parseDur),
 	}
+
+	qualityOK := qerr == nil
+	rejectReason := ""
+	if qerr != nil {
+		rejectReason = qerr.Error()
+		monitoring.IncQualityRejected()
+		monitoring.IncQualityRejectForPMU(pmuName)
+		monitoring.NoteFrameQualityFlag(pmuName, rejectReason, reading)
+		log.Printf("[%s] quality reject: %v", pmuName, qerr)
+		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", rejectReason)
+	} else {
+		monitoring.NoteFrameQualityOK(pmuName)
+	}
+
+	// History tap: always enqueue after parse+Validate, independent of live drop flag.
+	if p.history != nil {
+		p.history.NoteQuality(pmuName, qualityOK, rejectReason)
+		p.history.NoteFrame(reading, qualityOK, rejectReason)
+	}
+
+	if !qualityOK && p.dropQualityRejected {
+		monitoring.NoteFrameQualityDrop(pmuName, rejectReason, reading)
+		return
+	}
+
 	if !reading.Timestamp.IsZero() {
 		monitoring.UpdateClockOffset(pmuName, receivedAt, reading.Timestamp)
 	}
@@ -207,24 +274,28 @@ func (p *pipeline) deliverLocal(r parser.Reading) {
 	}
 }
 
-// SyncAlignerExpected rebuilds buffers when the PMU set changes and restarts the chart ruler.
+// SyncAlignerExpected updates aligner buffers to match the live PMU set.
+// Uses Add/Remove so peers keep their samples when one PMU joins or leaves.
 func (p *pipeline) SyncAlignerExpected(names []string) {
 	if p == nil || p.buffers == nil {
 		return
 	}
-	monitoring.ClearAllClockOffsets() // latency skew estimates; aligner keys are raw SOC
-	p.buffers.SetExpected(names) // also resets publisher + clears aligned chart history
-	period := aligner.DefaultPeriodMs
+	changed := p.buffers.SyncExpected(names)
+	periodUs := aligner.DefaultPeriodUs
 	if p.publisher != nil {
-		period = aligner.DerivePeriodMs(names, p.publisher.PeriodMs())
-		p.publisher.SetPeriodMs(period)
+		periodUs = aligner.DerivePeriodUs(names, p.publisher.PeriodUs())
+		p.publisher.SetPeriodUs(periodUs)
 	}
 	fps := 0.0
-	if period > 0 {
-		fps = 1000.0 / float64(period)
+	if periodUs > 0 {
+		fps = 1_000_000.0 / float64(periodUs)
 	}
-	monitoring.SetAlignerTune(len(names), fps, time.Duration(period)*time.Millisecond, 0, 0, p.buffers.Capacity(), names)
-	log.Printf("[aligner] buffers reset for %d PMUs period=%dms (no wait): %v", len(names), period, names)
+	monitoring.SetAlignerTune(len(names), fps, time.Duration(periodUs)*time.Microsecond, 0, 0, p.buffers.Capacity(), names)
+	if changed {
+		monitoring.ClearAllClockOffsets()
+		log.Printf("[aligner] live set → %d PMUs period=%dµs (≈%.3fms): %v",
+			len(names), periodUs, float64(periodUs)/1000.0, names)
+	}
 }
 
 // registerAlignerHandlers exposes buffer dumps so you can SEE what landed.
@@ -243,6 +314,53 @@ func (p *pipeline) registerAlignerHandlers(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(p.buffers.Snapshot())
 	})
+	mux.HandleFunc("/conversation/aligner-buffer-capacity", p.handleBufferCapacity)
+}
+
+type bufferCapacityBody struct {
+	Capacity int `json:"capacity"`
+}
+
+func (p *pipeline) handleBufferCapacity(w http.ResponseWriter, r *http.Request) {
+	if p == nil || p.buffers == nil {
+		http.Error(w, "aligner buffers unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	write := func(capacity int) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"capacity": capacity,
+			"default":  aligner.DefaultCapacity,
+			"min":      aligner.MinCapacity,
+			"max":      aligner.MaxCapacity,
+		})
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		write(p.buffers.Capacity())
+	case http.MethodPut, http.MethodPost:
+		var body bufferCapacityBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		// Bounds live only in aligner.Min/MaxCapacity (buffer.go); SetCapacity clamps.
+		applied := p.buffers.SetCapacity(body.Capacity)
+		monitoring.SetAlignerBufferCapacity(applied)
+		log.Printf("aligner: buffer capacity set to %d (requested %d)", applied, body.Capacity)
+		write(applied)
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // logFirstFrames prints a friendly decode of the first few frames per PMU.
@@ -256,16 +374,21 @@ func logFirstFrames(pmuName string, traceIndex int, reading parser.Reading) {
 }
 
 func main() {
+	// Local .env fills unset knobs; real OS env always wins.
+	if err := envfile.Load(".env"); err != nil {
+		log.Printf("load .env: %v", err)
+	}
+
 	metricsAddr := flag.String("metrics-addr", ":2112", "dashboard + metrics port")
 	apiAddr := flag.String("api-addr", ":8081", "PMU config REST API port")
 	flag.Parse()
 
-	// Address book of PMUs (Postgres). Needed even with readings-storage off.
-	dbStore, err := store.NewStore()
-	if err != nil {
-		log.Fatalf("postgres (PMU config): %v", err)
-	}
+	// Address book of PMUs (Postgres). Soft-fail: PDC starts even if DB is down.
+	dbStore := store.NewStore()
 	defer dbStore.Close()
+	if !dbStore.Ready() {
+		log.Printf("postgres (PMU config): degraded — empty address book until DB is up")
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -278,6 +401,20 @@ func main() {
 	defer release()
 
 	pl := newPipeline()
+
+	var histRec *history.Recorder
+	histSink, err := output.NewSinkFromEnv(ctx)
+	if err != nil {
+		log.Printf("history sink: %v (continuing without history)", err)
+	}
+	if histSink != nil {
+		defer histSink.Close()
+		histRec = history.NewRecorder(histSink.Writer())
+		pl.history = histRec
+		log.Printf("history: CFG/lifecycle events + frame ingest enabled")
+	} else {
+		log.Printf("history: disabled (set ENABLE_HISTORY=true in .env to turn on)")
+	}
 
 	if err := monitoring.StartServer(ctx, *metricsAddr,
 		output.RegisterFrameCaptureHandler,
@@ -292,22 +429,33 @@ func main() {
 	log.Printf("dashboard API on %s  |  PMU config API on %s", *metricsAddr, *apiAddr)
 	log.Printf("pipeline: connect → parse → quality → inventory + align-publish → dashboard")
 	log.Printf("inspect aligner buffers: http://127.0.0.1%s/conversation/aligner-buffers/sheets", *metricsAddr)
+	log.Printf("inspect aligned samples: http://127.0.0.1%s/conversation/aligned-samples/sheets", *metricsAddr)
 	log.Printf("CFG-2 layouts: learned live from each PMU handshake (in RAM only)")
 
 	pmuManager := manager.NewPMUManager(func(pmuName string, raw []byte, receivedAt time.Time) {
 		pl.HandleFrame(pmuName, raw, receivedAt)
 	})
 	pmuManager.SetAlignerHook(pl.SyncAlignerExpected)
+	pmuManager.SetStationHook(func(name, station string) {
+		if err := dbStore.UpdateStation(context.Background(), name, station); err != nil {
+			log.Printf("[Manager] update station for %s: %v", name, err)
+		}
+	})
+	pmuManager.SetPMUConfigHook(pl.RegisterPMUTimeZone)
+	if histRec != nil {
+		pmuManager.SetHistoryHooks(histRec)
+	}
 
 	if err := api.StartServer(ctx, *apiAddr, dbStore, pmuManager); err != nil {
 		log.Fatalf("REST API: %v", err)
 	}
 
-	pmus, err := dbStore.GetAllPMUs(ctx)
+	pmus, err := dbStore.GetActivePMUs(ctx)
 	if err != nil {
-		log.Fatalf("load PMUs: %v", err)
+		log.Printf("load PMUs: %v — starting with none (will use API once DB is up)", err)
+		pmus = nil
 	}
-	if err := validatePMUPorts(pmus); err != nil {
+	if err := validatePMUEndpoints(pmus); err != nil {
 		log.Fatalf("invalid PMU config: %v", err)
 	}
 

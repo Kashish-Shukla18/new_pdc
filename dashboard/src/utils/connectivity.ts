@@ -1,7 +1,7 @@
 import type { ConnectivityKpi, ConnectivityRec, RttHistoryPoint, RttStream } from '../types/connectivity'
 import type { ConnectivityRow, PMUWithMeta } from '../types/dashboard'
 import { round } from './format'
-import { availabilityOf, jitterOf, latencyOf, packetLossOf, pmuKey, toneFromStatus } from './pmu'
+import { availabilityOf, chartLabel, jitterOf, latencyOf, packetLossOf, pmuKey, toneFromStatus } from './pmu'
 
 export const RTT_CHART_COLORS = ['#b91c1c', '#b45309', '#6d28d9', '#2563eb', '#15803d', '#475569']
 /** Rolling samples for the latency chart (~1 Hz poll → ~1 min). */
@@ -147,7 +147,7 @@ export function computeConnectivityRecs(rows: ConnectivityRow[]): ConnectivityRe
   return recs.slice(0, 8)
 }
 
-export function topRttStreams(rows: ConnectivityRow[], limit = 8): RttStream[] {
+export function topRttStreams(rows: ConnectivityRow[], limit = 25): RttStream[] {
   // Stable name order so the chart set does not reshuffle every poll.
   return rows
     .filter((row) => row.connected)
@@ -155,7 +155,7 @@ export function topRttStreams(rows: ConnectivityRow[], limit = 8): RttStream[] {
     .slice(0, limit)
     .map((row, index) => ({
       key: pmuKey(row.name),
-      name: row.name,
+      name: chartLabel(row),
       color: RTT_CHART_COLORS[index % RTT_CHART_COLORS.length],
       latency: Number.isFinite(row.latency) ? row.latency : 0,
     }))
