@@ -2,6 +2,14 @@ export function round(v: number, digits = 2) {
   return Number(v.toFixed(digits))
 }
 
+/** Kernel TCP unread queue size for the connectivity matrix. */
+export function formatByteSize(n: number | undefined | null) {
+  if (n == null || !Number.isFinite(n) || n < 0) return '—'
+  if (n < 1024) return `${Math.round(n)} B`
+  if (n < 1024 * 1024) return `${round(n / 1024, 1)} KiB`
+  return `${round(n / (1024 * 1024), 2)} MiB`
+}
+
 export function formatTS(ts: number) {
   return new Date(ts).toLocaleTimeString([], {
     hour: '2-digit',

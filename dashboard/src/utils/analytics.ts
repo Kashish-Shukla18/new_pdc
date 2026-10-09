@@ -6,7 +6,7 @@ import type {
 } from '../types/analytics'
 import type { ConnectivityRow, ConversationEvent, PMUWithMeta } from '../types/dashboard'
 import { round } from './format'
-import { packetLossOf, pmuKey } from './pmu'
+import { chartLabel, packetLossOf, pmuKey } from './pmu'
 
 function fnomOf(pmu: PMUWithMeta, fallback = 60) {
   return pmu.fnomHz && pmu.fnomHz > 0 ? pmu.fnomHz : fallback
@@ -18,10 +18,12 @@ function fleetFnom(pmus: PMUWithMeta[], fallback = 60) {
 }
 
 export function pairLabel(a: PMUWithMeta, b: PMUWithMeta) {
-  if (a.meta.region !== b.meta.region && a.meta.region !== 'Unknown' && b.meta.region !== 'Unknown') {
-    return `${a.meta.region} ↔ ${b.meta.region}`
-  }
-  return `${a.name} ↔ ${b.name}`
+  return `${chartLabel(a)} ↔ ${chartLabel(b)}`
+}
+
+/** Legend / tooltip label for an angle pair (CFG station names when known). */
+export function shortPairLabel(a: PMUWithMeta, b: PMUWithMeta) {
+  return pairLabel(a, b)
 }
 
 export function angleDeltaDeg(a: PMUWithMeta, b: PMUWithMeta) {

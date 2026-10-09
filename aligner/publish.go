@@ -11,50 +11,59 @@ import (
 	"pdc/parser"
 )
 
-// DefaultPeriodMs = how far apart each chart "tick" is when we do not know the
-// PMU rate yet. 50 ms means 20 ticks per second (like 20 frames per second).
-const DefaultPeriodMs int64 = 50
+// DefaultPeriodUs = ruler step when CFG rate is unknown (50 ms → 20 fps).
+const DefaultPeriodUs int64 = 50_000
 
-// EmitFunc is the function we call to hand one finished tick to the dashboard.
-type EmitFunc func(tsMs int64, present map[string]parser.Reading, missing []string, complete bool, reason string)
+// DefaultPeriodMs is DefaultPeriodUs in milliseconds (legacy env / display).
+const DefaultPeriodMs int64 = DefaultPeriodUs / 1000
 
-// Publisher walks time in small steps and builds one chart row per step.
+// EmitFunc hands one finished tick to the dashboard.
+// tsUs is the aligner tick in Unix microseconds.
+type EmitFunc func(tsUs int64, present map[string]parser.Reading, missing []string, complete bool, reason string)
+
+// Publisher walks time in microsecond steps and builds one chart row per step.
+//
+// Using µs (not ms) lets 60 fps use period ≈ 16667 µs instead of rounded 17 ms,
+// so the ruler has ~60 marks/second instead of ~59.
 //
 // No wait: as soon as the slowest live PMU has reached tick T (MinNewest),
 // we emit whatever is present right now and move on.
-//
-// Picture a ruler marked every period ms (e.g. 40 ms at 25 fps). For each mark:
-//  1. Do not advance past MinNewest (avoids racing the fastest stream).
-//  2. If we fell behind the work-set, jump to MinOldest (avoids empty-gap flood).
-//  3. Ask every PMU for T (± half period — real stamps often jitter 1 ms).
-//  4. If nobody has a sample near T, skip the tick (do not paint a hole).
-//  5. Otherwise push that row and keep newer samples (tail).
 type Publisher struct {
 	bank     *Bank
 	emit     EmitFunc
-	periodMs int64
+	periodUs int64
 
 	mu       sync.Mutex
-	nextTick int64 // 0 means "we have not picked a start time yet"
+	nextTick int64 // 0 means "we have not picked a start time yet" (Unix µs)
 	gen      uint64
 }
 
-// NewPublisher builds a publisher. Call Run in its own goroutine.
-// waitMs is ignored (kept so call sites stay stable); emit is immediate.
-func NewPublisher(bank *Bank, periodMs, waitMs int64, emit EmitFunc) *Publisher {
-	_ = waitMs
-	if periodMs < 1 {
-		periodMs = DefaultPeriodMs
-	}
+// NewPublisher builds a publisher. periodUs is the ruler step in microseconds.
+// waitUs is ignored (kept so call sites stay stable); emit is immediate.
+// If periodUs looks like a legacy millisecond value (< 1000), it is treated as ms.
+func NewPublisher(bank *Bank, periodUs, waitUs int64, emit EmitFunc) *Publisher {
+	_ = waitUs
+	periodUs = normalizePeriodUs(periodUs)
 	p := &Publisher{
 		bank:     bank,
 		emit:     emit,
-		periodMs: periodMs,
+		periodUs: periodUs,
 	}
 	if bank != nil {
 		bank.OnReset(p.Reset)
 	}
 	return p
+}
+
+func normalizePeriodUs(periodUs int64) int64 {
+	if periodUs < 1 {
+		return DefaultPeriodUs
+	}
+	// Legacy call sites passed milliseconds (e.g. 50 for 20 fps).
+	if periodUs < 1000 {
+		return periodUs * 1000
+	}
+	return periodUs
 }
 
 // Reset clears the current tick so we pick a new start after a PMU set change.
@@ -68,38 +77,50 @@ func (p *Publisher) Reset() {
 	p.mu.Unlock()
 }
 
-// PeriodMs is the step size of the ruler (milliseconds).
-func (p *Publisher) PeriodMs() int64 {
+// PeriodUs is the ruler step in microseconds.
+func (p *Publisher) PeriodUs() int64 {
 	if p == nil {
-		return DefaultPeriodMs
+		return DefaultPeriodUs
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.periodMs
+	return p.periodUs
+}
+
+// PeriodMs is PeriodUs/1000 (for display / legacy callers).
+func (p *Publisher) PeriodMs() int64 {
+	return p.PeriodUs() / 1000
 }
 
 // WaitMs is always 0 in no-wait mode.
 func (p *Publisher) WaitMs() int64 { return 0 }
 
-// SetPeriodMs changes the step size (for example after we learn CFG DATA_RATE).
-func (p *Publisher) SetPeriodMs(ms int64) {
-	if p == nil || ms < 1 {
+// SetPeriodUs changes the ruler step (microseconds).
+func (p *Publisher) SetPeriodUs(us int64) {
+	if p == nil {
 		return
 	}
+	us = normalizePeriodUs(us)
 	p.mu.Lock()
-	p.periodMs = ms
+	p.periodUs = us
 	p.mu.Unlock()
+}
+
+// SetPeriodMs sets the step from a millisecond value (converted to µs).
+func (p *Publisher) SetPeriodMs(ms int64) {
+	if ms < 1 {
+		return
+	}
+	p.SetPeriodUs(ms * 1000)
 }
 
 // SetWaitMs is a no-op in no-wait mode.
 func (p *Publisher) SetWaitMs(ms int64) { _ = ms }
 
-// DerivePeriodMs turns "frames per second" from CFG into milliseconds per tick.
-// Example: 20 fps → 1000/20 = 50 ms.
-func DerivePeriodMs(names []string, fallback int64) int64 {
-	if fallback < 1 {
-		fallback = DefaultPeriodMs
-	}
+// DerivePeriodUs turns CFG DATA_RATE (fps) into microseconds per tick.
+// Example: 20 fps → 50000 µs; 60 fps → 16667 µs (not 17 ms).
+func DerivePeriodUs(names []string, fallbackUs int64) int64 {
+	fallbackUs = normalizePeriodUs(fallbackUs)
 	bestFPS := 0.0
 	for _, name := range names {
 		prof, ok := parser.GetProfile(name)
@@ -115,13 +136,18 @@ func DerivePeriodMs(names []string, fallback int64) int64 {
 		}
 	}
 	if bestFPS < 1 {
-		return fallback
+		return fallbackUs
 	}
-	ms := int64(math.Round(1000.0 / bestFPS))
-	if ms < 1 {
+	us := int64(math.Round(1_000_000.0 / bestFPS))
+	if us < 1 {
 		return 1
 	}
-	return ms
+	return us
+}
+
+// DerivePeriodMs is legacy: returns DerivePeriodUs(...)/1000.
+func DerivePeriodMs(names []string, fallbackMs int64) int64 {
+	return DerivePeriodUs(names, fallbackMs*1000) / 1000
 }
 
 // Run keeps publishing ticks until the program shuts down (ctx cancelled).
@@ -129,7 +155,8 @@ func (p *Publisher) Run(ctx context.Context) {
 	if p == nil || p.bank == nil || p.emit == nil {
 		return
 	}
-	log.Printf("[aligner] publisher on (period=%dms, no wait, head=MinNewest)", p.PeriodMs())
+	log.Printf("[aligner] publisher on (period=%dµs ≈ %.3fms, no wait, head=MinNewest)",
+		p.PeriodUs(), float64(p.PeriodUs())/1000.0)
 
 	for {
 		if ctx.Err() != nil {
@@ -150,21 +177,19 @@ func (p *Publisher) Run(ctx context.Context) {
 func (p *Publisher) stepOnce() bool {
 	p.mu.Lock()
 	tick := p.nextTick
-	period := p.periodMs
+	period := p.periodUs
 	gen := p.gen
 	p.mu.Unlock()
 
-	if period < 1 {
-		period = DefaultPeriodMs
-	}
+	period = normalizePeriodUs(period)
 
 	names := p.bank.Expected()
 	if len(names) == 0 {
 		return false
 	}
 
-	if derived := DerivePeriodMs(names, period); derived != period {
-		p.SetPeriodMs(derived)
+	if derived := DerivePeriodUs(names, period); derived != period {
+		p.SetPeriodUs(derived)
 		period = derived
 	}
 
@@ -182,8 +207,8 @@ func (p *Publisher) stepOnce() bool {
 		}
 		p.nextTick = tick
 		p.mu.Unlock()
-		log.Printf("[aligner] charts start at tick=%d (%s)",
-			tick, time.UnixMilli(tick).UTC().Format(time.RFC3339Nano))
+		log.Printf("[aligner] charts start at tick=%dµs (%s)",
+			tick, time.UnixMicro(tick).UTC().Format(time.RFC3339Nano))
 	}
 
 	// If the work-set moved past us (capacity dropped old samples), jump forward.
@@ -204,12 +229,10 @@ func (p *Publisher) stepOnce() bool {
 		return false
 	}
 
-	// Accept stamps within ±half period (25 fps → ±20 ms). Exact-only matching
-	// left ~half the ticks empty for 25 fps-style 39/40/41 ms jitter.
+	// Accept stamps within ±half period (60 fps → ±~8.3 ms).
 	half := period / 2
 	present, missing := p.bank.TakeTickWindow(tick, half)
 	if len(present) == 0 {
-		// Ruler mark with no nearby sample — skip; do not emit a chart hole.
 		p.mu.Lock()
 		if p.gen == gen {
 			p.nextTick = tick + period

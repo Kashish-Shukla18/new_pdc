@@ -139,7 +139,7 @@ No wait timer: as soon as the slowest stream reaches T, we emit what we have.
 **1. Postgres** (address book):
 
 ```powershell
-docker compose up -d timescaledb
+docker compose -f docker-compose.local.yaml up -d timescaledb
 ```
 
 **2. PDC:**
@@ -176,6 +176,6 @@ go run ./cmd/dump-frames -count 1500
 ## Optional
 
 ```powershell
-docker compose up -d prometheus pgadmin
+docker compose -f docker-compose.local.yaml up -d prometheus pgadmin
 ```
 

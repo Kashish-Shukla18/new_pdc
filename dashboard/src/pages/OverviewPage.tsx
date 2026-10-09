@@ -9,7 +9,6 @@ import {
 } from 'lucide-react'
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -23,19 +22,22 @@ import { MapContainer, TileLayer, Marker, Popup, Tooltip as LeafletTooltip, useM
 import { CHART_COLORS, INDIA_CENTER } from '../constants'
 import { useDashboardContext } from '../context/DashboardContext'
 import {
+  ExternalChartLegend,
+  useSeriesVisibility,
+} from '../utils/chartLegend'
+import {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
-  CHART_LEGEND_STYLE,
   ChartSeriesTooltip,
 } from '../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../utils/format'
-import { packetLossOf, pmuKey } from '../utils/pmu'
+import { chartLabel, packetLossOf, pmuKey } from '../utils/pmu'
 import { rowsFromAlignedBatches, ALIGNED_CHART_WINDOW } from '../utils/alignedChart'
 
 type FreqMode = 'absolute' | 'deviation'
 
-/** Hard cap so Recharts stays interactive with large fleets. */
-const OVERVIEW_CHART_MAX_SERIES = 8
+/** Cap plotted streams; legend below toggles visibility within the selection. */
+const OVERVIEW_CHART_MAX_SERIES = 25
 
 function MapInvalidateSize() {
   const map = useMap()
@@ -56,7 +58,7 @@ function MapInvalidateSize() {
 
 export function OverviewPage() {
   const {
-    pmus,
+    enabledPmus: pmus,
     dashboard,
     mapFilter,
     setMapFilter,
@@ -214,6 +216,26 @@ export function OverviewPage() {
   const freqDataKey = (name: string) =>
     freqMode === 'absolute' ? `${pmuKey(name)}__frequency` : `${pmuKey(name)}__frequencyDev`
 
+  const overviewSeries = useMemo(
+    () =>
+      plotPMUs.map((pmu) => {
+        const idx = pmus.findIndex((p) => p.name === pmu.name)
+        return {
+          name: chartLabel(pmu),
+          color: CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length],
+          freqKey: freqDataKey(pmu.name),
+          rocofKey: `${pmuKey(pmu.name)}__rocof`,
+        }
+      }),
+    // freqMode changes freqKey; plotPMUs/pmus cover membership/colors
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [plotPMUs, pmus, freqMode],
+  )
+  const freqSeriesKeys = overviewSeries.map((s) => s.freqKey)
+  const rocofSeriesKeys = overviewSeries.map((s) => s.rocofKey)
+  const freqVis = useSeriesVisibility(freqSeriesKeys)
+  const rocofVis = useSeriesVisibility(rocofSeriesKeys)
+
   return (
     <div className="overview-page">
       <section className="kpi-grid">
@@ -254,7 +276,7 @@ export function OverviewPage() {
                 style={active ? { borderColor: color } : undefined}
               >
                 <span className={`dot ${pmu.connected ? 'live' : 'off'}`} />
-                {pmu.name}
+                {chartLabel(pmu)}
               </button>
             )
           })}
@@ -291,7 +313,7 @@ export function OverviewPage() {
           </div>
           <div className="chart-wrap overview-chart">
             <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
-              <LineChart data={chartTrend}>
+              <LineChart data={chartTrend} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
                 <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
@@ -303,9 +325,25 @@ export function OverviewPage() {
                 />
                 <YAxis
                   tick={CHART_AXIS_TICK}
-                  domain={['auto', 'auto']}
+                  // Keep a readable band so micro-noise is not zoomed into fake "spikes".
+                  domain={
+                    freqMode === 'absolute'
+                      ? [
+                          (min: number) => Math.min(Number.isFinite(min) ? min : fleetFnom, fleetFnom - 0.05),
+                          (max: number) => Math.max(Number.isFinite(max) ? max : fleetFnom, fleetFnom + 0.05),
+                        ]
+                      : [
+                          (min: number) => Math.min(Number.isFinite(min) ? min : 0, -0.05),
+                          (max: number) => Math.max(Number.isFinite(max) ? max : 0, 0.05),
+                        ]
+                  }
                   scale="linear"
-                  tickFormatter={(v) => round(Number(v), freqMode === 'absolute' ? 3 : 4).toString()}
+                  allowDataOverflow={false}
+                  tickFormatter={(v) =>
+                    freqMode === 'absolute'
+                      ? Number(v).toFixed(3)
+                      : Number(v).toFixed(3)
+                  }
                   width={56}
                   stroke="#94a3b8"
                 />
@@ -315,13 +353,12 @@ export function OverviewPage() {
                       {...props}
                       labelFormatter={(value) => formatTSMs(Number(value))}
                       formatter={(value, name) => [
-                        `${round(Number(value ?? 0), 4)} ${freqMode === 'absolute' ? 'Hz' : 'Hz Δ'}`,
+                        `${Number(value ?? 0).toFixed(4)} ${freqMode === 'absolute' ? 'Hz' : 'Hz Δ'}`,
                         String(name),
                       ]}
                     />
                   )}
                 />
-                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
                 {freqMode === 'absolute' ? (
                   <>
                     <ReferenceLine y={fleetFnom} stroke="#7dd3a7" strokeDasharray="4 4" label={`FNOM ${fleetFnom}`} />
@@ -331,26 +368,29 @@ export function OverviewPage() {
                 ) : (
                   <ReferenceLine y={0} stroke="#7dd3a7" strokeDasharray="4 4" label="0 Δf" />
                 )}
-                {plotPMUs.map((pmu) => {
-                  const idx = pmus.findIndex((p) => p.name === pmu.name)
-                  const color = CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length]
-                  return (
+                {overviewSeries.map((series) =>
+                  freqVis.isHidden(series.freqKey) ? null : (
                     <Line
-                      key={`${pmu.name}-${freqMode}`}
+                      key={`${series.name}-${freqMode}`}
                       type="linear"
-                      dataKey={freqDataKey(pmu.name)}
-                      name={pmu.name}
-                      stroke={color}
+                      dataKey={series.freqKey}
+                      name={series.name}
+                      stroke={series.color}
                       dot={false}
                       strokeWidth={1.75}
                       connectNulls={false}
                       isAnimationActive={false}
                     />
-                  )
-                })}
+                  ),
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>
+          <ExternalChartLegend
+            items={overviewSeries.map((s) => ({ key: s.freqKey, name: s.name, color: s.color }))}
+            hidden={freqVis.hidden}
+            onToggle={freqVis.toggle}
+          />
         </div>
 
         <div className="panel overview-chart-panel">
@@ -362,7 +402,7 @@ export function OverviewPage() {
           </div>
           <div className="chart-wrap overview-chart">
             <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
-              <LineChart data={chartTrend}>
+              <LineChart data={chartTrend} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
                 <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
                 <XAxis
                   dataKey="ts"
@@ -391,28 +431,30 @@ export function OverviewPage() {
                     />
                   )}
                 />
-                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.35)" strokeDasharray="4 4" />
-                {plotPMUs.map((pmu) => {
-                  const idx = pmus.findIndex((p) => p.name === pmu.name)
-                  const color = CHART_COLORS[(idx >= 0 ? idx : 0) % CHART_COLORS.length]
-                  return (
+                {overviewSeries.map((series) =>
+                  rocofVis.isHidden(series.rocofKey) ? null : (
                     <Line
-                      key={pmu.name}
+                      key={series.name}
                       type="linear"
-                      dataKey={`${pmuKey(pmu.name)}__rocof`}
-                      name={pmu.name}
-                      stroke={color}
+                      dataKey={series.rocofKey}
+                      name={series.name}
+                      stroke={series.color}
                       dot={false}
                       strokeWidth={1.75}
                       connectNulls={false}
                       isAnimationActive={false}
                     />
-                  )
-                })}
+                  ),
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>
+          <ExternalChartLegend
+            items={overviewSeries.map((s) => ({ key: s.rocofKey, name: s.name, color: s.color }))}
+            hidden={rocofVis.hidden}
+            onToggle={rocofVis.toggle}
+          />
         </div>
       </section>
 

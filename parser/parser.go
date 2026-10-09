@@ -88,8 +88,8 @@ type Reading struct {
 	Stat       uint16      `json:"stat_raw"`
 	StatDetail STATDecoded `json:"stat_decoded"`
 
-	Digitals     []uint16 `json:"digitals,omitempty"`
-	DigitalNames []string `json:"digital_names,omitempty"`
+	Digitals     []uint16      `json:"digitals,omitempty"`
+	DigitalNames []string      `json:"digital_names,omitempty"`
 	Phasors      []NamedPhasor `json:"phasors,omitempty"`
 	Analogs      []NamedAnalog `json:"analogs,omitempty"`
 
@@ -109,6 +109,7 @@ type Reading struct {
 
 	Frequency          float32 `json:"frequency_hz"`
 	FrequencyDeviation float32 `json:"frequency_deviation_hz"`
+	FnomHz             int     `json:"fnom_hz"`
 	ROCOF              float32 `json:"rocof_hz_per_sec"`
 
 	MW                 float32 `json:"mw_active"`
@@ -188,7 +189,7 @@ func angleDiffDeg(from, to float32) float32 {
 
 // calcSequenceMetrics: symmetrical components from VA/VB/VC (for imbalance %).
 func calcSequenceMetrics(va, vb, vc Phasor) (pos, neg, zero, imbalancePct float32) {
-	aR, aI := float32(-0.5), float32(math.Sqrt(3)/2)   // e^(j2π/3)
+	aR, aI := float32(-0.5), float32(math.Sqrt(3)/2)    // e^(j2π/3)
 	a2R, a2I := float32(-0.5), float32(-math.Sqrt(3)/2) // e^(j4π/3)
 
 	pR := (va.Real + aR*vb.Real - aI*vb.Imag + a2R*vc.Real - a2I*vc.Imag) / 3
@@ -255,7 +256,8 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 
 	// ── Step 3: build UTC timestamp from SOC + FRACSEC ──────────────────────
 	// FRACSEC low 24 bits = fraction of a second in units of 1/TIME_BASE.
-	tb := cfg.TimeBase
+	// TIME_BASE itself is also 24-bit (mask defensively if profile was set oddly).
+	tb := cfg.TimeBase & 0x00FFFFFF
 	if tb == 0 {
 		tb = 1_000_000
 	}
@@ -490,10 +492,7 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 	}
 
 	// ── Step 10: derived metrics (not on the wire — computed here) ──────────
-	nominal := float32(cfg.FnomHz)
-	if nominal <= 0 {
-		nominal = 50
-	}
+	nominal := ResolveNominalHz(frequency, cfg.FnomHz, cfg.FreqFloat)
 	seqPos, seqNeg, seqZero, voltageImbalance := calcSequenceMetrics(va, vb, vc)
 	s := math.Sqrt(float64(mw*mw + mvar*mvar))
 	if mva == 0 && s > 0 {
@@ -528,12 +527,12 @@ func parseDataWithProfile(pmuName string, raw []byte, cfg Profile) (Reading, err
 		VAB_PhaseAngleDifference: angleDiffDeg(va.PhaseDegrees, vb.PhaseDegrees),
 		VBC_PhaseAngleDifference: angleDiffDeg(vb.PhaseDegrees, vc.PhaseDegrees),
 		VCA_PhaseAngleDifference: angleDiffDeg(vc.PhaseDegrees, va.PhaseDegrees),
-		SequencePos: seqPos, SequenceNeg: seqNeg, SequenceZero: seqZero,
-		Frequency: frequency, FrequencyDeviation: frequency - nominal, ROCOF: rocof,
+		SequencePos:              seqPos, SequenceNeg: seqNeg, SequenceZero: seqZero,
+		Frequency: frequency, FrequencyDeviation: frequency - nominal, FnomHz: int(nominal + 0.5), ROCOF: rocof,
 		MW: mw, MVAR: mvar, MVA: mva, PowerFactor: pf, PowerFactorLeadLag: pfDir,
 		TotalPowerReal: va.Real*ia.Real + va.Imag*ia.Imag,
 		TotalPowerImag: va.Imag*ia.Real - va.Real*ia.Imag,
-		Digital: digital, Digitals: digitals, DigitalNames: digitalNames,
+		Digital:        digital, Digitals: digitals, DigitalNames: digitalNames,
 	}, nil
 }
 

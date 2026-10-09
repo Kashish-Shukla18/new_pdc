@@ -18,19 +18,18 @@
 // # Protocol choice (config field "protocol")
 //
 //   - "tcp" (default, used by pmu-1/2/3 and most lab sims)
-//       → connectTCP: everything on one TCP socket
+//     → connectTCP: everything on one TCP socket
 //   - "udp"
-//       → connectUDPDial  (no tcp_port): commands + DATA on one UDP socket
-//       → connectUDPListen (tcp_port set): commands on TCP, DATA on UDP listen
+//     → connectUDPDial  (no tcp_port): commands + DATA on one UDP socket
+//     → connectUDPListen (tcp_port set): commands on TCP, DATA on UDP listen
 //
 // # File map
 //
-//   §1  Constants & frame helpers — frame types, CRC, build/read one frame
-//   §2  Receiver lifecycle        — Run loop = dial, on error sleep & retry
-//   §3  UDP path                  — dial mode & listen mode
-//   §4  TCP path                  — connectTCP + handshakeCFG + DATA loop
-//   §5  Shared send / wait tools  — sendCMD, readFrameOfType, UDP handshake
-//
+//	§1  Constants & frame helpers — frame types, CRC, build/read one frame
+//	§2  Receiver lifecycle        — Run loop = dial, on error sleep & retry
+//	§3  UDP path                  — dial mode & listen mode
+//	§4  TCP path                  — connectTCP + handshakeCFG + DATA loop
+//	§5  Shared send / wait tools  — sendCMD, readFrameOfType, UDP handshake
 package receiver
 
 import (
@@ -295,11 +294,13 @@ type FrameHandler func(pmuName string, raw []byte, receivedAt time.Time)
 
 // Receiver is the worker that owns one PMU connection.
 type Receiver struct {
-	cfg            config.PMUConfig
-	handler        FrameHandler
-	reconnectFails int                   // how many times in a row we failed (for backoff)
-	onSessionStart func(pmuName string) // optional: reset charts when stream starts
-	cmdVersion     byte                  // SYNC version for CMDs after CFG2 (1 or 2); 0 = default
+	cfg             config.PMUConfig
+	handler         FrameHandler
+	reconnectFails  int                  // how many times in a row we failed (for backoff)
+	onSessionStart  func(pmuName string) // optional: mark live after DATA_ON
+	onSessionEnd    func(pmuName string) // optional: mark not-live when stream drops
+	onProfileUpdate func(pmuName string) // optional: mid-stream CFG-2 soft refresh
+	cmdVersion      byte                 // SYNC version for CMDs after CFG2 (1 or 2); 0 = default
 }
 
 // New builds a Receiver (does not dial yet — call Run for that).
@@ -313,6 +314,89 @@ func New(cfg config.PMUConfig, handler FrameHandler) *Receiver {
 // SetOnSessionStart runs after a successful handshake + DATA_ON (and on reconnect).
 func (r *Receiver) SetOnSessionStart(fn func(pmuName string)) {
 	r.onSessionStart = fn
+}
+
+// SetOnSessionEnd runs when a live DATA stream ends (read error, idle timeout,
+// peer close, or context cancel after DATA_ON). Reconnect may follow; this only
+// means the PMU is no longer live for alignment.
+func (r *Receiver) SetOnSessionEnd(fn func(pmuName string)) {
+	r.onSessionEnd = fn
+}
+
+// SetOnProfileUpdate runs after CFG-2 is applied (handshake or mid-stream soft refresh).
+func (r *Receiver) SetOnProfileUpdate(fn func(pmuName string)) {
+	r.onProfileUpdate = fn
+}
+
+func (r *Receiver) endSession() {
+	if r.onSessionEnd != nil {
+		r.onSessionEnd(r.cfg.Name)
+	}
+}
+
+// streamIdleTimeout is the DATA-silence limit after handshake (liveness).
+// Uses CFG DATA_RATE when known; otherwise a safe 1s default.
+func (r *Receiver) streamIdleTimeout() time.Duration {
+	if prof, ok := parser.GetProfile(r.cfg.Name); ok {
+		return config.LivenessTimeout(prof.DataRate)
+	}
+	return config.LivenessTimeout(0)
+}
+
+// cfgChangeGrace = how long we wait after STAT bit 13 before requesting CFG-2.
+const cfgChangeGrace = 2 * time.Second
+
+// cfgChangeWatch tracks "config changed" until a new CFG-2 arrives.
+type cfgChangeWatch struct {
+	since     time.Time
+	requested bool
+}
+
+func (w *cfgChangeWatch) noteBit13() (first bool) {
+	if w.since.IsZero() {
+		w.since = time.Now()
+		w.requested = false
+		return true
+	}
+	return false
+}
+
+func (w *cfgChangeWatch) clear() {
+	w.since = time.Time{}
+	w.requested = false
+}
+
+func (w *cfgChangeWatch) shouldRequest() bool {
+	return !w.since.IsZero() && !w.requested && time.Since(w.since) >= cfgChangeGrace
+}
+
+func (w *cfgChangeWatch) markRequested() { w.requested = true }
+
+// dataSTATHasCFGChange peeks STAT bit 13 on a DATA frame (first PMU block).
+func dataSTATHasCFGChange(raw []byte) bool {
+	if len(raw) < 16 || frameType(raw) != frameTypeData {
+		return false
+	}
+	stat := binary.BigEndian.Uint16(raw[14:16])
+	return (stat>>13)&1 == 1
+}
+
+// applyMidstreamCFG2 updates the in-RAM profile without dropping the session.
+func (r *Receiver) applyMidstreamCFG2(raw []byte) bool {
+	profile, err := parser.ParseCFG2Frame(raw)
+	if err != nil {
+		log.Printf("[%s] mid-stream CFG2 parse failed: %v", r.cfg.Name, err)
+		return false
+	}
+	parser.SetProfile(r.cfg.Name, profile)
+	log.Printf("[%s] soft CFG refresh: station=%q rate=%d phnmr=%d",
+		r.cfg.Name, profile.Station, profile.DataRate, profile.Phnmr)
+	monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "cfg", "ok",
+		fmt.Sprintf("mid-stream CFG2 station=%q rate=%d", profile.Station, profile.DataRate))
+	if r.onProfileUpdate != nil {
+		r.onProfileUpdate(r.cfg.Name)
+	}
+	return true
 }
 
 // Run is the outer loop:
@@ -436,23 +520,32 @@ func (r *Receiver) connectUDPDial(ctx context.Context) error {
 	buf := make([]byte, 65535)
 	dataFrames := 0
 	var lastComplete time.Time
-	idleTimeout := timeout
-	if idleTimeout < 15*time.Second {
-		idleTimeout = 15 * time.Second
-	}
+	var cfgWatch cfgChangeWatch
 
 	for {
 		if ctx.Err() != nil {
 			_ = r.sendCMDUDP(pc, cmdDataOff)
+			r.endSession()
 			return nil
 		}
+		if cfgWatch.shouldRequest() {
+			log.Printf("[%s] STAT bit 13 set but no CFG yet — requesting CFG-2 (udp)", r.cfg.Name)
+			if err := r.sendCMDUDP(pc, cmdSendCfg2); err != nil {
+				log.Printf("[%s] request CFG-2 failed: %v", r.cfg.Name, err)
+			} else {
+				cfgWatch.markRequested()
+				monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "cfg", "info", "requested CFG-2 after STAT bit 13")
+			}
+		}
+		idleTimeout := r.streamIdleTimeout()
 		_ = pc.SetReadDeadline(time.Now().Add(idleTimeout))
 		start := time.Now()
 		n, err := pc.Read(buf)
 		first := time.Now()
 		if err != nil {
+			r.endSession()
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return fmt.Errorf("udp idle timeout from %s (no datagrams — disconnect Connection Tester if it holds the stream)", remote)
+				return fmt.Errorf("liveness timeout (%s) from %s — no DATA; leaving live set", idleTimeout, remote)
 			}
 			return fmt.Errorf("udp read %s: %w", remote, err)
 		}
@@ -465,9 +558,8 @@ func (r *Receiver) connectUDPDial(ctx context.Context) error {
 		ft := frameType(tf.raw)
 		switch ft {
 		case frameTypeCfg2:
-			if profile, perr := parser.ParseCFG2Frame(tf.raw); perr == nil {
-				parser.SetProfile(r.cfg.Name, profile)
-				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
+			if r.applyMidstreamCFG2(tf.raw) {
+				cfgWatch.clear()
 			}
 		case frameTypeData:
 			if !lastComplete.IsZero() {
@@ -479,6 +571,10 @@ func (r *Receiver) connectUDPDial(ctx context.Context) error {
 			dataFrames++
 			if dataFrames <= 3 {
 				logFrameTrace(r.cfg.Name, fmt.Sprintf("udp rx #%d wait=%s", dataFrames, monitoring.FormatMs(tf.wait)), tf.raw)
+			}
+			if dataSTATHasCFGChange(tf.raw) && cfgWatch.noteBit13() {
+				log.Printf("[%s] STAT bit 13 (CFG change) — waiting up to %s for CFG-2", r.cfg.Name, cfgChangeGrace)
+				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "cfg", "warn", "STAT bit 13 set; awaiting CFG-2")
 			}
 			payload := append([]byte(nil), tf.raw...)
 			r.dispatchDataFrame(payload, completeAt)
@@ -545,25 +641,34 @@ func (r *Receiver) connectUDPListen(ctx context.Context) error {
 	buf := make([]byte, 65535)
 	dataFrames := 0
 	var lastComplete time.Time
-	idleTimeout := timeout
-	if idleTimeout < 15*time.Second {
-		idleTimeout = 15 * time.Second
-	}
+	var cfgWatch cfgChangeWatch
 
 	for {
 		if ctx.Err() != nil {
 			if tcpConn != nil {
 				_ = r.sendCMD(tcpConn, cmdDataOff)
 			}
+			r.endSession()
 			return nil
 		}
+		if cfgWatch.shouldRequest() && tcpConn != nil {
+			log.Printf("[%s] STAT bit 13 set but no CFG yet — requesting CFG-2 (tcp control)", r.cfg.Name)
+			if err := r.sendCMD(tcpConn, cmdSendCfg2); err != nil {
+				log.Printf("[%s] request CFG-2 failed: %v", r.cfg.Name, err)
+			} else {
+				cfgWatch.markRequested()
+				monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "cfg", "info", "requested CFG-2 after STAT bit 13")
+			}
+		}
+		idleTimeout := r.streamIdleTimeout()
 		_ = pc.SetReadDeadline(time.Now().Add(idleTimeout))
 		start := time.Now()
 		n, src, err := pc.ReadFromUDP(buf)
 		first := time.Now()
 		if err != nil {
+			r.endSession()
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return fmt.Errorf("udp idle timeout on :%d (no datagrams from tester — check Remote UDP address/port and that Start is running)", r.cfg.Port)
+				return fmt.Errorf("liveness timeout (%s) on :%d — no DATA; leaving live set", idleTimeout, r.cfg.Port)
 			}
 			return fmt.Errorf("udp read :%d: %w", r.cfg.Port, err)
 		}
@@ -579,9 +684,8 @@ func (r *Receiver) connectUDPListen(ctx context.Context) error {
 		ft := frameType(tf.raw)
 		switch ft {
 		case frameTypeCfg2:
-			if profile, perr := parser.ParseCFG2Frame(tf.raw); perr == nil {
-				parser.SetProfile(r.cfg.Name, profile)
-				log.Printf("[%s] UDP CFG2 registered station=%q", r.cfg.Name, profile.Station)
+			if r.applyMidstreamCFG2(tf.raw) {
+				cfgWatch.clear()
 			}
 		case frameTypeData:
 			if !lastComplete.IsZero() {
@@ -593,6 +697,10 @@ func (r *Receiver) connectUDPListen(ctx context.Context) error {
 			dataFrames++
 			if dataFrames <= 3 {
 				logFrameTrace(r.cfg.Name, fmt.Sprintf("udp rx #%d from=%s wait=%s", dataFrames, src, monitoring.FormatMs(tf.wait)), tf.raw)
+			}
+			if dataSTATHasCFGChange(tf.raw) && cfgWatch.noteBit13() {
+				log.Printf("[%s] STAT bit 13 (CFG change) — waiting up to %s for CFG-2", r.cfg.Name, cfgChangeGrace)
+				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "cfg", "warn", "STAT bit 13 set; awaiting CFG-2")
 			}
 			payload := append([]byte(nil), tf.raw...)
 			r.dispatchDataFrame(payload, completeAt)
@@ -647,11 +755,14 @@ func drainTCPQuiet(conn net.Conn) {
 // handshakeCFG — "ask for the menu" over a TCP (or TCP-control) connection.
 //
 // Default (simple) path:
-//   send CMD_SEND_CFG2 → wait up to 500ms → if no CFG2, send again → …
+//
+//	send CMD_SEND_CFG2 → wait up to 500ms → if no CFG2, send again → …
+//
 // until CFG2 arrives or the handshake timeout runs out.
 //
 // Optional full path (env C37118_SIMPLE_HANDSHAKE=0):
-//   DATA_OFF → ask HEADER (optional) → then same CFG2 retry loop.
+//
+//	DATA_OFF → ask HEADER (optional) → then same CFG2 retry loop.
 func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time.Duration) error {
 	headerText := ""
 
@@ -732,6 +843,9 @@ func (r *Receiver) handshakeCFG(ctx context.Context, conn net.Conn, timeout time
 		profile.HeaderText = headerText
 		parser.SetProfile(r.cfg.Name, profile)
 		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
+		if r.onProfileUpdate != nil {
+			r.onProfileUpdate(r.cfg.Name)
+		}
 	}
 	return nil
 }
@@ -751,7 +865,7 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	conn, err := dialer.DialContext(ctx, proto, addr)
 	dialDur := time.Since(dialStart)
 	if err != nil {
-			return fmt.Errorf("dial %s %s: %w", proto, addr, err)
+		return fmt.Errorf("dial %s %s: %w", proto, addr, err)
 	}
 	defer conn.Close()
 	go func() {
@@ -760,6 +874,9 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	}()
 
 	configureStreamConn(conn)
+	// Kernel TCP Rx peek for Connectivity (FIONREAD); cleared when this session ends.
+	monitoring.RegisterDataSocket(r.cfg.Name, conn, "tcp")
+	defer monitoring.UnregisterDataSocket(r.cfg.Name, conn)
 
 	log.Printf("[%s] connected to %s in %s", r.cfg.Name, addr, monitoring.FormatMs(dialDur))
 	monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "connect", "ok",
@@ -781,35 +898,60 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 	if r.onSessionStart != nil {
 		r.onSessionStart(r.cfg.Name)
 	}
+	liveFor := r.streamIdleTimeout()
+	log.Printf("[%s] streaming; liveness=%s (no DATA → leave live set)", r.cfg.Name, liveFor)
 
-	// ── Step 4: read DATA forever ─────────────────────────────────────────────
+	// ── Step 4: read DATA (and mid-stream CFG-2) forever ──────────────────────
 	dataFrames := 0
 	var lastComplete time.Time
-	readTimeout := r.cfg.DataReadTimeout()
+	var cfgWatch cfgChangeWatch
 
 	for {
 		if ctx.Err() != nil {
 			_ = r.sendCMD(conn, cmdDataOff)
+			r.endSession()
 			return nil
 		}
 
+		if cfgWatch.shouldRequest() {
+			log.Printf("[%s] STAT bit 13 set but no CFG yet — requesting CFG-2", r.cfg.Name)
+			if err := r.sendCMD(conn, cmdSendCfg2); err != nil {
+				log.Printf("[%s] request CFG-2 failed: %v", r.cfg.Name, err)
+			} else {
+				cfgWatch.markRequested()
+				monitoring.RecordConversation(r.cfg.Name, "PDC", "PMU", "cfg", "info", "requested CFG-2 after STAT bit 13")
+			}
+		}
+
+		readTimeout := r.streamIdleTimeout()
 		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			r.endSession()
 			return fmt.Errorf("set read deadline: %w", err)
 		}
 
 		tf, err := readFrameTimed(conn)
 		completeAt := time.Now()
 		if err != nil {
+			r.endSession()
 			if strings.Contains(err.Error(), "CRC mismatch") {
 				monitoring.NoteFrameCRCFail(r.cfg.Name, err.Error(), nil)
 			}
-			if strings.Contains(err.Error(), "EOF") {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				return fmt.Errorf("liveness timeout (%s) — no DATA; leaving live set: %w", readTimeout, err)
+			}
+			if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "EOF") {
 				return fmt.Errorf("read data frame: %w (peer closed — close other PDC / Connection Tester DATA client)", err)
 			}
 			return fmt.Errorf("read data frame: %w", err)
 		}
 
-		if frameType(tf.raw) == frameTypeData {
+		switch frameType(tf.raw) {
+		case frameTypeCfg2:
+			if r.applyMidstreamCFG2(tf.raw) {
+				cfgWatch.clear()
+			}
+		case frameTypeData:
 			if !lastComplete.IsZero() {
 				monitoring.ObserveStage(r.cfg.Name, monitoring.StageFrameGap, completeAt.Sub(lastComplete))
 			} else {
@@ -825,8 +967,16 @@ func (r *Receiver) connectTCP(ctx context.Context) error {
 			if dataFrames%50 == 0 {
 				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "stream", "ok", fmt.Sprintf("received %d data frames", dataFrames))
 			}
+			if dataSTATHasCFGChange(tf.raw) && cfgWatch.noteBit13() {
+				log.Printf("[%s] STAT bit 13 (CFG change) — waiting up to %s for CFG-2", r.cfg.Name, cfgChangeGrace)
+				monitoring.RecordConversation(r.cfg.Name, "PMU", "PDC", "cfg", "warn", "STAT bit 13 set; awaiting CFG-2")
+			}
 			payload := append([]byte(nil), tf.raw...)
 			r.dispatchDataFrame(payload, completeAt)
+		default:
+			if dataFrames < 3 {
+				log.Printf("[%s] stream skip %s", r.cfg.Name, frameTypeName(frameType(tf.raw)))
+			}
 		}
 	}
 }
@@ -1039,6 +1189,9 @@ func (r *Receiver) handshakeCFGUDP(ctx context.Context, pc *net.UDPConn, timeout
 	} else {
 		parser.SetProfile(r.cfg.Name, profile)
 		log.Printf("[%s] registered CFG2 profile: station=%q rate=%d", r.cfg.Name, profile.Station, profile.DataRate)
+		if r.onProfileUpdate != nil {
+			r.onProfileUpdate(r.cfg.Name)
+		}
 	}
 	return nil
 }

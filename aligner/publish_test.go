@@ -61,14 +61,14 @@ func TestPublisherEmitsCompletePartialAndGap(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if got[0].ts != 1000 || got[0].nPresent != 2 || got[0].reason != "complete" {
-		t.Fatalf("batch0=%+v want ts=1000 complete both", got[0])
+	if got[0].ts != us(1000) || got[0].nPresent != 2 || got[0].reason != "complete" {
+		t.Fatalf("batch0=%+v want ts=%d complete both", got[0], us(1000))
 	}
-	if got[1].ts != 1050 || got[1].nPresent != 1 || got[1].nMissing != 1 {
-		t.Fatalf("batch1=%+v want ts=1050 partial", got[1])
+	if got[1].ts != us(1050) || got[1].nPresent != 1 || got[1].nMissing != 1 {
+		t.Fatalf("batch1=%+v want ts=%d partial", got[1], us(1050))
 	}
-	if got[2].ts != 1100 || got[2].nPresent != 2 {
-		t.Fatalf("batch2=%+v want ts=1100 both", got[2])
+	if got[2].ts != us(1100) || got[2].nPresent != 2 {
+		t.Fatalf("batch2=%+v want ts=%d both", got[2], us(1100))
 	}
 }
 
@@ -114,12 +114,12 @@ func TestPublisherResetOnSetExpected(t *testing.T) {
 	defer mu.Unlock()
 	found3000 := false
 	for _, ts := range ticks {
-		if ts == 3000 {
+		if ts == us(3000) {
 			found3000 = true
 		}
 	}
 	if !found3000 {
-		t.Fatalf("expected re-anchor at 3000, ticks=%v", ticks)
+		t.Fatalf("expected re-anchor at %d, ticks=%v", us(3000), ticks)
 	}
 }
 
@@ -151,7 +151,7 @@ func TestPublisherDoesNotRaceAheadOfSlowPMU(t *testing.T) {
 		last = ticks[len(ticks)-1]
 	}
 	mu.Unlock()
-	if last > 1000 {
+	if last > us(1000) {
 		t.Fatalf("publisher raced to ts=%d with b still at 1000; ticks=%v", last, ticks)
 	}
 
@@ -161,7 +161,7 @@ func TestPublisherDoesNotRaceAheadOfSlowPMU(t *testing.T) {
 		mu.Lock()
 		seen1050 := false
 		for _, ts := range ticks {
-			if ts == 1050 {
+			if ts == us(1050) {
 				seen1050 = true
 			}
 		}
@@ -175,12 +175,9 @@ func TestPublisherDoesNotRaceAheadOfSlowPMU(t *testing.T) {
 	cancel()
 	mu.Lock()
 	defer mu.Unlock()
-	t.Fatalf("expected tick 1050 after b caught up, ticks=%v", ticks)
+	t.Fatalf("expected tick %d after b caught up, ticks=%v", us(1050), ticks)
 }
 
-// 25 fps-style samples: …159, …200, …240 on a 40 ms ruler.
-// Exact matching emitted empty "gap" rows (~54% complete). Nearest+skip should
-// publish only real samples as complete.
 func TestPublisherOffGridSinglePMU(t *testing.T) {
 	bank := NewBank(50)
 	bank.SetExpected([]string{"t"})
@@ -239,5 +236,153 @@ func TestPublisherOffGridSinglePMU(t *testing.T) {
 		if b.nPresent != 1 || b.reason != "complete" {
 			t.Fatalf("emit[%d]=%+v want complete with 1 present", i, b)
 		}
+	}
+}
+
+func TestPublisherContinuesAfterLivePMURemoved(t *testing.T) {
+	bank := NewBank(50)
+	bank.SetExpected([]string{"a", "b", "c"})
+
+	var mu sync.Mutex
+	var completeAfterRemove int
+	var sawPartialForC bool
+	removed := false
+
+	pub := NewPublisher(bank, 50, 0, func(ts int64, present map[string]parser.Reading, missing []string, complete bool, reason string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !removed {
+			return
+		}
+		if complete && len(present) == 2 && len(missing) == 0 {
+			completeAfterRemove++
+		}
+		for _, m := range missing {
+			if m == "c" {
+				sawPartialForC = true
+			}
+		}
+		_ = ts
+		_ = reason
+	})
+
+	bank.Ingest(makeReading("a", 1000))
+	bank.Ingest(makeReading("b", 1000))
+	bank.Ingest(makeReading("c", 1000))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pub.Run(ctx)
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	bank.RemoveExpected("c")
+	mu.Lock()
+	removed = true
+	mu.Unlock()
+
+	for ts := int64(1050); ts <= 1300; ts += 50 {
+		bank.Ingest(makeReading("a", ts))
+		bank.Ingest(makeReading("b", ts))
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := completeAfterRemove
+		mu.Unlock()
+		if n >= 3 {
+			cancel()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if completeAfterRemove < 3 {
+		t.Fatalf("want >=3 complete A+B ticks after C left live set, got %d (sawPartialForC=%v)", completeAfterRemove, sawPartialForC)
+	}
+	if sawPartialForC {
+		t.Fatal("C should not appear as missing after RemoveExpected — it left the live set")
+	}
+}
+
+func TestDerivePeriodUsSixtyFPS(t *testing.T) {
+	parser.SetProfile("s60", parser.Profile{DataRate: 60})
+	t.Cleanup(func() { parser.SetProfile("s60", parser.Profile{}) })
+
+	got := DerivePeriodUs([]string{"s60"}, DefaultPeriodUs)
+	want := int64(16667) // Round(1e6/60)
+	if got != want {
+		t.Fatalf("60fps period=%dµs want %d (not 17000)", got, want)
+	}
+	// Old ms rounding would be 17 ms = 17000 µs — must not regress.
+	if got == 17_000 {
+		t.Fatal("still using millisecond rounding")
+	}
+}
+
+func TestPublisherSixtyFPSEmitsNearInputRate(t *testing.T) {
+	parser.SetProfile("t60", parser.Profile{DataRate: 60})
+	t.Cleanup(func() { parser.SetProfile("t60", parser.Profile{}) })
+
+	bank := NewBank(200)
+	bank.SetExpected([]string{"t60"})
+
+	var mu sync.Mutex
+	var emits int
+	pub := NewPublisher(bank, DerivePeriodUs([]string{"t60"}, DefaultPeriodUs), 0,
+		func(ts int64, present map[string]parser.Reading, _ []string, complete bool, reason string) {
+			mu.Lock()
+			if complete && reason == "complete" && len(present) == 1 {
+				emits++
+			}
+			mu.Unlock()
+			_ = ts
+		})
+
+	// One second of 60 fps stamps on the µs grid (offset away from 0 — key 0 is ignored).
+	const n = 60
+	const base int64 = 1_000_000_000_000 // 1e12 µs
+	for i := 0; i < n; i++ {
+		usec := base + int64(float64(i)*1_000_000.0/60.0+0.5)
+		bank.Ingest(parser.Reading{
+			PMUName:   "t60",
+			Timestamp: time.UnixMicro(usec).UTC(),
+			Frequency: 50,
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pub.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		e := emits
+		mu.Unlock()
+		if e >= n {
+			cancel()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Old 17 ms grid lost ~2%. µs grid should keep essentially all.
+	if emits < n-1 {
+		t.Fatalf("60fps complete emits=%d want >= %d (µs grid)", emits, n-1)
 	}
 }

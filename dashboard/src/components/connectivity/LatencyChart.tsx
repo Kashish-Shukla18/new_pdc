@@ -1,7 +1,6 @@
 import { memo, useMemo } from 'react'
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -10,10 +9,10 @@ import {
   YAxis,
 } from 'recharts'
 import type { RttHistoryPoint, RttStream } from '../../types/connectivity'
+import { ExternalChartLegend, useSeriesVisibility } from '../../utils/chartLegend'
 import {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
-  CHART_LEGEND_STYLE,
   ChartSeriesTooltip,
 } from '../../utils/chartTooltip'
 import { formatTS, round } from '../../utils/format'
@@ -24,6 +23,9 @@ type Props = {
 }
 
 export const LatencyChart = memo(function LatencyChart({ history, streams }: Props) {
+  const seriesKeys = useMemo(() => streams.map((s) => s.key), [streams])
+  const { hidden, toggle, isHidden } = useSeriesVisibility(seriesKeys)
+
   const filled = useMemo(() => {
     if (!history.length || !streams.length) return history
     const last = new Map<string, number>()
@@ -62,14 +64,14 @@ export const LatencyChart = memo(function LatencyChart({ history, streams }: Pro
         <div>
           <h3>Stream latency</h3>
           <p className="panel-sub">
-            How long after a frame arrives at the PDC until the dashboard records it · top{' '}
+            How long after a frame arrives at the PDC until the dashboard records it ·{' '}
             {streams.length} streams · {filled.length} samples (~1/s)
           </p>
         </div>
       </div>
       <div className="chart-wrap small">
-        <ResponsiveContainer width="99%" height={340} minWidth={1} minHeight={340}>
-          <LineChart data={filled} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
+        <ResponsiveContainer width="99%" height="100%" minWidth={1} minHeight={1}>
+          <LineChart data={filled} margin={{ top: 8, right: 12, left: 4, bottom: 4 }}>
             <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
             <XAxis
               dataKey="ts"
@@ -98,23 +100,29 @@ export const LatencyChart = memo(function LatencyChart({ history, streams }: Pro
                 />
               )}
             />
-            <Legend wrapperStyle={CHART_LEGEND_STYLE} />
-            {streams.map((stream) => (
-              <Line
-                key={stream.key}
-                type="monotone"
-                dataKey={stream.key}
-                name={stream.name}
-                stroke={stream.color}
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-                connectNulls
-              />
-            ))}
+            {streams.map((stream) =>
+              isHidden(stream.key) ? null : (
+                <Line
+                  key={stream.key}
+                  type="monotone"
+                  dataKey={stream.key}
+                  name={stream.name}
+                  stroke={stream.color}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                  connectNulls
+                />
+              ),
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
+      <ExternalChartLegend
+        items={streams.map((s) => ({ key: s.key, name: s.name, color: s.color }))}
+        hidden={hidden}
+        onToggle={toggle}
+      />
     </div>
   )
 })

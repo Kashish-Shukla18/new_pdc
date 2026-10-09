@@ -1,47 +1,29 @@
-# docker-compose.yaml – optional data services for the PDC
+# Usage:
+#   set POSTGRES_PASSWORD in the environment (required), then:
+#   docker compose up -d
 #
-# Required for the live app today: timescaledb (PMU address book only).
-
-version: '3.8'
+# On the same host, PDC .env should use:
+#   POSTGRES_DSN=postgres://pdc:<password>@127.0.0.1:5432/pdc?sslmode=disable
 
 services:
-
-  # ── POSTGRES + TIMESCALEDB (PMU address book; history table parked) ────────
   timescaledb:
     image: timescale/timescaledb:latest-pg16
-    ports:
-      - "5433:5432"
+    restart: unless-stopped
     environment:
       POSTGRES_USER: pdc
-      POSTGRES_PASSWORD: pdc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: pdc
+    # Bind only to localhost — not reachable from the internet
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - timescaledb-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pdc -d pdc"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 10
-
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    ports:
-      - "5050:80"
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@example.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-
-  # ── PROMETHEUS (optional app monitoring) ───────────────────────────────────
-  prometheus:
-    image: prom/prometheus:v2.47.0
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
   timescaledb-data:

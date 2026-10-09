@@ -23,7 +23,7 @@ export function EditDevicePage() {
           </button>
           <h2 className="devices-title">Edit Device — {editingPMU.name}</h2>
           <p className="devices-subtitle">
-            Update connection settings for this PMU. Changes are saved to the registry and the receiver is restarted.
+            Update connection settings. The connection id is the IP and port; after connect, the CFG-2 station name is shown as the label.
           </p>
         </div>
       </div>
@@ -32,15 +32,20 @@ export function EditDevicePage() {
         <div className="panel-head">
           <div>
             <h3>Device configuration</h3>
-            <p className="panel-sub">Device name cannot be changed — register a new PMU to use a different ID.</p>
+            <p className="panel-sub">Changing IP or port creates a new endpoint identity and retires the old one.</p>
           </div>
         </div>
 
         <form onSubmit={handleUpdatePMU} className="device-edit-form">
           <div className="form-grid">
             <label className="field field-wide">
-              <span>PMU name</span>
+              <span>Connection id</span>
               <input value={editPMU.name} readOnly disabled />
+            </label>
+
+            <label className="field field-wide">
+              <span>Station (from device)</span>
+              <input value={editPMU.station || editingPMU.cfg?.station || '— not learned yet —'} readOnly disabled />
             </label>
 
             <label className="field">
