@@ -1,9 +1,10 @@
-# Usage:
-#   set POSTGRES_PASSWORD in the environment (required), then:
-#   docker compose up -d
+# Timescale for PDC (server / EC2)
 #
-# On the same host, PDC .env should use:
-#   POSTGRES_DSN=postgres://pdc:<password>@127.0.0.1:5432/pdc?sslmode=disable
+# Usage:
+# Set the DB password in the environment, then: docker compose up -d
+# Local laptop: use docker-compose.local.yaml instead.
+#
+# App DSN on this host should target 127.0.0.1:5432.
 
 services:
   timescaledb:
@@ -11,9 +12,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pdc
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?missing}
       POSTGRES_DB: pdc
-    # Bind only to localhost — not reachable from the internet
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
