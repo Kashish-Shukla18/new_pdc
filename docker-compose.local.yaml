@@ -1,0 +1,50 @@
+# docker-compose.local.yaml – local laptop data services for the PDC
+#
+# Required for the live app today: timescaledb (address book + history schema).
+#
+# Usage:
+#   docker compose -f docker-compose.local.yaml up -d timescaledb
+
+version: '3.8'
+
+services:
+
+  # ── POSTGRES + TIMESCALEDB (address book + history tables) ─────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: pdc
+      POSTGRES_PASSWORD: pdc
+      POSTGRES_DB: pdc
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - timescaledb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdc -d pdc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  # ── PROMETHEUS (optional app monitoring) ───────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+volumes:
+  timescaledb-data:

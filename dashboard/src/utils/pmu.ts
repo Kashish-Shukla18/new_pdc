@@ -6,9 +6,47 @@ export function pmuKey(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
 }
 
+/** Stable endpoint identity matching the Go config.Identity() helper. */
+export function endpointIdentity(cfg: Pick<PMUConfig, 'ip' | 'port' | 'protocol'>): string {
+  const ip = (cfg.ip || '').trim()
+  const port = cfg.port || 0
+  if (!ip || port <= 0) return ''
+  const proto = (cfg.protocol || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp'
+  return proto === 'udp' ? `udp:${ip}:${port}` : `${ip}:${port}`
+}
+
+/** Prefer CFG station, then stored station, then endpoint id. */
+export function displayName(pmu: { name: string; station?: string; cfg?: { station?: string } }): string {
+  const fromCfg = pmu.cfg?.station?.trim()
+  if (fromCfg) return fromCfg
+  const stored = pmu.station?.trim()
+  if (stored) return stored
+  return pmu.name
+}
+
+/** Port from endpoint id (`ip:port` or `udp:ip:port`). */
+export function endpointPort(name: string): string {
+  const i = name.lastIndexOf(':')
+  if (i < 0) return ''
+  const port = name.slice(i + 1)
+  return /^\d+$/.test(port) ? port : ''
+}
+
+/**
+ * Chart / legend label: station name with port so same-named stations stay distinct.
+ * Example: `IITK-PMU (:4712)`. Falls back to endpoint when no station is known.
+ */
+export function chartLabel(pmu: { name: string; station?: string; cfg?: { station?: string } }): string {
+  const station = displayName(pmu)
+  const port = endpointPort(pmu.name)
+  if (!port) return station
+  if (station === pmu.name || station.endsWith(`:${port}`)) return station
+  return `${station} (:${port})`
+}
+
 export function metaForDB(name: string, config?: PMUConfig): PMUMeta {
   return {
-    substation: config?.name || name,
+    substation: config?.station?.trim() || config?.name || name,
     region: config?.region || FIELD_PMU_REGION,
     state: '-',
     voltage: '-',
@@ -134,6 +172,58 @@ export function cycleLatencyOf(pmu: LivePMUState): CycleLatency | null {
     pipelineRest: rest,
     total: wait + pipeline,
     fpsHint: wait > 0 ? 1000 / wait : pmu.approxFps || 0,
+  }
+}
+
+/**
+ * Dynamic relative delay = (maxRecv − minRecv) + avg(parse) over the same online streams.
+ *
+ * Parse choice: fleet average of those streams' latest parse hops (stable; matches E2E panel).
+ * Alternatives considered: max(parse) = jumpy worst-case; parse of latest-only = incomplete.
+ */
+export type DynamicRelativeDelay = {
+  spreadMs: number
+  parseAvgMs: number
+  totalMs: number
+  earliestName: string
+  latestName: string
+  count: number
+}
+
+export function dynamicRelativeDelay(pmus: LivePMUState[]): DynamicRelativeDelay | null {
+  const entries: { name: string; t: number }[] = []
+  let parseSum = 0
+  let parseN = 0
+
+  for (const pmu of pmus) {
+    if (!pmu.connected) continue
+    const raw = pmu.lastReceivedAt || pmu.lastFrameTime
+    if (!raw) continue
+    const t = Date.parse(raw)
+    if (!Number.isFinite(t)) continue
+    entries.push({ name: pmu.name, t })
+    const parse = hopMs(pmu, 'parse')
+    if (parse != null) {
+      parseSum += parse
+      parseN += 1
+    }
+  }
+
+  if (entries.length < 2) return null
+
+  // Sort by time, then name — on ties (0 ms spread) earliest/latest are still two streams.
+  entries.sort((a, b) => a.t - b.t || a.name.localeCompare(b.name))
+  const earliest = entries[0]
+  const latest = entries[entries.length - 1]
+  const spreadMs = Math.max(0, latest.t - earliest.t)
+  const parseAvgMs = parseN > 0 ? parseSum / parseN : 0
+  return {
+    spreadMs,
+    parseAvgMs,
+    totalMs: spreadMs + parseAvgMs,
+    earliestName: earliest.name,
+    latestName: latest.name,
+    count: entries.length,
   }
 }
 

@@ -122,6 +122,7 @@ type PMUState struct {
 	ConnectionText string             `json:"connectionText"`
 	LastEventTime  time.Time          `json:"lastEventTime"`
 	LastFrameTime  time.Time          `json:"lastFrameTime"`
+	LastReceivedAt time.Time          `json:"lastReceivedAt,omitempty"` // TCP receive time of latest DATA frame
 	LastHandshake  time.Time          `json:"lastHandshake"`
 	LastError      string             `json:"lastError"`
 	TotalFrames    int64              `json:"totalFrames"`
@@ -138,6 +139,9 @@ type PMUState struct {
 	FnomHz         int                `json:"fnomHz"`
 	StatDataError  bool               `json:"statDataError"`
 	LastHops       map[string]float64 `json:"lastHops,omitempty"`
+	// TCP kernel receive queue (bytes waiting to be Read). Only set for TCP DATA streams.
+	TCPUnreadBytes *int `json:"tcpUnreadBytes,omitempty"`
+	TCPRecvBufMax  *int `json:"tcpRecvBufMax,omitempty"`
 }
 
 // AlignedPoint is one PMU's contribution inside a locked aligned dashboard batch.
@@ -172,18 +176,18 @@ type AlignedBatch struct {
 
 // AlignerStatus is the live auto-tune config + emit counters for testing.
 type AlignerStatus struct {
-	N           int     `json:"n"`
-	FPS         float64 `json:"fps"`
-	PeriodMs    float64 `json:"periodMs"`
-	WaitMs      float64 `json:"waitMs"`
-	MaxOpen     int     `json:"maxOpen"`
-	FreshMs     float64 `json:"freshMs"`
+	N           int      `json:"n"`
+	FPS         float64  `json:"fps"`
+	PeriodMs    float64  `json:"periodMs"`
+	WaitMs      float64  `json:"waitMs"`
+	MaxOpen     int      `json:"maxOpen"`
+	FreshMs     float64  `json:"freshMs"`
 	Expected    []string `json:"expected,omitempty"`
-	Emitted     int64   `json:"emitted"`
-	Complete    int64   `json:"complete"`
-	Timeout     int64   `json:"timeout"`
-	Cap         int64   `json:"cap"`
-	CompletePct float64 `json:"completePct"`
+	Emitted     int64    `json:"emitted"`
+	Complete    int64    `json:"complete"`
+	Timeout     int64    `json:"timeout"`
+	Cap         int64    `json:"cap"`
+	CompletePct float64  `json:"completePct"`
 }
 
 type DashboardState struct {
@@ -199,6 +203,7 @@ type pmuRuntime struct {
 	name           string
 	lastEventTime  time.Time
 	lastFrameTime  time.Time
+	lastReceivedAt time.Time // Trace.ReceivedAt from latest DATA frame
 	lastHandshake  time.Time
 	lastError      string
 	totalFrames    int64
@@ -222,7 +227,7 @@ const maxConversationEvents = 200
 const maxTrendPoints = 180 // ~18s at 10 Hz dashboard sample rate
 const dashboardTrendExport = 120
 const trendMinInterval = 100 * time.Millisecond // keep charts smooth without 50–60 Hz SVG load
-const maxAlignedBatches = 180                    // ~9s at 20 FPS aligned slots
+const maxAlignedBatches = 180                   // ~9s at 20 FPS aligned slots
 const alignedBatchExport = 120
 const alignerSummaryEvery = 5 * time.Second // rate-limit [aligner] summary logs
 
@@ -233,20 +238,19 @@ func trendPhasorMags(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
 	vc = float64(r.VC.Magnitude)
 	ia = float64(r.IA.Magnitude)
 	for _, p := range r.Phasors {
-		n := strings.ToUpper(strings.TrimSpace(p.Name))
 		mag := float64(p.Phasor.Magnitude)
-		switch {
-		case n == "VA" || strings.HasSuffix(n, "AV"):
+		switch parser.ClassifyPhasorName(p.Name) {
+		case "va":
 			va = mag
-		case n == "VB" || strings.HasSuffix(n, "BV"):
+		case "vb":
 			vb = mag
-		case n == "VC" || strings.HasSuffix(n, "CV"):
+		case "vc":
 			vc = mag
-		case n == "IA" || strings.HasSuffix(n, "AI"):
+		case "ia":
 			ia = mag
-		case n == "IB" || strings.HasSuffix(n, "BI"):
+		case "ib":
 			ib = mag
-		case n == "IC" || strings.HasSuffix(n, "CI"):
+		case "ic":
 			ic = mag
 		}
 	}
@@ -260,20 +264,19 @@ func trendPhasorAngles(r parser.Reading) (va, vb, vc, ia, ib, ic float64) {
 	vc = float64(r.VC.PhaseDegrees)
 	ia = float64(r.IA.PhaseDegrees)
 	for _, p := range r.Phasors {
-		n := strings.ToUpper(strings.TrimSpace(p.Name))
 		deg := float64(p.Phasor.PhaseDegrees)
-		switch {
-		case n == "VA" || strings.HasSuffix(n, "AV"):
+		switch parser.ClassifyPhasorName(p.Name) {
+		case "va":
 			va = deg
-		case n == "VB" || strings.HasSuffix(n, "BV"):
+		case "vb":
 			vb = deg
-		case n == "VC" || strings.HasSuffix(n, "CV"):
+		case "vc":
 			vc = deg
-		case n == "IA" || strings.HasSuffix(n, "AI"):
+		case "ia":
 			ia = deg
-		case n == "IB" || strings.HasSuffix(n, "BI"):
+		case "ib":
 			ib = deg
-		case n == "IC" || strings.HasSuffix(n, "CI"):
+		case "ic":
 			ic = deg
 		}
 	}
@@ -419,20 +422,31 @@ func SetAlignerTune(n int, fps float64, period, wait, fresh time.Duration, maxOp
 	conversationBus.alignLastLog = time.Time{}
 }
 
+// SetAlignerBufferCapacity updates the reported per-PMU buffer capacity
+// without resetting emit counters (used by live UI/API capacity changes).
+func SetAlignerBufferCapacity(n int) {
+	conversationBus.mu.Lock()
+	defer conversationBus.mu.Unlock()
+	conversationBus.alignMaxOpen = n
+}
+
 // RecordAlignedFrame stores one locked dashboard alignment batch for analytics charts.
-// Inventory / FPS still come from RecordReading on the raw path.
-func RecordAlignedFrame(tsMs int64, present map[string]parser.Reading, missing []string, complete bool, reason string) {
+// tsUs is the aligner tick (Unix microseconds); we store epoch ms for the UI Date() axis.
+func RecordAlignedFrame(tsUs int64, present map[string]parser.Reading, missing []string, complete bool, reason string) {
+	tsMs := tsUs / 1000
 	points := make(map[string]AlignedPoint, len(present))
 	for name, r := range present {
-		fnom := 0.0
-		if prof, ok := parser.GetProfile(name); ok && prof.FnomHz > 0 {
-			fnom = float64(prof.FnomHz)
+		fnom := float64(r.FnomHz)
+		if fnom <= 0 {
+			if prof, ok := parser.GetProfile(name); ok && prof.FnomHz > 0 {
+				fnom = float64(prof.FnomHz)
+			}
 		}
 		va, vb, vc, ia, ib, ic := trendPhasorMags(r)
 		vaA, vbA, vcA, iaA, ibA, icA := trendPhasorAngles(r)
 		freq := float64(r.Frequency)
 		freqDev := float64(r.FrequencyDeviation)
-		if fnom > 0 {
+		if fnom > 0 && r.FnomHz == 0 {
 			freqDev = freq - fnom
 		}
 		analogs := make(map[string]float64, len(r.Analogs))
@@ -530,12 +544,19 @@ func recordReadingSync(r parser.Reading) {
 	prevFrame := st.lastFrameTime
 	st.lastEventTime = now
 	st.lastFrameTime = now
+	if r.Trace.ReceivedAtUnixNano > 0 {
+		st.lastReceivedAt = time.Unix(0, r.Trace.ReceivedAtUnixNano).UTC()
+	} else {
+		st.lastReceivedAt = now
+	}
 	st.totalFrames++
 	st.statDataError = r.StatDetail.DataError
 
-	fnom := 0
-	if prof, ok := parser.GetProfile(r.PMUName); ok && prof.FnomHz > 0 {
-		fnom = prof.FnomHz
+	fnom := r.FnomHz
+	if fnom <= 0 {
+		if prof, ok := parser.GetProfile(r.PMUName); ok && prof.FnomHz > 0 {
+			fnom = prof.FnomHz
+		}
 	}
 	st.fnomHz = fnom
 
@@ -545,7 +566,7 @@ func recordReadingSync(r parser.Reading) {
 	}
 
 	freqDev := float64(r.FrequencyDeviation)
-	if fnom > 0 {
+	if r.FnomHz == 0 && fnom > 0 {
 		freqDev = float64(r.Frequency) - float64(fnom)
 	}
 
@@ -795,6 +816,7 @@ func registerConversationHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/conversation/state", handleConversationState)
 	mux.HandleFunc("/conversation/latency", handleConversationLatency)
 	mux.HandleFunc("/conversation/frame-diag", handleConversationFrameDiag)
+	registerAlignedSampleHandlers(mux) // post-align sheet (charts untouched)
 	// aligner-buffers is registered from main (needs the live Bank)
 }
 
@@ -810,7 +832,8 @@ func handleConversationPage(w http.ResponseWriter, _ *http.Request) {
 		"  /conversation/recent      recent events, one-shot",
 		"  /conversation/latency     pipeline stage latency",
 		"  /conversation/frame-diag  per-stage frame accounting",
-		"  /conversation/aligner-buffers  time-align buffers (built separately)",
+		"  /conversation/aligner-buffers     pre-align buffer dump (built separately)",
+		"  /conversation/aligned-samples/sheets  post-align chart ticks (HTML)",
 		"  /metrics                  Prometheus metrics",
 	}, "\n")+"\n")
 }
@@ -943,6 +966,7 @@ func snapshotDashboard() DashboardState {
 			ConnectionText: connText,
 			LastEventTime:  st.lastEventTime,
 			LastFrameTime:  st.lastFrameTime,
+			LastReceivedAt: st.lastReceivedAt,
 			LastHandshake:  st.lastHandshake,
 			LastError:      st.lastError,
 			TotalFrames:    st.totalFrames,
@@ -965,6 +989,12 @@ func snapshotDashboard() DashboardState {
 	for i := range pmus {
 		if h := hops[pmus[i].Name]; len(h) > 0 {
 			pmus[i].LastHops = h
+		}
+		// Peek OS TCP Rx queue (bytes not yet Read). Skip UDP DATA paths.
+		if snap := PeekTCPUnread(pmus[i].Name); snap.OK {
+			u, m := snap.UnreadBytes, snap.RecvBufMax
+			pmus[i].TCPUnreadBytes = &u
+			pmus[i].TCPRecvBufMax = &m
 		}
 		if !pmus[i].Connected {
 			continue

@@ -35,7 +35,7 @@ function statFlags(detail: {
 
 export function DataFramesPage() {
   const {
-    pmus,
+    enabledPmus: pmus,
     dashboard,
     selectedFramePMU,
     selectedFramePMUName,

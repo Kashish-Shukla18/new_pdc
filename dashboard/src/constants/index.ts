@@ -22,6 +22,7 @@ export const defaultNewPMU: NewPMUForm = {
   protocol: 'tcp',
   lat: 0,
   lon: 0,
+  station: '',
 }
 
 export const HELP_SECTIONS = [

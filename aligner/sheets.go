@@ -17,15 +17,17 @@ import (
 
 // fixedSheetHeaders are the same columns on every PMU sheet.
 // Extra CFG channel names are appended after these.
+// Plot measurement time with ts_ms / time_utc / timestamp — not wire_soc
+// (wire_soc is the raw C37.118 SOC integer; after IST→UTC correction it is not UTC epoch).
 var fixedSheetHeaders = []string{
 	"ts_ms", "time_utc", "pmu_name", "idcode",
-	"soc", "fracsec_raw", "fracsec_count", "timestamp",
+	"wire_soc", "fracsec_raw", "fracsec_count", "timestamp",
 	"received_at_ns", "received_at_utc",
 	"checksum", "checksum_valid", "frame_size", "frame_bytes",
 	"stat_raw", "data_error_code", "data_error", "cfg_change", "trigger",
 	"sort_by_arrival", "sync_unlocked", "pmu_time_quality", "unlocked_duration", "trigger_reason",
 	"msg_tq_raw", "leap_second_direction", "leap_second_occurred", "leap_second_pending", "time_quality_code",
-	"frequency_hz", "frequency_deviation_hz", "rocof_hz_per_sec",
+	"fnom_hz", "frequency_hz", "frequency_deviation_hz", "rocof_hz_per_sec",
 	"va_real", "va_imag", "va_mag", "va_angle_deg",
 	"vb_real", "vb_imag", "vb_mag", "vb_angle_deg",
 	"vc_real", "vc_imag", "vc_mag", "vc_angle_deg",
@@ -120,6 +122,7 @@ func sheetRow(ts int64, timeUTC string, r parser.Reading, phasorNames, analogNam
 		strconv.FormatBool(r.MsgTQ.LeapSecondOccurred),
 		strconv.FormatBool(r.MsgTQ.LeapSecondPending),
 		strconv.FormatUint(uint64(r.MsgTQ.TimeQualityCode), 10),
+		strconv.Itoa(r.FnomHz),
 		f32(r.Frequency),
 		f32(r.FrequencyDeviation),
 		f32(r.ROCOF),

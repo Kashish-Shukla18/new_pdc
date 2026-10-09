@@ -3,12 +3,13 @@
 //  2. Bank    — per-PMU timestamp buffers (new time-align, built step by step)
 //
 // Why a time-indexed map (not a plain circular ring of arrivals)?
-//   The publish plan needs: "for timestamp T, does this PMU have data?"
-//   A map[timestamp] → reading answers that in one lookup.
-//   A circular buffer of "last 50 arrivals" would force a scan every time,
-//   and arrivals can repeat or arrive slightly out of order.
-//   We still cap at N slots and drop the oldest timestamp — same memory idea,
-//   just keyed by time so the algorithm matches the plan.
+//
+//	The publish plan needs: "for timestamp T, does this PMU have data?"
+//	A map[timestamp] → reading answers that in one lookup.
+//	A circular buffer of "last 50 arrivals" would force a scan every time,
+//	and arrivals can repeat or arrive slightly out of order.
+//	We still cap at N slots and drop the oldest timestamp — same memory idea,
+//	just keyed by time so the algorithm matches the plan.
 package aligner
 
 import (
@@ -50,6 +51,11 @@ func (c *Checker) Validate(r parser.Reading) error {
 		return fmt.Errorf("bad status flag: %d", q)
 	}
 
+	// STAT bit 10: 1 = PMU not synchronized to a time source.
+	if (r.Stat>>10)&1 == 1 || r.StatDetail.PMUSyncStatus {
+		return fmt.Errorf("PMU unsynchronized (STAT bit 10)")
+	}
+
 	f := float64(r.Frequency)
 	if math.IsNaN(f) || f < 45 || f > 65 {
 		return fmt.Errorf("frequency out of range: %.3f", r.Frequency)
@@ -59,12 +65,11 @@ func (c *Checker) Validate(r parser.Reading) error {
 }
 
 // TimestampKey is the aligner buffer / publish key for one reading.
-// It is exactly the C37.118 measurement instant from the parsed data frame
-// (SOC + FRACSEC → Reading.Timestamp). No receive-time remapping: streams
-// only share a tick when their device stamps agree (within the publish window).
+// Unix microseconds of the C37.118 measurement instant (SOC+FRACSEC).
+// Microseconds (not ms) so 60 fps can use a ~16667 µs ruler instead of 17 ms.
 func TimestampKey(r parser.Reading) int64 {
 	if r.Timestamp.IsZero() {
 		return 0
 	}
-	return r.Timestamp.UTC().UnixMilli()
+	return r.Timestamp.UTC().UnixMicro()
 }

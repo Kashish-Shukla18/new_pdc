@@ -1,6 +1,7 @@
 import { Pencil, X } from 'lucide-react'
 import { useDashboardContext } from '../../context/DashboardContext'
 import { ageText, round } from '../../utils/format'
+import { displayName } from '../../utils/pmu'
 
 export function PMUDetailDrawer() {
   const { drawerPMU, setDrawerPMUName, openEditPMU } = useDashboardContext()
@@ -11,13 +12,14 @@ export function PMUDetailDrawer() {
     <div className="drawer-overlay" onClick={() => setDrawerPMUName('')}>
       <aside className="drawer-react" onClick={(event) => event.stopPropagation()}>
         <div className="drawer-head-react">
-          <h3>{drawerPMU.name}</h3>
+          <h3>{displayName(drawerPMU)}</h3>
           <button type="button" onClick={() => setDrawerPMUName('')}>
             <X size={18} />
           </button>
         </div>
         <div className="drawer-body-react">
-          <p><strong>Substation:</strong> {drawerPMU.meta.substation}, {drawerPMU.meta.state}</p>
+          <p><strong>Endpoint:</strong> <code>{drawerPMU.name}</code></p>
+          <p><strong>Station:</strong> {drawerPMU.cfg?.station || drawerPMU.meta.substation || '—'}</p>
           <p><strong>Region:</strong> {drawerPMU.meta.region}</p>
           <p><strong>Voltage:</strong> {drawerPMU.meta.voltage}</p>
           <p><strong>Vendor:</strong> {drawerPMU.meta.vendor}</p>

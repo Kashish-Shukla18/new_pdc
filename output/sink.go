@@ -1,71 +1,73 @@
-// sink.go — PARKED storage writer (Postgres/Timescale history only).
+// sink.go — thin adapter over the Timescale history writer.
 //
-// Not wired into main.go today. When you turn storage back on, NewSinkFromEnv
-// enqueues each reading for TimescaleDB history.
+// Not wired into the live HandleFrame path yet (phases 3–4). Construct with
+// NewSinkFromEnv when ENABLE_HISTORY=true.
 package output
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"os"
-	"strings"
 
 	"pdc/output/postgres"
 	"pdc/parser"
 )
 
-var errSinkDisabled = errors.New("sink disabled")
-
-// Sink stores each validated reading to Postgres/TimescaleDB (history).
-// Writes are buffered and flushed off the ingest path.
+// Sink stores readings/events to Postgres/TimescaleDB history.
 type Sink struct {
-	history *postgres.History
+	w *postgres.Writer
 }
 
-func env(key, fallback string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	return v
-}
-
-// NewSinkFromEnv initialises Sink clients using environment variables / docker-compose defaults.
+// NewSinkFromEnv returns a sink when history is enabled.
+// If disabled, returns (nil, nil). If enabled but DB is down, still returns a
+// sink that reconnects in the background.
 func NewSinkFromEnv(ctx context.Context) (*Sink, error) {
-	if strings.EqualFold(strings.TrimSpace(env("ENABLE_SINK", "true")), "false") {
-		return nil, errSinkDisabled
-	}
-
-	history, err := postgres.NewHistoryFromEnv(ctx)
+	w, err := postgres.NewWriterFromEnv(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("postgres history: %w", err)
+		if errors.Is(err, postgres.ErrDisabled) {
+			return nil, nil
+		}
+		return nil, err
 	}
-
-	log.Printf("sink ready: postgres history on")
-	return &Sink{history: history}, nil
+	log.Printf("sink ready: history writer on (%s)", w.StatsSnapshot())
+	return &Sink{w: w}, nil
 }
 
-// Store enqueues one reading for Postgres (non-blocking).
-func (s *Sink) Store(_ context.Context, r parser.Reading) error {
+// Writer exposes the underlying history writer (cfg/events/frames).
+func (s *Sink) Writer() *postgres.Writer {
 	if s == nil {
 		return nil
 	}
-	s.history.Enqueue(postgres.RowFromReading(r))
+	return s.w
+}
+
+// Store enqueues one reading as quality_ok=true (legacy helper). Prefer Writer().EnqueueFrame.
+func (s *Sink) Store(_ context.Context, r parser.Reading) error {
+	if s == nil || s.w == nil {
+		return nil
+	}
+	s.w.EnqueueFrame(postgres.FrameFromReading(r, true, "", 0))
 	return nil
 }
 
-func (s *Sink) Flush() {
-	if s == nil {
+// EnqueueFrame non-blocking frame enqueue.
+func (s *Sink) EnqueueFrame(row postgres.FrameRow) {
+	if s == nil || s.w == nil {
 		return
 	}
-	s.history.Flush()
+	s.w.EnqueueFrame(row)
+}
+
+func (s *Sink) Flush() {
+	if s == nil || s.w == nil {
+		return
+	}
+	s.w.Flush()
 }
 
 func (s *Sink) Close() {
-	if s == nil {
+	if s == nil || s.w == nil {
 		return
 	}
-	s.history.Close()
+	s.w.Close()
 }

@@ -17,7 +17,6 @@ import {
 } from '@mui/material'
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -27,15 +26,15 @@ import {
 } from 'recharts'
 import type { AngleHistoryPoint, AnglePair } from '../../types/analytics'
 import type { AlignedBatch, AlignedPoint, PMUWithMeta } from '../../types/dashboard'
-import { anglePairColors, pairLabel } from '../../utils/analytics'
+import { anglePairColors, shortPairLabel } from '../../utils/analytics'
+import { ExternalChartLegend, useSeriesVisibility } from '../../utils/chartLegend'
 import {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
-  CHART_LEGEND_STYLE,
   ChartSeriesTooltip,
 } from '../../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../../utils/format'
-import { pmuKey } from '../../utils/pmu'
+import { chartLabel, pmuKey } from '../../utils/pmu'
 
 type AngleChannel = 'va' | 'vb' | 'vc' | 'ia' | 'ib' | 'ic'
 
@@ -76,7 +75,7 @@ function buildPairs(selected: PMUWithMeta[]): AnglePair[] {
       const b = selected[j]
       pairs.push({
         key: `${pmuKey(a.name)}__${pmuKey(b.name)}`,
-        name: pairLabel(a, b),
+        name: shortPairLabel(a, b),
         value: 0,
         regionA: a.meta.region,
         regionB: b.meta.region,
@@ -96,7 +95,6 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
   const [excludedPMUNames, setExcludedPMUNames] = useState<string[]>([])
   const [pmuAnchor, setPmuAnchor] = useState<null | HTMLElement>(null)
 
-  // Keep offline PMUs excluded so angle Δ never uses stale pairs.
   useEffect(() => {
     const offline = pmus.filter((p) => !p.connected).map((p) => p.name)
     setExcludedPMUNames((prev) => {
@@ -112,6 +110,8 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
 
   const pairs = useMemo(() => buildPairs(selectedPMUs), [selectedPMUs])
   const coloredPairs = useMemo(() => anglePairColors(pairs), [pairs])
+  const seriesKeys = useMemo(() => coloredPairs.map((p) => p.key), [coloredPairs])
+  const { hidden, toggle, isHidden } = useSeriesVisibility(seriesKeys)
 
   const history = useMemo(() => {
     if (!pairs.length || !alignedBatches.length) return [] as AngleHistoryPoint[]
@@ -151,16 +151,15 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
     })
   }
 
-  const subtitle =
-    selectedPMUs.length < 2
-      ? 'Select at least two PMUs to compare angles'
-      : `${channelLabel} angle Δ · ${pairs.length} pair${pairs.length === 1 ? '' : 's'} · ${selectedPMUs.length} of ${pmus.length} PMUs`
+  const legendItems = useMemo(
+    () => coloredPairs.map((p) => ({ key: p.key, name: p.name, color: p.color })),
+    [coloredPairs],
+  )
 
   return (
     <Card variant="outlined">
       <CardHeader
         title={`Inter-PMU Angle Δ (${channelLabel})`}
-        subheader={subtitle}
         action={
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', pr: 1, pt: 0.5, flexWrap: 'wrap' }}>
             <FormControl size="small" sx={{ minWidth: 96 }}>
@@ -179,7 +178,7 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
               </Select>
             </FormControl>
             <Button size="small" variant="outlined" onClick={(e) => setPmuAnchor(e.currentTarget)}>
-              PMUs ({selectedPMUs.length}/{onlineNames.length} online)
+              PMUs ({selectedPMUs.length}/{onlineNames.length})
             </Button>
             <Menu
               anchorEl={pmuAnchor}
@@ -207,7 +206,7 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
                         onChange={() => togglePMU(pmu.name)}
                       />
                     }
-                    label={`${pmu.name}${pmu.connected ? '' : ' (offline)'}`}
+                    label={`${chartLabel(pmu)}${pmu.connected ? '' : ' (offline)'}`}
                     sx={{
                       width: '100%',
                       mr: 0,
@@ -221,7 +220,6 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
         }
         slotProps={{
           title: { variant: 'h6', sx: { fontSize: '1rem' } },
-          subheader: { sx: { color: 'text.secondary', fontSize: 13 } },
         }}
         sx={{
           flexWrap: 'wrap',
@@ -230,7 +228,7 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
         }}
       />
       <CardContent sx={{ pt: 0 }}>
-        <Box sx={{ width: '100%', height: { xs: 260, sm: 320 }, minWidth: 0 }}>
+        <Box sx={{ width: '100%', minWidth: 0 }}>
           {selectedPMUs.length < 2 ? (
             <Typography sx={{ p: 2, color: 'text.secondary' }}>
               Angle Δ needs at least two selected PMUs.
@@ -240,50 +238,64 @@ export function AngleDiffChart({ pmus, alignedBatches = [] }: Props) {
               Waiting for aligned {channelLabel} angle ticks…
             </Typography>
           ) : (
-            <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-              <LineChart data={history}>
-                <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="ts"
-                  tickFormatter={formatTS}
-                  tick={CHART_AXIS_TICK}
-                  stroke="#94a3b8"
-                />
-                <YAxis
-                  tick={CHART_AXIS_TICK}
-                  domain={[0, 'auto']}
-                  tickFormatter={(value) => `${value}°`}
-                  stroke="#94a3b8"
-                />
-                <Tooltip
-                  content={(props) => (
-                    <ChartSeriesTooltip
-                      {...props}
-                      labelFormatter={(value) => formatTSMs(Number(value))}
-                      formatter={(value, name) => [
-                        `${Number(value ?? 0).toFixed(2)}°`,
-                        String(name),
-                      ]}
+            <>
+              <Box sx={{ width: '100%', height: { xs: 240, sm: 280 } }}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                  <LineChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+                    <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="ts"
+                      tickFormatter={formatTS}
+                      tick={CHART_AXIS_TICK}
+                      stroke="#94a3b8"
+                      minTickGap={28}
+                      interval="preserveStartEnd"
                     />
-                  )}
-                />
-                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
-                {coloredPairs.map((pair) => (
-                  <Line
-                    key={pair.key}
-                    type="linear"
-                    dataKey={pair.key}
-                    name={pair.name}
-                    stroke={pair.color}
-                    strokeWidth={2.1}
-                    strokeOpacity={0.95}
-                    dot={false}
-                    isAnimationActive={false}
-                    connectNulls={false}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
+                    <YAxis
+                      tick={CHART_AXIS_TICK}
+                      domain={[0, 'auto']}
+                      tickFormatter={(value) => `${value}°`}
+                      stroke="#94a3b8"
+                      width={48}
+                    />
+                    <Tooltip
+                      content={(props) => (
+                        <ChartSeriesTooltip
+                          {...props}
+                          labelFormatter={(value) => formatTSMs(Number(value))}
+                          formatter={(value, name) => [
+                            `${Number(value ?? 0).toFixed(2)}°`,
+                            String(name),
+                          ]}
+                        />
+                      )}
+                    />
+                    {coloredPairs.map((pair) =>
+                      isHidden(pair.key) ? null : (
+                        <Line
+                          key={pair.key}
+                          type="linear"
+                          dataKey={pair.key}
+                          name={pair.name}
+                          stroke={pair.color}
+                          strokeWidth={2.1}
+                          strokeOpacity={0.95}
+                          dot={false}
+                          isAnimationActive={false}
+                          connectNulls={false}
+                        />
+                      ),
+                    )}
+                  </LineChart>
+                </ResponsiveContainer>
+              </Box>
+              <ExternalChartLegend
+                items={legendItems}
+                hidden={hidden}
+                onToggle={toggle}
+                maxHeight={120}
+              />
+            </>
           )}
         </Box>
       </CardContent>

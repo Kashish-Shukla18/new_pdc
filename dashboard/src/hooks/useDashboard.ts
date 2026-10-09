@@ -11,6 +11,7 @@ import {
   computeConnectivityRecs,
   computeConnectivityRows,
 } from '../utils/connectivity'
+import { useArrivalSpreadHistory } from './useArrivalSpreadHistory'
 import { useCycleLatencyHistory } from './useCycleLatencyHistory'
 import { useRttHistory } from './useRttHistory'
 import type {
@@ -29,6 +30,7 @@ import { ageText, round } from '../utils/format'
 import {
   availabilityOf,
   buildOfflinePMU,
+  endpointIdentity,
   metaForDB,
   packetLossOf,
   pmuKey,
@@ -49,6 +51,7 @@ export function useDashboard() {
   const [deviceSearch, setDeviceSearch] = useState('')
   const [regionFilter, setRegionFilter] = useState('ALL')
   const [statusFilter, setStatusFilter] = useState('ALL')
+  const [deviceInventoryTab, setDeviceInventoryTab] = useState<'connected' | 'disconnected'>('connected')
   const [mapFilter, setMapFilter] = useState<'all' | 'issues'>('all')
   const [helpQuery, setHelpQuery] = useState('')
   const [frameLines, setFrameLines] = useState<string[]>([])
@@ -62,6 +65,7 @@ export function useDashboard() {
   const [updateSaving, setUpdateSaving] = useState(false)
   const [updateError, setUpdateError] = useState('')
   const [deletingPMUName, setDeletingPMUName] = useState('')
+  const [connectingPMUName, setConnectingPMUName] = useState('')
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [loadError, setLoadError] = useState('')
   const [uiTiming, setUiTiming] = useState<UiTiming>({ fetchMs: 0, jsonMs: 0, totalMs: 0 })
@@ -81,6 +85,8 @@ export function useDashboard() {
       reconnect_sec: cfg.reconnect_sec ?? 0,
       lat: cfg.lat,
       lon: cfg.lon,
+      station: cfg.station ?? '',
+      timestamp_tz: cfg.timestamp_tz ?? '',
     })
     setUpdateError('')
     setDrawerPMUName('')
@@ -95,24 +101,42 @@ export function useDashboard() {
 
   const handleUpdatePMU = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!editPMU) return
+    if (!editPMU || !editingPMUName) return
     setUpdateSaving(true)
     setUpdateError('')
     try {
+      const identity = endpointIdentity(editPMU)
+      const payload = {
+        ...editPMU,
+        name: '',
+        replace: editingPMUName !== identity ? editingPMUName : undefined,
+      }
       const res = await fetch('/api/pmus', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editPMU),
+        body: JSON.stringify(payload),
       })
       if (!res.ok) {
         const text = await res.text()
         setUpdateError(text || 'Failed to update device')
         return
       }
-      setDbConfigs((current) =>
-        current.map((config) => config.name === editPMU.name ? { ...config, ...editPMU } : config),
-      )
-      setNotice({ type: 'success', message: `${editPMU.name} was updated successfully.` })
+      const saved = (await res.json()) as PMUConfig
+      const configRes = await fetch('/api/pmus')
+      if (configRes.ok) {
+        setDbConfigs((await configRes.json()) as PMUConfig[])
+      } else {
+        setDbConfigs((current) => {
+          const withoutOld = current.filter(
+            (config) => config.name !== editingPMUName && config.name !== saved.name,
+          )
+          return [...withoutOld, saved]
+        })
+      }
+      setNotice({
+        type: 'success',
+        message: `${saved.station?.trim() || saved.name} was updated successfully.`,
+      })
       closeEditPMU()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
@@ -121,32 +145,41 @@ export function useDashboard() {
     } finally {
       setUpdateSaving(false)
     }
-  }, [closeEditPMU, editPMU])
+  }, [closeEditPMU, editPMU, editingPMUName])
 
   const handleAddPMU = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     setAddSaving(true)
     setAddError('')
     try {
+      const payload = { ...newPMU, name: '' }
       const res = await fetch('/api/pmus', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newPMU),
+        body: JSON.stringify(payload),
       })
       if (!res.ok) {
         const text = await res.text()
         setAddError(text || 'Failed to connect PMU.')
         return
       }
+      const saved = (await res.json()) as PMUConfig
       setShowAddPMU(false)
-      setDbConfigs((current) => {
-        const next = newPMU as PMUConfig
-        return current.some((config) => config.name === next.name)
-          ? current.map((config) => config.name === next.name ? next : config)
-          : [...current, next]
-      })
+      const configRes = await fetch('/api/pmus')
+      if (configRes.ok) {
+        setDbConfigs((await configRes.json()) as PMUConfig[])
+      } else {
+        setDbConfigs((current) =>
+          current.some((config) => config.name === saved.name)
+            ? current.map((config) => (config.name === saved.name ? saved : config))
+            : [...current, saved],
+        )
+      }
       setNewPMU(defaultNewPMU)
-      setNotice({ type: 'success', message: `${newPMU.name} was added successfully.` })
+      setNotice({
+        type: 'success',
+        message: `${saved.name} was added successfully.`,
+      })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
       setAddError(`Could not connect PMU: ${message}`)
@@ -156,27 +189,57 @@ export function useDashboard() {
     }
   }, [newPMU])
 
-  const handleDeletePMU = useCallback(async (name: string, e: React.MouseEvent) => {
+  const handleDisconnectPMU = useCallback(async (name: string, e: React.MouseEvent) => {
     e.stopPropagation()
-    if (!confirm(`Disconnect and delete PMU ${name}?`)) return
+    if (!confirm(`Disconnect ${name}? It will stay registered so you can connect again.`)) return
     setDeletingPMUName(name)
     try {
-      const res = await fetch(`/api/pmus/${name}`, { method: 'DELETE' })
+      const res = await fetch(`/api/pmus/${encodeURIComponent(name)}/disconnect`, { method: 'POST' })
       if (!res.ok) {
         const text = await res.text()
-        setNotice({ type: 'error', message: text || `Failed to delete ${name}.` })
+        setNotice({ type: 'error', message: text || `Failed to disconnect ${name}.` })
         return
       }
-      setDbConfigs((current) => current.filter((config) => config.name !== name))
-      setNotice({ type: 'success', message: `${name} was disconnected and removed.` })
+      setDbConfigs((current) =>
+        current.map((config) => (config.name === name ? { ...config, active: false } : config)),
+      )
+      setDeviceInventoryTab('disconnected')
+      setNotice({ type: 'success', message: `${name} disconnected. Open the Disconnected tab to reconnect.` })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
-      setNotice({ type: 'error', message: `Could not delete ${name}: ${message}` })
+      setNotice({ type: 'error', message: `Could not disconnect ${name}: ${message}` })
       console.error(err)
     } finally {
       setDeletingPMUName('')
     }
   }, [])
+
+  const handleConnectPMU = useCallback(async (name: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setConnectingPMUName(name)
+    try {
+      const res = await fetch(`/api/pmus/${encodeURIComponent(name)}/connect`, { method: 'POST' })
+      if (!res.ok) {
+        const text = await res.text()
+        setNotice({ type: 'error', message: text || `Failed to connect ${name}.` })
+        return
+      }
+      const saved = (await res.json()) as PMUConfig
+      setDbConfigs((current) =>
+        current.map((config) => (config.name === name ? { ...config, ...saved, active: true } : config)),
+      )
+      setDeviceInventoryTab('connected')
+      setNotice({ type: 'success', message: `${name} is connecting again.` })
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      setNotice({ type: 'error', message: `Could not connect ${name}: ${message}` })
+      console.error(err)
+    } finally {
+      setConnectingPMUName('')
+    }
+  }, [])
+
+  const handleDeletePMU = handleDisconnectPMU
 
   useEffect(() => {
     if (activeTab !== 'devices' && editingPMUName) {
@@ -262,36 +325,57 @@ export function useDashboard() {
       if (activeState) {
         return {
           ...activeState,
+          active: cfg.active !== false,
+          cfg: {
+            ...(activeState.cfg ?? {
+              available: false, syncWord: 0, idCode: 0, station: '', fnomHz: 0, dataRate: 0,
+              format: 0, polar: false, phFloat: false, anFloat: false, freqFloat: false,
+              phasors: [], analogs: [], digitalWords: 0, cfgCnt: 0,
+            }),
+            station: activeState.cfg?.station || cfg.station || '',
+          },
           meta: metaForDB(cfg.name, cfg),
         }
       }
-      return buildOfflinePMU(cfg.name, metaForDB(cfg.name, cfg))
+      const offline = buildOfflinePMU(cfg.name, metaForDB(cfg.name, cfg))
+      offline.active = cfg.active !== false
+      if (cfg.station && offline.cfg) {
+        offline.cfg = { ...offline.cfg, station: cfg.station }
+      }
+      return offline
     })
   }, [dashboard.pmus, dbConfigs])
 
+  const enabledPmus = useMemo(
+    () => pmus.filter((pmu) => pmu.active !== false),
+    [pmus],
+  )
+
   useEffect(() => {
-    if (!pmus.length) {
-      setSelectedPMUName('')
-      setSelectedFramePMUName('')
+    if (!enabledPmus.length) {
+      if (!pmus.length) {
+        setSelectedPMUName('')
+        setSelectedFramePMUName('')
+      }
       return
     }
 
-    if (!pmus.some((pmu) => pmu.name === selectedPMUName)) {
-      setSelectedPMUName(pmus[0].name)
+    if (!enabledPmus.some((pmu) => pmu.name === selectedPMUName)) {
+      setSelectedPMUName(enabledPmus[0].name)
     }
-    if (!pmus.some((pmu) => pmu.name === selectedFramePMUName)) {
-      setSelectedFramePMUName(pmus[0].name)
+    if (!enabledPmus.some((pmu) => pmu.name === selectedFramePMUName)) {
+      setSelectedFramePMUName(enabledPmus[0].name)
     }
-  }, [pmus, selectedPMUName, selectedFramePMUName])
+  }, [pmus.length, enabledPmus, selectedPMUName, selectedFramePMUName])
 
-  const selectedPMU = pmus.find((pmu) => pmu.name === selectedPMUName) ?? pmus[0]
-  const selectedFramePMU = pmus.find((pmu) => pmu.name === selectedFramePMUName) ?? pmus[0]
+  const selectedPMU = enabledPmus.find((pmu) => pmu.name === selectedPMUName) ?? enabledPmus[0]
+  const selectedFramePMU = enabledPmus.find((pmu) => pmu.name === selectedFramePMUName) ?? enabledPmus[0]
   const drawerPMU = pmus.find((pmu) => pmu.name === drawerPMUName)
   const editingPMU = pmus.find((pmu) => pmu.name === editingPMUName)
 
   const regionSummary = useMemo(() => {
     const map = new Map<string, { total: number; connected: number; availability: number }>()
-    for (const pmu of pmus) {
+    for (const pmu of enabledPmus) {
       const current = map.get(pmu.meta.region) ?? { total: 0, connected: 0, availability: 0 }
       current.total += 1
       if (pmu.connected) current.connected += 1
@@ -304,14 +388,14 @@ export function useDashboard() {
       connected: value.connected,
       availability: value.total ? value.availability / value.total : 0,
     }))
-  }, [pmus])
+  }, [enabledPmus])
 
   const systemCounts = useMemo(() => {
-    const connected = pmus.filter((pmu) => pmu.connected).length
-    const disconnected = pmus.length - connected
-    const totalErrors = pmus.reduce((sum, pmu) => sum + pmu.qualityRejects, 0)
+    const connected = enabledPmus.filter((pmu) => pmu.connected).length
+    const disconnected = enabledPmus.length - connected
+    const totalErrors = enabledPmus.reduce((sum, pmu) => sum + pmu.qualityRejects, 0)
     return { connected, disconnected, totalErrors }
-  }, [pmus])
+  }, [enabledPmus])
 
   const frameRate = selectedPMU?.approxFps ?? 0
   const systemTone = systemCounts.disconnected >= 2 ? 'bad' : systemCounts.disconnected > 0 ? 'warn' : 'ok'
@@ -338,7 +422,7 @@ export function useDashboard() {
       }
     })
 
-    const fromState = pmus
+    const fromState = enabledPmus
       .filter((pmu) => !pmu.connected || packetLossOf(pmu) > 1)
       .map((pmu) => ({
         sev: (pmu.connected ? 'warn' : 'bad') as LiveAlert['sev'],
@@ -348,10 +432,13 @@ export function useDashboard() {
       }))
 
     return [...fromState, ...fromEvents].slice(0, 24)
-  }, [events, pmus])
+  }, [events, enabledPmus])
 
   const filteredDevices = useMemo(() => {
     return pmus.filter((pmu) => {
+      const isActive = pmu.active !== false
+      if (deviceInventoryTab === 'connected' && !isActive) return false
+      if (deviceInventoryTab === 'disconnected' && isActive) return false
       const matchesSearch = `${pmu.name} ${pmu.meta.substation} ${pmu.meta.vendor} ${pmu.meta.primaryIp}`
         .toLowerCase()
         .includes(deviceSearch.toLowerCase())
@@ -360,7 +447,17 @@ export function useDashboard() {
       const matchesRegion = regionFilter === 'ALL' ? true : pmu.meta.region === regionFilter
       return matchesSearch && matchesStatus && matchesRegion
     })
-  }, [pmus, deviceSearch, statusFilter, regionFilter])
+  }, [pmus, deviceInventoryTab, deviceSearch, statusFilter, regionFilter])
+
+  const deviceTabCounts = useMemo(() => {
+    let connected = 0
+    let disconnected = 0
+    for (const cfg of dbConfigs) {
+      if (cfg.active === false) disconnected += 1
+      else connected += 1
+    }
+    return { connected, disconnected }
+  }, [dbConfigs])
 
   const frameLineKeyRef = useRef('')
 
@@ -390,13 +487,14 @@ export function useDashboard() {
     setFrameLines([])
   }, [selectedFramePMUName])
 
-  const connectivityRows = useMemo(() => computeConnectivityRows(pmus), [pmus])
+  const connectivityRows = useMemo(() => computeConnectivityRows(enabledPmus), [enabledPmus])
   const connectivityKpis = useMemo(() => computeConnectivityKpis(connectivityRows), [connectivityRows])
   const connectivityRecs = useMemo(() => computeConnectivityRecs(connectivityRows), [connectivityRows])
   const { rttHistory, rttStreams } = useRttHistory(connectivityRows, dashboard.nowUtc, isPaused)
-  const { cycleHistory, cycleLatest } = useCycleLatencyHistory(pmus, dashboard.nowUtc, isPaused)
+  const { cycleHistory, cycleLatest } = useCycleLatencyHistory(enabledPmus, dashboard.nowUtc, isPaused)
+  const { spreadHistory, spreadLatest } = useArrivalSpreadHistory(enabledPmus, dashboard.nowUtc, isPaused)
 
-  const onlinePMUs = useMemo(() => pmus.filter((pmu) => pmu.connected), [pmus])
+  const onlinePMUs = useMemo(() => enabledPmus.filter((pmu) => pmu.connected), [enabledPmus])
   const anglePairs = useMemo(
     () => computeAnglePairs(onlinePMUs, onlinePMUs.length * (onlinePMUs.length - 1) / 2),
     [onlinePMUs],
@@ -404,13 +502,13 @@ export function useDashboard() {
   const chartAnglePairs = anglePairs
 
   const analyticsRecs = useMemo(
-    () => computeAnalyticsRecs(pmus, anglePairs, connectivityRows, events),
-    [pmus, anglePairs, connectivityRows, events],
+    () => computeAnalyticsRecs(enabledPmus, anglePairs, connectivityRows, events),
+    [enabledPmus, anglePairs, connectivityRows, events],
   )
 
   const analyticsKpis = useMemo(
-    () => computeAnalyticsKpis(pmus, anglePairs, analyticsRecs),
-    [pmus, anglePairs, analyticsRecs],
+    () => computeAnalyticsKpis(enabledPmus, anglePairs, analyticsRecs),
+    [enabledPmus, anglePairs, analyticsRecs],
   )
 
   const angleHistory = useMemo(() => {
@@ -448,7 +546,7 @@ export function useDashboard() {
 
   const navItems = useMemo<NavItem[]>(() => [
     { id: 'overview', label: 'Overview', section: 'Monitoring' },
-    { id: 'devices', label: 'Device Inventory', section: 'Monitoring', badge: `${pmus.length}` },
+    { id: 'devices', label: 'Device Inventory', section: 'Monitoring', badge: `${dbConfigs.length}` },
     { id: 'dataframes', label: 'Data Frames', section: 'Monitoring' },
     {
       id: 'connectivity',
@@ -460,11 +558,12 @@ export function useDashboard() {
     { id: 'analytics', label: 'Analytics', section: 'Monitoring' },
     { id: 'help', label: 'Help & Support', section: 'Resources' },
     { id: 'docs', label: 'Documentation', section: 'Resources' },
-  ], [pmus.length, connectivityRows])
+  ], [dbConfigs.length, connectivityRows])
 
   return {
     dashboard,
     pmus,
+    enabledPmus,
     streamOnline,
     isPaused,
     setIsPaused,
@@ -497,7 +596,13 @@ export function useDashboard() {
     addSaving,
     addError,
     handleDeletePMU,
+    handleDisconnectPMU,
+    handleConnectPMU,
     deletingPMUName,
+    connectingPMUName,
+    deviceInventoryTab,
+    setDeviceInventoryTab,
+    deviceTabCounts,
     editingPMUName,
     editingPMU,
     editPMU,
@@ -524,6 +629,8 @@ export function useDashboard() {
     rttStreams,
     cycleHistory,
     cycleLatest,
+    spreadHistory,
+    spreadLatest,
     anglePairs,
     chartAnglePairs,
     angleHistory,

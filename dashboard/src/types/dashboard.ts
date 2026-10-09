@@ -118,6 +118,8 @@ export type LivePMUState = {
   connectionText: string
   lastEventTime: string
   lastFrameTime: string
+  /** TCP receive time of the latest DATA frame (ISO). */
+  lastReceivedAt?: string
   lastHandshake: string
   lastError: string
   totalFrames: number
@@ -134,6 +136,10 @@ export type LivePMUState = {
   fnomHz?: number
   statDataError?: boolean
   lastHops?: Record<string, number>
+  /** Kernel TCP Rx queue bytes waiting to be Read (TCP DATA only). */
+  tcpUnreadBytes?: number
+  /** Configured SO_RCVBUF ceiling (bytes). */
+  tcpRecvBufMax?: number
 }
 
 export type LatencyStage = {
@@ -235,6 +241,7 @@ export type PMUMeta = {
 }
 
 export type PMUConfig = {
+  /** Endpoint identity (ip:port or udp:ip:port). Set by the server. */
   name: string
   ip: string
   port: number
@@ -248,9 +255,19 @@ export type PMUConfig = {
   data_rate?: number
   lat: number
   lon: number
+  /** CFG-2 station label learned after handshake (display only). */
+  station?: string
+  /** How SOC is interpreted: '' = fleet default (IST) / loopback→UTC; or 'UTC' / 'Asia/Kolkata'. */
+  timestamp_tz?: string
+  /** false = operator disconnected (kept for reconnect). */
+  active?: boolean
 }
 
-export type PMUWithMeta = LivePMUState & { meta: PMUMeta }
+export type PMUWithMeta = LivePMUState & {
+  meta: PMUMeta
+  /** false when operator disconnected (parked for reconnect). */
+  active?: boolean
+}
 
 export type ConnectivityRow = PMUWithMeta & {
   loss: number

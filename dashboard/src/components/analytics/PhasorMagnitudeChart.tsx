@@ -12,7 +12,6 @@ import {
 } from '@mui/material'
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -22,14 +21,14 @@ import {
 } from 'recharts'
 import { CHART_COLORS } from '../../constants'
 import type { AlignedBatch, PMUWithMeta } from '../../types/dashboard'
+import { ExternalChartLegend, useSeriesVisibility } from '../../utils/chartLegend'
 import {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
-  CHART_LEGEND_STYLE,
   ChartSeriesTooltip,
 } from '../../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../../utils/format'
-import { pmuKey } from '../../utils/pmu'
+import { chartLabel, pmuKey } from '../../utils/pmu'
 
 export const PHASOR_TREND_WINDOW = 90
 
@@ -118,12 +117,14 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
   const analogName = active.kind === 'analog' ? active.key.slice('analog:'.length) : ''
   const seriesSuffix = active.kind === 'analog' ? pmuKey(analogName) : active.key
 
-  // One line per PMU — click legend labels to show/hide (Recharts default).
+  // One line per PMU — legend below plot toggles visibility.
   const chartSeries = pmus.map((pmu, idx) => ({
     dataKey: `${pmuKey(pmu.name)}__${seriesSuffix}`,
-    name: pmu.name,
+    name: chartLabel(pmu),
     color: CHART_COLORS[idx % CHART_COLORS.length],
   }))
+  const seriesKeys = chartSeries.map((s) => s.dataKey)
+  const { hidden, toggle, isHidden } = useSeriesVisibility(seriesKeys)
 
   const data = useMemo(() => {
     const batches = alignedBatches.slice(-PHASOR_TREND_WINDOW)
@@ -154,8 +155,8 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
 
   const subtitle = data.length
     ? isAnalog
-      ? `${active.label} · CFG analog · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'} · click legend to toggle`
-      : `${active.label} magnitude · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'} · click legend to toggle`
+      ? `${active.label} · CFG analog · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'}`
+      : `${active.label} magnitude · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'}`
     : `Waiting for aligned ${kind} ticks…`
 
   const valueFmt = (value: unknown) =>
@@ -196,7 +197,7 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
         }}
       />
       <CardContent sx={{ pt: 0 }}>
-        <Box sx={{ width: '100%', height: { xs: 240, sm: 280 }, minWidth: 0 }}>
+        <Box sx={{ width: '100%', minWidth: 0 }}>
           {!hasSeries ? (
             <Typography sx={{ p: 2, color: 'text.secondary' }}>
               Waiting for aligned {kind} phasor ticks…
@@ -206,50 +207,60 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
               No values yet for CFG analog “{analogName}”. Waiting for aligned ticks…
             </Typography>
           ) : (
-            <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-              <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="ts"
-                  tickFormatter={formatTS}
-                  tick={CHART_AXIS_TICK}
-                  interval="preserveStartEnd"
-                  minTickGap={28}
-                  stroke="#94a3b8"
-                />
-                <YAxis
-                  tick={CHART_AXIS_TICK}
-                  domain={isAnalog ? ['auto', 'auto'] : [0, 'auto']}
-                  tickFormatter={(v) => `${round(Number(v), 1)}`}
-                  width={52}
-                  stroke="#94a3b8"
-                />
-                <Tooltip
-                  content={(props) => (
-                    <ChartSeriesTooltip
-                      {...props}
-                      labelFormatter={(value) => formatTSMs(Number(value))}
-                      formatter={(value, name) => [valueFmt(value), String(name)]}
+            <>
+              <Box sx={{ width: '100%', height: { xs: 220, sm: 250 } }}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                  <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+                    <CartesianGrid stroke={CHART_GRID_STROKE} strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="ts"
+                      tickFormatter={formatTS}
+                      tick={CHART_AXIS_TICK}
+                      interval="preserveStartEnd"
+                      minTickGap={28}
+                      stroke="#94a3b8"
                     />
-                  )}
-                />
-                <Legend wrapperStyle={CHART_LEGEND_STYLE} />
-                {chartSeries.map((series) => (
-                  <Line
-                    key={series.dataKey}
-                    type="monotone"
-                    dataKey={series.dataKey}
-                    name={series.name}
-                    stroke={series.color}
-                    dot={false}
-                    activeDot={{ r: 4, strokeWidth: 2, fill: '#0f172a' }}
-                    strokeWidth={2.25}
-                    isAnimationActive={false}
-                    connectNulls={false}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
+                    <YAxis
+                      tick={CHART_AXIS_TICK}
+                      domain={isAnalog ? ['auto', 'auto'] : [0, 'auto']}
+                      tickFormatter={(v) => `${round(Number(v), 1)}`}
+                      width={52}
+                      stroke="#94a3b8"
+                    />
+                    <Tooltip
+                      content={(props) => (
+                        <ChartSeriesTooltip
+                          {...props}
+                          labelFormatter={(value) => formatTSMs(Number(value))}
+                          formatter={(value, name) => [valueFmt(value), String(name)]}
+                        />
+                      )}
+                    />
+                    {chartSeries.map((series) =>
+                      isHidden(series.dataKey) ? null : (
+                        <Line
+                          key={series.dataKey}
+                          type="monotone"
+                          dataKey={series.dataKey}
+                          name={series.name}
+                          stroke={series.color}
+                          dot={false}
+                          activeDot={{ r: 4, strokeWidth: 2, fill: '#0f172a' }}
+                          strokeWidth={2.25}
+                          isAnimationActive={false}
+                          connectNulls={false}
+                        />
+                      ),
+                    )}
+                  </LineChart>
+                </ResponsiveContainer>
+              </Box>
+              <ExternalChartLegend
+                items={chartSeries.map((s) => ({ key: s.dataKey, name: s.name, color: s.color }))}
+                hidden={hidden}
+                onToggle={toggle}
+              />
+            </>
           )}
         </Box>
       </CardContent>
