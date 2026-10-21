@@ -24,7 +24,7 @@ func connUnreadBytes(conn net.Conn) (int, error) {
 		cerr error
 	)
 	err = raw.Control(func(fd uintptr) {
-		n, cerr = unix.IoctlGetInt(int(fd), unix.FIONREAD)
+		n, cerr = unix.IoctlGetInt(int(fd), 0x541B)
 	})
 	if err != nil {
 		return 0, err

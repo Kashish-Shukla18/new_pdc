@@ -22,6 +22,8 @@ export function DevicesPage() {
     setDrawerPMUName,
     handleDisconnectPMU,
     handleConnectPMU,
+    handleBulkDisconnectPMU,
+    handleBulkConnectPMU,
     deletingPMUName,
     connectingPMUName,
     deviceInventoryTab,
@@ -80,6 +82,8 @@ export function DevicesPage() {
         onEdit={openEditPMU}
         onDisconnect={handleDisconnectPMU}
         onConnect={handleConnectPMU}
+        onBulkDisconnect={handleBulkDisconnectPMU}
+        onBulkConnect={handleBulkConnectPMU}
         deletingPMUName={deletingPMUName}
         connectingPMUName={connectingPMUName}
       />

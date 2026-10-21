@@ -1,8 +1,59 @@
-import type { AlignedBatch, TrendPoint } from '../types/dashboard'
+import type { AlignedBatch, AlignedPoint, TrendPoint } from '../types/dashboard'
 import { pmuKey } from './pmu'
 
 /** How many aligned ticks to keep on overview / frame charts. */
 export const ALIGNED_CHART_WINDOW = 90
+
+const ALIGNED_PHASOR_FIELDS = [
+  { label: 'VA', mag: 'va', angle: 'vaAngle' },
+  { label: 'VB', mag: 'vb', angle: 'vbAngle' },
+  { label: 'VC', mag: 'vc', angle: 'vcAngle' },
+  { label: 'IA', mag: 'ia', angle: 'iaAngle' },
+  { label: 'IB', mag: 'ib', angle: 'ibAngle' },
+  { label: 'IC', mag: 'ic', angle: 'icAngle' },
+] as const
+
+export type AlignedPhasorRow = {
+  label: string
+  cfgName: string
+  magnitude: number
+  angleDeg: number
+}
+
+/**
+ * Newest aligned tick for diagrams / snapshots.
+ * Always the latest tick (partials included) so missing PMUs match frequency-chart gaps.
+ */
+export function latestAlignedBatch(
+  batches: AlignedBatch[] | undefined,
+  preferPmuNames?: string[],
+): AlignedBatch | undefined {
+  if (!batches?.length) return undefined
+  const names = preferPmuNames?.filter(Boolean) ?? []
+  const hasAny = (b: AlignedBatch) => {
+    if (!names.length) return Object.keys(b.points ?? {}).length > 0
+    return names.some((n) => Boolean(b.points?.[n]))
+  }
+  for (let i = batches.length - 1; i >= 0; i--) {
+    const b = batches[i]
+    if (hasAny(b)) return b
+  }
+  return undefined
+}
+
+/** VA–IC mag/angle from one aligned point (same fields as Overview / Analytics trends). */
+export function phasorsFromAlignedPoint(point: AlignedPoint | undefined): AlignedPhasorRow[] {
+  if (!point) return []
+  const out: AlignedPhasorRow[] = []
+  for (const f of ALIGNED_PHASOR_FIELDS) {
+    const magnitude = point[f.mag]
+    const angleDeg = point[f.angle]
+    if (typeof magnitude !== 'number' || typeof angleDeg !== 'number') continue
+    if (magnitude === 0 && angleDeg === 0) continue
+    out.push({ label: f.label, cfgName: f.label, magnitude, angleDeg })
+  }
+  return out
+}
 
 /**
  * Build one chart row per aligned tick for the selected PMUs.

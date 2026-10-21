@@ -3,6 +3,7 @@ import { ageText, formatByteSize, round } from '../../utils/format'
 
 type Props = {
   rows: ConnectivityRow[]
+  nowUtc?: string
   onRowClick: (name: string) => void
 }
 
@@ -12,7 +13,7 @@ function statusChip(row: ConnectivityRow) {
   return 'ok'
 }
 
-export function ConnectivityMatrix({ rows, onRowClick }: Props) {
+export function ConnectivityMatrix({ rows, nowUtc, onRowClick }: Props) {
   return (
     <section className="panel table-panel">
       <div className="panel-head">
@@ -22,6 +23,7 @@ export function ConnectivityMatrix({ rows, onRowClick }: Props) {
             Sorted worst-first · click a row to inspect
             {rows.length ? ` · ${rows.length} PMUs` : ''}
             {' · '}TCP unread = kernel bytes waiting to be Read
+            {' · '}Last frame = age at snapshot (not browser clock)
           </p>
         </div>
       </div>
@@ -72,7 +74,9 @@ export function ConnectivityMatrix({ rows, onRowClick }: Props) {
                   </td>
                   <td>{row.connected ? round(row.loss, 2) : '—'}</td>
                   <td>{row.connected ? round(row.avail, 1) : '0.0'}</td>
-                  <td>{row.connected ? ageText(row.lastFrameTime) : '—'}</td>
+                  <td>
+                    {row.connected ? ageText(row.lastFrameTime, nowUtc) : '—'}
+                  </td>
                   <td>
                     <span className={`status-chip ${statusChip(row)}`}>{row.statusLabel}</span>
                   </td>

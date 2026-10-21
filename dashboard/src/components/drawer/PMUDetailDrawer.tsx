@@ -1,7 +1,7 @@
 import { Pencil, X } from 'lucide-react'
 import { useDashboardContext } from '../../context/DashboardContext'
 import { ageText, round } from '../../utils/format'
-import { displayName } from '../../utils/pmu'
+import { displayFps, displayName } from '../../utils/pmu'
 
 export function PMUDetailDrawer() {
   const { drawerPMU, setDrawerPMUName, openEditPMU } = useDashboardContext()
@@ -26,7 +26,7 @@ export function PMUDetailDrawer() {
           <p><strong>Primary IP:</strong> {drawerPMU.meta.primaryIp}</p>
           <p><strong>Redundant IP:</strong> {drawerPMU.meta.redundantIp}</p>
           <p><strong>Frames:</strong> {drawerPMU.totalFrames}</p>
-          <p><strong>Approx FPS:</strong> {Math.round(drawerPMU.approxFps)}</p>
+          <p><strong>Approx FPS:</strong> {Math.round(displayFps(drawerPMU, drawerPMU.meta.targetFps))}</p>
           <p><strong>Last event:</strong> {ageText(drawerPMU.lastEventTime)}</p>
           {drawerPMU.lastHops && Object.keys(drawerPMU.lastHops).length > 0 && (
             <div className="drawer-hops">
