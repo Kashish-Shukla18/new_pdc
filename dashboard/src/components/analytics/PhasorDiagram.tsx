@@ -10,7 +10,7 @@ import {
   Stack,
   Typography,
 } from '@mui/material'
-import { round } from '../../utils/format'
+import { formatTSMs, round } from '../../utils/format'
 
 type Kind = 'voltage' | 'current'
 
@@ -27,10 +27,19 @@ export type DiagramVector = {
   color: string
 }
 
+export type MissingPhasorPMU = {
+  name: string
+  label: string
+}
+
 type Props = {
   vectors: DiagramVector[]
   kind: Kind
   emptyMessage?: string
+  /** Aligned measurement tick (epoch ms) shown under the title. */
+  sampleTs?: number
+  /** Online PMUs with no sample on this aligned tick (same idea as chart gaps). */
+  missing?: MissingPhasorPMU[]
 }
 
 function toXY(mag: number, angleDeg: number, scale: number) {
@@ -101,13 +110,18 @@ function formatPhaseLine(p: DiagramVector) {
   return `${p.label} ${round(p.magnitude, 1)}∠${round(p.angleDeg, 0)}°`
 }
 
-export function PhasorDiagram({ vectors, kind, emptyMessage }: Props) {
+export function PhasorDiagram({ vectors, kind, emptyMessage, sampleTs, missing = [] }: Props) {
   const size = 300
   const cx = size / 2
   const cy = size / 2
   const plotR = 118
 
   const title = kind === 'voltage' ? 'Voltage Phasor Diagram' : 'Current Phasor Diagram'
+  const sampleLabel =
+    typeof sampleTs === 'number' && Number.isFinite(sampleTs)
+      ? `Aligned @ ${formatTSMs(sampleTs)}${missing.length ? ` · ${missing.length} missing` : ''}`
+      : undefined
+  const hasPlot = vectors.length > 0 || missing.length > 0
   const { order: allPmuNames, meta: pmuInfo } = useMemo(() => pmuMeta(vectors), [vectors])
   const labels = useMemo(() => stationLabels(vectors), [vectors])
 
@@ -255,17 +269,48 @@ export function PhasorDiagram({ vectors, kind, emptyMessage }: Props) {
     <Card variant="outlined" sx={{ height: '100%' }}>
       <CardHeader
         title={title}
+        subheader={sampleLabel}
         slotProps={{
           title: { variant: 'h6', sx: { fontSize: '1rem' } },
+          subheader: {
+            sx: {
+              mt: 0.25,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              fontSize: '0.75rem',
+              fontVariantNumeric: 'tabular-nums',
+            },
+          },
         }}
       />
       <CardContent sx={{ pt: 0 }}>
-        {!vectors.length ? (
+        {!hasPlot ? (
           <Typography sx={{ p: 1.5, color: 'text.secondary', bgcolor: 'action.hover', borderRadius: 1 }}>
             {emptyMessage ?? `No live ${kind} phasors for the selected online PMUs / channels.`}
           </Typography>
         ) : (
           <Stack spacing={1.25} sx={{ alignItems: 'stretch' }}>
+            {missing.length > 0 && (
+              <Typography
+                variant="caption"
+                sx={{
+                  px: 1,
+                  py: 0.75,
+                  borderRadius: 1,
+                  bgcolor: 'rgba(240, 112, 106, 0.12)',
+                  color: '#f0706a',
+                  border: '1px solid',
+                  borderColor: 'rgba(240, 112, 106, 0.35)',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                }}
+              >
+                Missing on this tick: {missing.map((m) => m.label).join(', ')}
+              </Typography>
+            )}
+            {!vectors.length && (
+              <Typography sx={{ p: 1.5, color: 'text.secondary', bgcolor: 'action.hover', borderRadius: 1 }}>
+                No {kind} vectors on this aligned tick (all selected streams missing or filtered).
+              </Typography>
+            )}
             <Stack
               direction={{ xs: 'column', sm: 'row' }}
               spacing={1.5}
@@ -370,38 +415,94 @@ export function PhasorDiagram({ vectors, kind, emptyMessage }: Props) {
               </Stack>
             </Stack>
 
-            <Stack
-              direction="row"
-              spacing={0.75}
-              useFlexGap
-              sx={{
-                flexWrap: 'wrap',
-                justifyContent: 'center',
-                pt: 0.5,
-                borderTop: '1px solid',
-                borderColor: 'divider',
-                maxHeight: 80,
-                overflowY: 'auto',
-              }}
-            >
-              {allPmuNames.map((pmuName) => {
-                const info = pmuInfo.get(pmuName)!
-                const isOn = !hidden.has(pmuName)
-                const dash = DASH_BY_INDEX[info.index % DASH_BY_INDEX.length]
-                const short = labels.get(pmuName) ?? pmuName
-                const group = byPmu.get(pmuName)
-                const tip = group
-                  ? `${short}\n${group.items.map(formatPhaseLine).join('\n')}`
-                  : short
-                return (
+            {(allPmuNames.length > 0 || missing.length > 0) && (
+              <Stack
+                direction="row"
+                spacing={0.75}
+                useFlexGap
+                sx={{
+                  flexWrap: 'wrap',
+                  justifyContent: 'center',
+                  pt: 0.5,
+                  borderTop: '1px solid',
+                  borderColor: 'divider',
+                  maxHeight: 80,
+                  overflowY: 'auto',
+                }}
+              >
+                {allPmuNames.map((pmuName) => {
+                  const info = pmuInfo.get(pmuName)!
+                  const isOn = !hidden.has(pmuName)
+                  const dash = DASH_BY_INDEX[info.index % DASH_BY_INDEX.length]
+                  const short = labels.get(pmuName) ?? pmuName
+                  const group = byPmu.get(pmuName)
+                  const tip = group
+                    ? `${short}\n${group.items.map(formatPhaseLine).join('\n')}`
+                    : short
+                  return (
+                    <Box
+                      key={pmuName}
+                      component="button"
+                      type="button"
+                      onClick={() => toggleVisibility(pmuName)}
+                      onMouseEnter={() => setHoverPmu(pmuName)}
+                      onMouseLeave={() => setHoverPmu(null)}
+                      title={isOn ? tip : `Show ${short}`}
+                      sx={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 0.6,
+                        px: 0.85,
+                        py: 0.35,
+                        borderRadius: 1,
+                        bgcolor: isOn ? 'action.hover' : 'transparent',
+                        border: '1px solid',
+                        borderColor: isOn ? 'divider' : 'transparent',
+                        cursor: 'pointer',
+                        opacity: isOn ? 1 : 0.4,
+                        color: 'text.primary',
+                        font: 'inherit',
+                        '&:hover': { bgcolor: 'action.selected' },
+                      }}
+                    >
+                      <Box
+                        component="svg"
+                        width={18}
+                        height={8}
+                        viewBox="0 0 18 8"
+                        aria-hidden
+                        sx={{ flex: 'none', display: 'block' }}
+                      >
+                        <line
+                          x1={1}
+                          y1={4}
+                          x2={17}
+                          y2={4}
+                          stroke={info.color}
+                          strokeWidth={2.5}
+                          strokeLinecap="round"
+                          strokeDasharray={dash || undefined}
+                          strokeOpacity={isOn ? 1 : 0.4}
+                        />
+                      </Box>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontWeight: 700,
+                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                          color: 'text.primary',
+                          textDecoration: isOn ? 'none' : 'line-through',
+                        }}
+                      >
+                        {short}
+                      </Typography>
+                    </Box>
+                  )
+                })}
+                {missing.map((m) => (
                   <Box
-                    key={pmuName}
-                    component="button"
-                    type="button"
-                    onClick={() => toggleVisibility(pmuName)}
-                    onMouseEnter={() => setHoverPmu(pmuName)}
-                    onMouseLeave={() => setHoverPmu(null)}
-                    title={isOn ? tip : `Show ${short}`}
+                    key={`missing-${m.name}`}
+                    title={`No sample on this aligned tick — ${m.label}`}
                     sx={{
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -409,51 +510,25 @@ export function PhasorDiagram({ vectors, kind, emptyMessage }: Props) {
                       px: 0.85,
                       py: 0.35,
                       borderRadius: 1,
-                      bgcolor: isOn ? 'action.hover' : 'transparent',
-                      border: '1px solid',
-                      borderColor: isOn ? 'divider' : 'transparent',
-                      cursor: 'pointer',
-                      opacity: isOn ? 1 : 0.4,
-                      color: 'text.primary',
-                      font: 'inherit',
-                      '&:hover': { bgcolor: 'action.selected' },
+                      border: '1px dashed',
+                      borderColor: 'rgba(240, 112, 106, 0.55)',
+                      color: '#f0706a',
+                      opacity: 0.95,
                     }}
                   >
-                    <Box
-                      component="svg"
-                      width={18}
-                      height={8}
-                      viewBox="0 0 18 8"
-                      aria-hidden
-                      sx={{ flex: 'none', display: 'block' }}
-                    >
-                      <line
-                        x1={1}
-                        y1={4}
-                        x2={17}
-                        y2={4}
-                        stroke={info.color}
-                        strokeWidth={2.5}
-                        strokeLinecap="round"
-                        strokeDasharray={dash || undefined}
-                        strokeOpacity={isOn ? 1 : 0.4}
-                      />
-                    </Box>
                     <Typography
                       variant="caption"
                       sx={{
                         fontWeight: 700,
                         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                        color: 'text.primary',
-                        textDecoration: isOn ? 'none' : 'line-through',
                       }}
                     >
-                      {short}
+                      {m.label} · missing
                     </Typography>
                   </Box>
-                )
-              })}
-            </Stack>
+                ))}
+              </Stack>
+            )}
           </Stack>
         )}
       </CardContent>

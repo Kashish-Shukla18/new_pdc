@@ -16,34 +16,19 @@ import { PhasorDiagram, type DiagramVector } from '../components/analytics/Phaso
 import { PhasorMagnitudeChart } from '../components/analytics/PhasorMagnitudeChart'
 import { CHART_COLORS } from '../constants'
 import { useDashboardContext } from '../context/DashboardContext'
-import type { PMUWithMeta } from '../types/dashboard'
+import type { AlignedBatch, PMUWithMeta } from '../types/dashboard'
+import {
+  latestAlignedBatch,
+  phasorsFromAlignedPoint,
+} from '../utils/alignedChart'
 import { PHASOR_I_COLORS, PHASOR_V_COLORS } from '../utils/analyticsColors'
-import { displayPhasors } from '../utils/phasorLabels'
+import { formatTSMs } from '../utils/format'
 import { chartLabel } from '../utils/pmu'
 
 type PhaseFilter = 'all' | 'VA' | 'VB' | 'VC' | 'IA' | 'IB' | 'IC'
 
 const V_FILTERS: PhaseFilter[] = ['all', 'VA', 'VB', 'VC']
 const I_FILTERS: PhaseFilter[] = ['all', 'IA', 'IB', 'IC']
-
-function rowsForPmu(pmu: PMUWithMeta) {
-  // Never paint offline / stale snapshots as live phasors.
-  if (!pmu.connected) return []
-  if (pmu.lastChannels?.phasors?.length) {
-    return displayPhasors(pmu.lastChannels.phasors)
-  }
-  const va = pmu.lastPhasor?.va
-  const vb = pmu.lastPhasor?.vb
-  const vc = pmu.lastPhasor?.vc
-  const ia = pmu.lastPhasor?.ia
-  if (!va && !vb && !vc && !ia) return []
-  return displayPhasors([
-    { name: 'VA', ...(va ?? { magnitude: 0, angleDeg: 0 }) },
-    { name: 'VB', ...(vb ?? { magnitude: 0, angleDeg: 0 }) },
-    { name: 'VC', ...(vc ?? { magnitude: 0, angleDeg: 0 }) },
-    { name: 'IA', ...(ia ?? { magnitude: 0, angleDeg: 0 }) },
-  ])
-}
 
 function colorForVector(
   pmuIndex: number,
@@ -63,15 +48,22 @@ function buildVectors(
   allPmus: PMUWithMeta[],
   kind: 'voltage' | 'current',
   phaseFilter: PhaseFilter,
+  batches: AlignedBatch[] | undefined,
 ): DiagramVector[] {
   const live = selected.filter((p) => p.connected)
   const multiPmu = live.length > 1
   const prefix = kind === 'voltage' ? 'V' : 'I'
-  const out: DiagramVector[] = []
+  const batch = latestAlignedBatch(
+    batches,
+    live.map((p) => p.name),
+  )
+  if (!batch) return []
 
+  const out: DiagramVector[] = []
   for (const pmu of live) {
+    if (!batch.points?.[pmu.name]) continue
     const pmuIndex = allPmus.findIndex((p) => p.name === pmu.name)
-    const rows = rowsForPmu(pmu).filter((r) => {
+    const rows = phasorsFromAlignedPoint(batch.points[pmu.name]).filter((r) => {
       if (!r.label.startsWith(prefix)) return false
       if (phaseFilter === 'all') return true
       return r.label === phaseFilter
@@ -105,18 +97,37 @@ export function AnalyticsPage() {
   const [voltagePhase, setVoltagePhase] = useState<PhaseFilter>('all')
   const [currentPhase, setCurrentPhase] = useState<PhaseFilter>('all')
 
+  const diagramBatch = useMemo(
+    () =>
+      latestAlignedBatch(
+        dashboard.alignedBatches,
+        onlinePMUs.map((p) => p.name),
+      ),
+    [dashboard.alignedBatches, onlinePMUs],
+  )
+
+  /** Online PMUs with no point on the latest aligned tick (chart-gap equivalent). */
+  const diagramMissing = useMemo(() => {
+    if (!diagramBatch) return []
+    return onlinePMUs
+      .filter((p) => !diagramBatch.points?.[p.name])
+      .map((p) => ({ name: p.name, label: chartLabel(p) }))
+  }, [diagramBatch, onlinePMUs])
+
   const voltageVectors = useMemo(
-    () => buildVectors(onlinePMUs, pmus, 'voltage', voltagePhase),
-    [onlinePMUs, pmus, voltagePhase],
+    () => buildVectors(onlinePMUs, pmus, 'voltage', voltagePhase, dashboard.alignedBatches),
+    [onlinePMUs, pmus, voltagePhase, dashboard.alignedBatches],
   )
   const currentVectors = useMemo(
-    () => buildVectors(onlinePMUs, pmus, 'current', currentPhase),
-    [onlinePMUs, pmus, currentPhase],
+    () => buildVectors(onlinePMUs, pmus, 'current', currentPhase, dashboard.alignedBatches),
+    [onlinePMUs, pmus, currentPhase, dashboard.alignedBatches],
   )
 
   const emptyHint = !onlinePMUs.length
     ? 'No online PMUs — connect a stream to plot live phasors.'
-    : undefined
+    : !diagramBatch
+      ? 'Waiting for aligned samples…'
+      : undefined
 
   return (
     <Box className="analytics-page" sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -144,6 +155,10 @@ export function AnalyticsPage() {
           <Typography variant="h6" component="h3">
             Phasor diagrams
           </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            Same aligned tick as Overview / Analytics charts
+            {diagramBatch ? ` · ${formatTSMs(diagramBatch.ts)}` : ''}
+          </Typography>
         </Box>
 
         <Grid container spacing={2}>
@@ -168,6 +183,8 @@ export function AnalyticsPage() {
                 kind="voltage"
                 vectors={voltageVectors}
                 emptyMessage={emptyHint}
+                sampleTs={diagramBatch?.ts}
+                missing={diagramMissing}
               />
             </Stack>
           </Grid>
@@ -192,6 +209,8 @@ export function AnalyticsPage() {
                 kind="current"
                 vectors={currentVectors}
                 emptyMessage={emptyHint}
+                sampleTs={diagramBatch?.ts}
+                missing={diagramMissing}
               />
             </Stack>
           </Grid>

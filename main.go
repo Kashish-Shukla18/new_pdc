@@ -67,7 +67,7 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
+	if err != nil || d < 0 {
 		return fallback
 	}
 	return d
@@ -224,7 +224,7 @@ func (p *pipeline) HandleFrame(pmuName string, raw []byte, receivedAt time.Time)
 	if qerr != nil {
 		rejectReason = qerr.Error()
 		monitoring.IncQualityRejected()
-		monitoring.IncQualityRejectForPMU(pmuName)
+		monitoring.IncQualityRejectForPMU(pmuName, rejectReason)
 		monitoring.NoteFrameQualityFlag(pmuName, rejectReason, reading)
 		log.Printf("[%s] quality reject: %v", pmuName, qerr)
 		monitoring.RecordConversation(pmuName, "PDC", "PDC", "quality", "rejected", rejectReason)
@@ -460,6 +460,7 @@ func main() {
 	}
 
 	stagger := envDuration("PMU_STARTUP_STAGGER", 2*time.Second)
+	log.Printf("starting %d PMUs in parallel (startup stagger=%s; 0s = all at once)", len(pmus), stagger)
 	for i := range pmus {
 		pmus[i].Normalize()
 		pmu := pmus[i]
