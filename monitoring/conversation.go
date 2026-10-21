@@ -128,7 +128,11 @@ type PMUState struct {
 	TotalFrames    int64              `json:"totalFrames"`
 	ApproxFPS      float64            `json:"approxFps"`
 	QualityRejects int64              `json:"qualityRejects"`
-	SinkErrors     int64              `json:"sinkErrors"`
+	// SkewRejects counts quality rejects whose reason mentions clock skew.
+	SkewRejects int64 `json:"skewRejects"`
+	// LastQualityReject is the most recent Validate() reason (empty if never rejected).
+	LastQualityReject string `json:"lastQualityReject,omitempty"`
+	SinkErrors        int64  `json:"sinkErrors"`
 	SpoolQueued    int64              `json:"spoolQueued"`
 	LastReading    TrendPoint         `json:"lastReading"`
 	LastPhasor     PhasorSnapshot     `json:"lastPhasor"`
@@ -206,9 +210,11 @@ type pmuRuntime struct {
 	lastReceivedAt time.Time // Trace.ReceivedAt from latest DATA frame
 	lastHandshake  time.Time
 	lastError      string
-	totalFrames    int64
-	qualityReject  int64
-	sinkErrors     int64
+	totalFrames       int64
+	qualityReject     int64
+	skewReject        int64
+	lastQualityReject string
+	sinkErrors        int64
 	spoolQueued    int64
 	lastPhasor     PhasorSnapshot
 	lastChannels   ChannelSnapshot
@@ -218,6 +224,7 @@ type pmuRuntime struct {
 	statDataError  bool
 	approxFPS      float64
 	fpsWindowStart time.Time
+	fpsMeasStart   time.Time
 	fpsWindowCount int
 	lastFPSKey     string // last SOC|FRACSEC counted toward approxFPS (dedupe wire repeats)
 	lastTrendAt    time.Time
@@ -650,38 +657,14 @@ func recordReadingSync(r parser.Reading) {
 		Digitals:     append([]uint16(nil), r.Digitals...),
 	}
 
-	// FPS = unique measurement stamps / sec (SOC+FRACSEC). Some devices/sims
-	// emit several identical DATA frames per reporting instant; counting every
-	// TCP frame then shows e.g. 100 / 25 while CFG DATA_RATE is 25.
+	// FPS = unique measurement stamps / sec of PMU time (SOC+FRACSEC), not
+	// wall-clock receive gaps. TCP can deliver 200 Hz as a burst then a pause;
+	// counting against receive time then flickers 199/204 while nothing is lost.
 	gap := time.Duration(0)
 	if !prevFrame.IsZero() {
 		gap = now.Sub(prevFrame)
 	}
-	stampKey := fmt.Sprintf("%d:%d", r.SOC, r.FracSecCount)
-	newStamp := stampKey != st.lastFPSKey
-	if newStamp {
-		st.lastFPSKey = stampKey
-	}
-	if st.fpsWindowStart.IsZero() || gap > 750*time.Millisecond {
-		st.fpsWindowStart = now
-		if newStamp {
-			st.fpsWindowCount = 1
-		} else {
-			st.fpsWindowCount = 0
-		}
-	} else if newStamp {
-		st.fpsWindowCount++
-		if elapsed := now.Sub(st.fpsWindowStart); elapsed >= time.Second {
-			instant := float64(st.fpsWindowCount) / elapsed.Seconds()
-			if st.approxFPS <= 0 {
-				st.approxFPS = instant
-			} else {
-				st.approxFPS = st.approxFPS*0.35 + instant*0.65
-			}
-			st.fpsWindowStart = now
-			st.fpsWindowCount = 0
-		}
-	}
+	st.noteUniqueStampFPS(now, r.Timestamp, r.SOC, r.FracSecCount, profileRateFPS(r.PMUName), gap)
 
 	// Downsample dashboard trends (~10 Hz) so fleet charts stay smooth at 100s of PMUs.
 	if st.lastTrendAt.IsZero() || now.Sub(st.lastTrendAt) >= trendMinInterval {
@@ -698,12 +681,16 @@ func recordReadingSync(r parser.Reading) {
 	ApplyTraceHops(r.PMUName, r.Trace)
 }
 
-func IncQualityRejectForPMU(pmu string) {
+func IncQualityRejectForPMU(pmu, reason string) {
 	conversationBus.mu.Lock()
 	defer conversationBus.mu.Unlock()
 	st := getOrCreatePMU(pmu)
 	st.qualityReject++
+	st.lastQualityReject = reason
 	st.lastEventTime = time.Now().UTC()
+	if strings.Contains(strings.ToLower(reason), "skew") {
+		st.skewReject++
+	}
 }
 
 func IncSinkErrorForPMU(pmu string) {
@@ -909,11 +896,58 @@ func snapshotEvents() []ConversationEvent {
 }
 
 func snapshotDashboard() DashboardState {
+	now, pmus, alignStatus, alignedCopy, eventCount := snapshotDashboardCore()
+
+	hops := copyAllLastHops()
+	for i := range pmus {
+		if h := hops[pmus[i].Name]; len(h) > 0 {
+			pmus[i].LastHops = h
+		}
+		if snap := PeekTCPUnread(pmus[i].Name); snap.OK {
+			u, m := snap.UnreadBytes, snap.RecvBufMax
+			pmus[i].TCPUnreadBytes = &u
+			pmus[i].TCPRecvBufMax = &m
+		}
+		if !pmus[i].Connected {
+			continue
+		}
+		wait := 0.0
+		if h := hops[pmus[i].Name]; len(h) > 0 {
+			wait = h[StageFrameGap]
+		}
+		cfgRate := float64(pmus[i].CFG.DataRate)
+		if cfgRate < 0 {
+			cfgRate = 1.0 / float64(-pmus[i].CFG.DataRate)
+		}
+		if pmus[i].ApproxFPS <= 0 {
+			if wait > 1 && wait < 500 {
+				pmus[i].ApproxFPS = 1000.0 / wait
+			} else if cfgRate > 0 {
+				pmus[i].ApproxFPS = cfgRate
+			}
+		}
+	}
+
+	sort.Slice(pmus, func(i, j int) bool {
+		return pmus[i].Name < pmus[j].Name
+	})
+
+	return DashboardState{
+		NowUTC:         now,
+		PMUs:           pmus,
+		EventCount:     eventCount,
+		Latency:        SnapshotPipelineLatency(),
+		Aligner:        alignStatus,
+		AlignedBatches: alignedCopy,
+	}
+}
+
+func snapshotDashboardCore() (now time.Time, pmus []PMUState, alignStatus AlignerStatus, alignedCopy []AlignedBatch, eventCount int) {
 	conversationBus.mu.Lock()
 	defer conversationBus.mu.Unlock()
 
-	now := time.Now().UTC()
-	pmus := make([]PMUState, 0, len(conversationBus.pmus))
+	now = time.Now().UTC()
+	pmus = make([]PMUState, 0, len(conversationBus.pmus))
 
 	for _, st := range conversationBus.pmus {
 		if st.name == "SYSTEM" {
@@ -969,10 +1003,12 @@ func snapshotDashboard() DashboardState {
 			LastReceivedAt: st.lastReceivedAt,
 			LastHandshake:  st.lastHandshake,
 			LastError:      st.lastError,
-			TotalFrames:    st.totalFrames,
-			ApproxFPS:      fps,
-			QualityRejects: st.qualityReject,
-			SinkErrors:     st.sinkErrors,
+			TotalFrames:       st.totalFrames,
+			ApproxFPS:         fps,
+			QualityRejects:    st.qualityReject,
+			SkewRejects:       st.skewReject,
+			LastQualityReject: st.lastQualityReject,
+			SinkErrors:        st.sinkErrors,
 			SpoolQueued:    st.spoolQueued,
 			LastReading:    last,
 			LastPhasor:     lastPhasor,
@@ -985,48 +1021,11 @@ func snapshotDashboard() DashboardState {
 		})
 	}
 
-	hops := copyAllLastHops()
-	for i := range pmus {
-		if h := hops[pmus[i].Name]; len(h) > 0 {
-			pmus[i].LastHops = h
-		}
-		// Peek OS TCP Rx queue (bytes not yet Read). Skip UDP DATA paths.
-		if snap := PeekTCPUnread(pmus[i].Name); snap.OK {
-			u, m := snap.UnreadBytes, snap.RecvBufMax
-			pmus[i].TCPUnreadBytes = &u
-			pmus[i].TCPRecvBufMax = &m
-		}
-		if !pmus[i].Connected {
-			continue
-		}
-		// Fill cold counter from inter-frame wait only. Do not overwrite a real
-		// 1s window rate with instantaneous frame_gap (that inflated FPS vs CFG).
-		wait := 0.0
-		if h := hops[pmus[i].Name]; len(h) > 0 {
-			wait = h[StageFrameGap]
-		}
-		cfgRate := float64(pmus[i].CFG.DataRate)
-		if cfgRate < 0 {
-			cfgRate = 1.0 / float64(-pmus[i].CFG.DataRate)
-		}
-		if pmus[i].ApproxFPS <= 0 {
-			if wait > 1 && wait < 500 {
-				pmus[i].ApproxFPS = 1000.0 / wait
-			} else if cfgRate > 0 {
-				pmus[i].ApproxFPS = cfgRate
-			}
-		}
-	}
-
-	sort.Slice(pmus, func(i, j int) bool {
-		return pmus[i].Name < pmus[j].Name
-	})
-
 	pct := 0.0
 	if conversationBus.alignEmitted > 0 {
 		pct = 100 * float64(conversationBus.alignComplete) / float64(conversationBus.alignEmitted)
 	}
-	alignStatus := AlignerStatus{
+	alignStatus = AlignerStatus{
 		N:           conversationBus.alignN,
 		FPS:         conversationBus.alignFPS,
 		PeriodMs:    float64(conversationBus.alignPeriod) / float64(time.Millisecond),
@@ -1040,20 +1039,13 @@ func snapshotDashboard() DashboardState {
 		Cap:         conversationBus.alignCap,
 		CompletePct: pct,
 	}
-	alignedCopy := make([]AlignedBatch, len(conversationBus.alignedBatches))
+	alignedCopy = make([]AlignedBatch, len(conversationBus.alignedBatches))
 	copy(alignedCopy, conversationBus.alignedBatches)
 	if len(alignedCopy) > alignedBatchExport {
 		alignedCopy = alignedCopy[len(alignedCopy)-alignedBatchExport:]
 	}
-
-	return DashboardState{
-		NowUTC:         now,
-		PMUs:           pmus,
-		EventCount:     len(conversationBus.events),
-		Latency:        SnapshotPipelineLatency(),
-		Aligner:        alignStatus,
-		AlignedBatches: alignedCopy,
-	}
+	eventCount = len(conversationBus.events)
+	return now, pmus, alignStatus, alignedCopy, eventCount
 }
 
 func addSubscriber(ch chan ConversationEvent) {

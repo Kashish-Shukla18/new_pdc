@@ -125,6 +125,10 @@ export type LivePMUState = {
   totalFrames: number
   approxFps: number
   qualityRejects: number
+  /** Quality rejects whose reason mentions clock skew. */
+  skewRejects?: number
+  /** Most recent Validate() reject reason. */
+  lastQualityReject?: string
   sinkErrors: number
   spoolQueued: number
   lastReading: TrendPoint

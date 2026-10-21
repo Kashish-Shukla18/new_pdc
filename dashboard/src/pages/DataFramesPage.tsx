@@ -3,6 +3,7 @@ import { FreqChart } from '../components/dataframes/FreqChart'
 import { useDashboardContext } from '../context/DashboardContext'
 import { round } from '../utils/format'
 import { displayPhasors, formatPhasorCfgList } from '../utils/phasorLabels'
+import { displayFps } from '../utils/pmu'
 import { trendFromAlignedBatches } from '../utils/alignedChart'
 
 function hexWord(n: number | undefined, width = 4) {
@@ -119,7 +120,7 @@ export function DataFramesPage() {
                   <div>ANALOG ({cfg.analogs.length}): {formatList(cfg.analogs, '—')}</div>
                   <div>DIGITAL words: {cfg.digitalWords}</div>
                   {cfg.headerText ? <div>HDR: {cfg.headerText}</div> : null}
-                  <div>Live FPS: {Math.round(selectedFramePMU.approxFps)}</div>
+                  <div>Live FPS: {Math.round(displayFps(selectedFramePMU, selectedFramePMU.meta?.targetFps))}</div>
                 </>
               )}
             </div>
