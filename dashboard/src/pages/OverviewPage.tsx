@@ -31,7 +31,7 @@ import {
   ChartSeriesTooltip,
 } from '../utils/chartTooltip'
 import { formatTS, formatTSMs, round } from '../utils/format'
-import { chartLabel, packetLossOf, pmuKey } from '../utils/pmu'
+import { chartLabel, displayFps, packetLossOf, pmuKey } from '../utils/pmu'
 import { rowsFromAlignedBatches, ALIGNED_CHART_WINDOW } from '../utils/alignedChart'
 
 type FreqMode = 'absolute' | 'deviation'
@@ -114,7 +114,7 @@ export function OverviewPage() {
 
   const offlineCount = pmus.filter((p) => !p.connected).length
   const issuesCount = pmus.filter((p) => !p.connected || packetLossOf(p) > 1).length
-  const totalFps = Math.round(pmus.reduce((sum, p) => sum + p.approxFps, 0))
+  const totalFps = Math.round(pmus.reduce((sum, p) => sum + displayFps(p, p.meta.targetFps), 0))
   const uniqueSubstations = new Set(pmus.map((p) => p.meta.substation)).size
 
   const fleetSnapshot = useMemo(() => {

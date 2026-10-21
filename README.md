@@ -1,181 +1,247 @@
 # PDC — Phasor Data Concentrator
 
-A program that listens to power-grid sensors (PMUs), checks their data, lines
-the timestamps up, and shows it on a live dashboard.
+## Objective
 
-## Architecture (wire diagram)
+This project is a **Phasor Data Concentrator (PDC)** for IEEE C37.118 synchrophasor streams.
 
-Everything below is what runs **today**. Layout (CFG-2) always comes from the
-live PMU handshake — never from static config files on disk.
+It connects to one or more PMUs (or lab simulators), learns each device’s channel layout from the live CFG-2 handshake, validates incoming DATA frames, time-aligns measurements across devices, and presents a live operator dashboard. Optionally it can persist CFG versions, stream events, and DATA frames to TimescaleDB for history.
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  SOURCES                                                                      │
-│  Lab / field PMUs or simulators · IEEE C37.118.2 over TCP (or UDP)            │
-└────────────────────────────────┬─────────────────────────────────────────────┘
-                                 │  DATA frames (0xAA…)
-                                 │  CFG-2 on handshake
-                                 ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  RECEIVER  (receiver/)                                                         │
-│  • Dial IP:port · exclusive instance lock (port 21119)                        │
-│  • Handshake: CMD_SEND_CFG2 (retry until reply) → CMD_DATA_ON                 │
-│  • Stream: read each DATA frame + wall-clock receivedAt                       │
-│  • CRC via parser.CRC16                                                       │
-└────────────────────────────────┬─────────────────────────────────────────────┘
-                                 │  raw bytes + receivedAt
-                                 ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  PIPELINE  (main.go HandleFrame)                                               │
-│                                                                                │
-│   1. PARSE     parser.ParseDataFrame                                           │
-│                uses Profile from CFG-2 (phasors, Analog1…N, freq, STAT)        │
-│                                                                                │
-│   2. QUALITY   aligner.Checker (clock skew / STAT sanity)                      │
-│                                                                                │
-│   3. SPLIT ───► A) live path          B) align path          C) dump tape      │
-└───────────────┬───────────────────────┬───────────────────────┬───────────────┘
-                │                       │                       │
-                ▼                       ▼                       ▼
-┌───────────────────────┐  ┌────────────────────────┐  ┌────────────────────────┐
-│ A) LIVE INVENTORY     │  │ B) TIME ALIGNER        │  │ C) FRAME CAPTURE       │
-│ monitoring/           │  │ aligner/               │  │ output/frame_capture   │
-│                       │  │                        │  │                        │
-│ RecordReading         │  │ Bank: per-PMU map      │  │ Last N frames in RAM   │
-│ • lastChannels        │  │   key = SOC+FRACSEC ms │  │ dump: cmd/dump-frames  │
-│ • trends / FPS        │  │   value = Reading      │  │ CSV under data/        │
-│ • lastHops (5 stages) │  │   cap ~50–200 slots    │  └────────────────────────┘
-│                       │  │                        │
-│ /conversation/state   │  │ Publisher (no wait):   │
-│ /conversation/latency │  │   tick grid @ CFG rate │
-│ Prometheus :2112      │  │   head = MinNewest     │
-└───────────┬───────────┘  │   emit present/missing │
-            │              │                        │
-            │              │ RecordAlignedFrame ──► alignedBatches[]            │
-            │              │                        │
-            │              │ Inspect:               │
-            │              │  /conversation/        │
-            │              │   aligner-buffers/     │
-            │              │   sheets (.xls/HTML)   │
-            │              └────────────┬───────────┘
-            │                           │
-            └─────────────┬─────────────┘
-                          ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  DASHBOARD  (dashboard/ — React + Vite)                                        │
-│  http://localhost:5173  →  proxies /conversation → :2112                       │
-│                                                                                │
-│  Overview     frequency / trends from alignedBatches (gaps = holes)            │
-│  Analytics    VA/VB/VC + CFG analogs (Analog1…) from alignedBatches            │
-│               phasor diagrams from lastChannels                                │
-│  Connectivity five hop stages (see Latency below)                              │
-│  Devices     add/edit PMUs via config API                                     │
-└──────────────────────────────────────────────────────────────────────────────┘
-                          ▲
-                          │ REST
-┌─────────────────────────┴────────────────────────────────────────────────────┐
-│  PMU ADDRESS BOOK                                                              │
-│  store/ + api/  ←→  Postgres/Timescale  (docker: timescaledb :5433)            │
-│  Config API: http://127.0.0.1:8081                                             │
-│  manager/ starts/stops receivers when you add/remove a PMU                     │
-└──────────────────────────────────────────────────────────────────────────────┘
+**In short:** turn raw PMU streams into a reliable live view (and optional history) for monitoring, comparison, and operations.
 
-PARKED (not wired into the live path)
-  output/sink.go + output/postgres/  →  Timescale history writer (re-enable later)
-```
+---
 
-### Latency hops (what we measure)
+## What it does
 
-Only five stages — enough to tell “PMU period” from “PDC work”:
+- Connects to PMUs over **IEEE C37.118.2** (TCP or UDP)
+- Performs CFG-2 handshake and parses DATA frames
+- Applies quality checks (clock skew, STAT, frequency sanity)
+- Time-aligns multi-PMU samples for charts (no-wait tick grid)
+- Serves a React dashboard (overview, devices, data frames, connectivity, analytics)
+- Stores the PMU address book in Postgres/Timescale
+- Optionally writes history when `ENABLE_HISTORY=true`
 
+**Not included yet:** authentication on the APIs, TLS termination in-app, multi-instance HA. Treat local ports as lab/dev surfaces unless you put them behind your own network controls.
 
-| Stage            | ID                      | Meaning                                                             |
-| ---------------- | ----------------------- | ------------------------------------------------------------------- |
-| Frame gap        | `frame_gap`             | Idle time between DATA frames (~40 ms @ 25 FPS). **Not** PDC delay. |
-| Parse            | `parse`                 | Decode DATA with CFG-2 profile.                                     |
-| Align wait       | `align_wait`            | Sample sat in buffer until tick emit (head lag).                    |
-| Dashboard record | `dashboard_record`      | Write into live inventory.                                          |
-| End-to-end       | `e2e_recv_to_dashboard` | Frame complete → dashboard recorded.                                |
+---
 
-
-### Align publish rule (simple)
+## Architecture (high level)
 
 ```text
-  For each tick T on a ruler (period = 1000 / CFG DATA_RATE ms):
-
-      do not advance past MinNewest (slowest live PMU)
-      collect every PMU sample near T (± half period)
-      if nobody has data near T → skip tick (no fake hole)
-      else emit { present, missing, complete } → charts
+PMUs / simulators (C37.118)
+        │
+        ▼
+   Receiver ──► Parse ──► Quality
+        │                    │
+        │                    ├─► Live dashboard state (:2112)
+        │                    ├─► Time aligner ──► aligned charts
+        │                    ├─► Frame capture (in-RAM dump tape)
+        │                    └─► History writer (optional, Timescale)
+        │
+   Manager ◄── Config API (:8081) ◄── Device Inventory (dashboard)
+        │
+        ▼
+   Postgres / Timescale  (address book + optional history)
 ```
 
-No wait timer: as soon as the slowest stream reaches T, we emit what we have.
+| Layer | Role |
+| ----- | ---- |
+| Receiver | Dial PMU, handshake, keep the stream alive |
+| Parser | CFG-2 profile + DATA decode |
+| Quality + aligner | Gate bad samples; align timestamps for multi-PMU charts |
+| Manager + API | Start/stop streams when devices are added or removed |
+| Store | Address book in Postgres |
+| Monitoring | Live state, latency hops, metrics (`:2112`) |
+| Output | In-RAM frame dumps; optional Timescale history |
+| Dashboard | Operator UI (`:5173` in dev) |
 
-### What we do / do not
+---
 
-- **Does:** connect, CFG-2 handshake, parse, quality-check, live dashboard, time-aligned analytics charts, in-RAM frame dumps, PMU CRUD in Postgres.
-- **Does not (yet):** persist every reading to Timescale via the parked sink.
+## Repository layout
 
-## Folders (simple map)
+| Path | Purpose |
+| ---- | ------- |
+| `main.go` | Wires the pipeline and starts services |
+| `receiver/` | PMU connection and stream I/O |
+| `parser/` | C37.118 CFG-2 / DATA parsing |
+| `aligner/` | Quality checks, buffers, tick publisher |
+| `manager/` | Lifecycle of configured vs live PMUs |
+| `store/` | Address-book persistence |
+| `api/` | REST API for device inventory (`:8081`) |
+| `monitoring/` | Dashboard feed, metrics, latency |
+| `output/` | Frame capture + optional history writer |
+| `config/` | PMU config helpers (including timestamp TZ) |
+| `dashboard/` | React + Vite UI |
+| `sql/` | First-boot DB schema for Docker |
+| `cmd/dump-frames/` | Helper to export recent frames to CSV |
+| `docker-compose.local.yaml` | Local Timescale (and optional tools) |
+| `docker-compose.yaml` | Server/EC2 Timescale (localhost-bound) |
+| `start.ps1` / `stop.ps1` | Start / stop the PDC on Windows |
 
+---
 
-| Folder             | Plain-English job                                         |
-| ------------------ | --------------------------------------------------------- |
-| `receiver/`        | Call the PMU, handshake, keep the stream alive            |
-| `parser/`          | CFG-2 profile + DATA decode (CRC, phasors, analogs)       |
-| `aligner/`         | Quality gate + per-PMU timestamp buffers + tick publisher |
-| `manager/`         | Start/stop receivers when PMUs are added/removed          |
-| `store/`           | PMU address book in Postgres                              |
-| `api/`             | REST for that address book (`:8081`)                      |
-| `monitoring/`      | Live state, alignedBatches, latency hops, SSE (`:2112`)   |
-| `output/`          | Frame dump tape (active) + Postgres history sink (parked) |
-| `dashboard/`       | React UI                                                  |
-| `cmd/dump-frames/` | Save the last N frames to CSV                             |
-| `sql/`             | Creates the PMU address-book table on first boot          |
+## Prerequisites
 
+- **Go** 1.22+ (module targets a recent Go toolchain)
+- **Node.js** 20+ (for the dashboard)
+- **Docker** (for TimescaleDB)
+- **Git**
+- Windows PowerShell recommended for `start.ps1` / `stop.ps1` (Linux/macOS: run `go run .` directly)
 
-## Start
+---
 
-**1. Postgres** (address book):
+## Clone and run
+
+### 1. Clone
+
+```bash
+git clone https://github.com/Kashish-Shukla18/new_pdc.git
+cd new_pdc
+```
+
+### 2. Environment
+
+```powershell
+copy .env.example .env
+```
+
+Edit `.env`. Minimum for local laptop:
+
+```env
+POSTGRES_DSN=postgres://pdc:pdc@127.0.0.1:5433/pdc?sslmode=disable
+POSTGRES_RECONNECT_SEC=5s
+
+# Optional history (CFG / events / DATA frames → Timescale)
+ENABLE_HISTORY=false
+
+# How measurement SOC is interpreted → UTC (fleet default).
+# Prefer UTC for GPS/true-UTC devices; use Asia/Kolkata or IST when devices
+# paint local wall time into SOC. Per-device override can be set later in inventory.
+PMU_TIMESTAMP_TZ=UTC
+```
+
+Notes:
+
+- `.env` is gitignored. Real OS environment variables override `.env`.
+- Local Docker publishes Timescale on **host port 5433**.
+- Server compose (`docker-compose.yaml`) uses **127.0.0.1:5432** — set `POSTGRES_DSN` accordingly and provide `POSTGRES_PASSWORD`.
+
+Common optional knobs (see `.env.example`):
+
+| Variable | Meaning |
+| -------- | ------- |
+| `ENABLE_HISTORY` | Persist frames/events to Timescale (`true`/`false`) |
+| `PMU_TIMESTAMP_TZ` | Fleet default for SOC reinterpretation |
+| `PMU_STARTUP_STAGGER` | Delay between starting PMUs at boot (`0s` = all at once) |
+| `MAX_CLOCK_SKEW` | Quality gate for measurement vs receive time |
+| `DROP_QUALITY_REJECTED` | Drop bad frames from the live/align path |
+
+### 3. Docker (database)
+
+**Local development** (required service only):
 
 ```powershell
 docker compose -f docker-compose.local.yaml up -d timescaledb
 ```
 
-**2. PDC:**
+Wait until healthy, then confirm:
+
+```powershell
+docker compose -f docker-compose.local.yaml ps
+```
+
+Optional tools (pgAdmin on `:5050`, Prometheus on `:9090`):
+
+```powershell
+docker compose -f docker-compose.local.yaml up -d pgadmin prometheus
+```
+
+**Server / EC2:**
+
+```bash
+export POSTGRES_PASSWORD='choose-a-strong-password'
+docker compose up -d
+```
+
+Then point `POSTGRES_DSN` at `127.0.0.1:5432` with that password.
+
+### 4. Start the PDC
 
 ```powershell
 .\start.ps1
 ```
 
-**3. Dashboard:**
+This runs `go run .` in the foreground (Ctrl+C to stop). If a previous instance is stuck:
+
+```powershell
+.\stop.ps1
+```
+
+On Linux/macOS:
+
+```bash
+go run .
+```
+
+### 5. Start the dashboard
 
 ```powershell
 cd dashboard
-npm install   # first time
+npm install
 npm run dev
 ```
 
+Open **http://localhost:5173**
 
-| What                                 | URL                                                                                                                    |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Dashboard                            | [http://localhost:5173](http://localhost:5173)                                                                         |
-| Live data / metrics / aligner sheets | [http://127.0.0.1:2112](http://127.0.0.1:2112)                                                                         |
-| PMU config API                       | [http://127.0.0.1:8081](http://127.0.0.1:8081)                                                                         |
-| Aligner buffer sheets                | [http://127.0.0.1:2112/conversation/aligner-buffers/sheets](http://127.0.0.1:2112/conversation/aligner-buffers/sheets) |
+---
 
+## URLs
 
-Stop the PDC with Ctrl+C, or `.\stop.ps1` if an orphan is stuck.
+| What | URL |
+| ---- | --- |
+| Dashboard | http://localhost:5173 |
+| Live state / metrics | http://127.0.0.1:2112 |
+| PMU config API | http://127.0.0.1:8081 |
 
-## Frame dumps
+Flags (optional):
+
+```powershell
+.\start.ps1 -metrics-addr=:2112 -api-addr=:8081
+```
+
+---
+
+## Using the app
+
+1. Open **Device Inventory** and add a PMU (IP, port, protocol).
+2. Connect — the PDC handshakes, learns CFG-2, and starts DATA.
+3. Use **Overview** / **Analytics** for live and time-aligned views.
+4. Use **Connectivity** when latency or loss looks wrong.
+5. Use **Data Frames** to inspect CFG/DATA decode for a stream.
+
+Measurement timezone defaults to `PMU_TIMESTAMP_TZ`. Per-device `timestamp_tz` is stored on the address-book row when set via the API.
+
+---
+
+## Frame dumps (optional)
+
+Export recent in-memory frames to CSV under `data/`:
 
 ```powershell
 go run ./cmd/dump-frames -count 1500
 ```
 
-## Optional
+---
 
-```powershell
-docker compose -f docker-compose.local.yaml up -d prometheus pgadmin
-```
+## Stop
 
+| Component | How |
+| --------- | --- |
+| PDC | Ctrl+C in the `start.ps1` terminal, or `.\stop.ps1` |
+| Dashboard | Ctrl+C in the `npm run dev` terminal |
+| Docker DB | `docker compose -f docker-compose.local.yaml down` (add `-v` only if you want to wipe data) |
+
+---
+
+## License / status
+
+Lab / research PDC. Harden network exposure (bind, auth, TLS) before production use on shared networks.

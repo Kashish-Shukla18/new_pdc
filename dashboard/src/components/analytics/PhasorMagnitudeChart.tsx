@@ -1,15 +1,20 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Card,
   CardContent,
   CardHeader,
+  Checkbox,
   FormControl,
   InputLabel,
+  ListItemText,
   MenuItem,
+  OutlinedInput,
   Select,
+  Stack,
   Typography,
 } from '@mui/material'
+import type { SelectChangeEvent } from '@mui/material/Select'
 import {
   CartesianGrid,
   Line,
@@ -20,8 +25,8 @@ import {
   YAxis,
 } from 'recharts'
 import { CHART_COLORS } from '../../constants'
-import type { AlignedBatch, PMUWithMeta } from '../../types/dashboard'
-import { ExternalChartLegend, useSeriesVisibility } from '../../utils/chartLegend'
+import type { AlignedBatch, AlignedPoint, PMUWithMeta } from '../../types/dashboard'
+import { ExternalChartLegend } from '../../utils/chartLegend'
 import {
   CHART_AXIS_TICK,
   CHART_GRID_STROKE,
@@ -38,26 +43,36 @@ type Props = {
   alignedBatches?: AlignedBatch[]
 }
 
-const V_PHASES = [
-  { key: 'va', label: 'VA', unit: 'V' },
-  { key: 'vb', label: 'VB', unit: 'V' },
-  { key: 'vc', label: 'VC', unit: 'V' },
-] as const
+/** Top-level metric group in the first dropdown. */
+type MetricGroup = 'magnitude' | 'angle' | 'analogs'
 
-const I_PHASES = [
-  { key: 'ia', label: 'IA', unit: 'A' },
-  { key: 'ib', label: 'IB', unit: 'A' },
-  { key: 'ic', label: 'IC', unit: 'A' },
-] as const
-
-type PhaseKey = (typeof V_PHASES)[number]['key'] | (typeof I_PHASES)[number]['key']
-
-type SeriesOption = {
+type ChannelOption = {
   key: string
   label: string
   unit: string
-  kind: 'phase' | 'analog'
+  field?: keyof AlignedPoint
+  analogName?: string
 }
+
+const V_PHASES = [
+  { key: 'va', label: 'VA', unit: 'V', angleKey: 'vaAngle' as const },
+  { key: 'vb', label: 'VB', unit: 'V', angleKey: 'vbAngle' as const },
+  { key: 'vc', label: 'VC', unit: 'V', angleKey: 'vcAngle' as const },
+] as const
+
+const I_PHASES = [
+  { key: 'ia', label: 'IA', unit: 'A', angleKey: 'iaAngle' as const },
+  { key: 'ib', label: 'IB', unit: 'A', angleKey: 'ibAngle' as const },
+  { key: 'ic', label: 'IC', unit: 'A', angleKey: 'icAngle' as const },
+] as const
+
+const METRIC_LABEL: Record<MetricGroup, string> = {
+  magnitude: 'Magnitude',
+  angle: 'Angle',
+  analogs: 'Analogs',
+}
+
+const CHANNEL_DASH = ['', '6 3', '2 3', '8 3 2 3']
 
 function cfgAnalogNames(pmus: PMUWithMeta[]): string[] {
   const out: string[] = []
@@ -75,6 +90,35 @@ function cfgAnalogNames(pmus: PMUWithMeta[]): string[] {
   return out
 }
 
+function channelsForGroup(
+  group: MetricGroup,
+  phaseKeys: typeof V_PHASES | typeof I_PHASES,
+  analogNames: string[],
+): ChannelOption[] {
+  if (group === 'magnitude') {
+    return phaseKeys.map((p) => ({
+      key: p.key,
+      label: p.label,
+      unit: p.unit,
+      field: p.key,
+    }))
+  }
+  if (group === 'angle') {
+    return phaseKeys.map((p) => ({
+      key: `${p.key}Angle`,
+      label: `${p.label} ∠`,
+      unit: '°',
+      field: p.angleKey,
+    }))
+  }
+  return analogNames.map((name) => ({
+    key: `analog:${name}`,
+    label: name,
+    unit: '',
+    analogName: name,
+  }))
+}
+
 export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props) {
   const phaseKeys = kind === 'voltage' ? V_PHASES : I_PHASES
   const analogNames = useMemo(
@@ -82,109 +126,207 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
     [kind, pmus],
   )
 
-  const seriesOptions = useMemo<SeriesOption[]>(() => {
-    const phases: SeriesOption[] = phaseKeys.map((p) => ({
-      key: p.key,
-      label: p.label,
-      unit: p.unit,
-      kind: 'phase',
-    }))
-    const analogs: SeriesOption[] = analogNames.map((name) => ({
-      key: `analog:${name}`,
-      label: name,
-      unit: '',
-      kind: 'analog',
-    }))
-    return [...phases, ...analogs]
-  }, [phaseKeys, analogNames])
+  const metricGroups = useMemo<MetricGroup[]>(() => {
+    const groups: MetricGroup[] = ['magnitude', 'angle']
+    if (analogNames.length) groups.push('analogs')
+    return groups
+  }, [analogNames.length])
 
-  const defaultKey = kind === 'voltage' ? 'va' : 'ia'
-  const [selectedKey, setSelectedKey] = useState(defaultKey)
+  const [metric, setMetric] = useState<MetricGroup>('magnitude')
+  const activeMetric = metricGroups.includes(metric) ? metric : 'magnitude'
 
-  const selected =
-    seriesOptions.find((opt) => opt.key === selectedKey) ?? seriesOptions[0] ?? {
-      key: defaultKey,
-      label: defaultKey.toUpperCase(),
-      unit: kind === 'voltage' ? 'V' : 'A',
-      kind: 'phase' as const,
+  const channelOptions = useMemo(
+    () => channelsForGroup(activeMetric, phaseKeys, analogNames),
+    [activeMetric, phaseKeys, analogNames],
+  )
+
+  const allChannelKeys = useMemo(() => channelOptions.map((c) => c.key), [channelOptions])
+  const channelKeySig = allChannelKeys.join('\0')
+
+  const [selectedChannels, setSelectedChannels] = useState<string[]>(() => allChannelKeys)
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set())
+
+  // When metric / channel catalog changes, select all and clear legend hides.
+  useEffect(() => {
+    setSelectedChannels(allChannelKeys)
+    setHidden(new Set())
+  }, [activeMetric, channelKeySig])
+
+  const selectedOptions = useMemo(
+    () => channelOptions.filter((c) => selectedChannels.includes(c.key)),
+    [channelOptions, selectedChannels],
+  )
+
+  const unit =
+    selectedOptions[0]?.unit ??
+    (activeMetric === 'angle' ? '°' : kind === 'voltage' ? 'V' : 'A')
+
+  const chartSeries = useMemo(() => {
+    const out: {
+      dataKey: string
+      name: string
+      color: string
+      dash?: string
+      channelKey: string
+    }[] = []
+    let seriesIdx = 0
+    // Color each line uniquely. (Color-by-PMU alone made IA/IB/IC identical for 1 PMU → fuzzy band.)
+    selectedOptions.forEach((ch, chIdx) => {
+      pmus.forEach((pmu) => {
+        const suffix = ch.analogName ? pmuKey(ch.analogName) : ch.key
+        out.push({
+          dataKey: `${pmuKey(pmu.name)}__${suffix}`,
+          name:
+            pmus.length === 1
+              ? ch.label
+              : `${chartLabel(pmu)} · ${ch.label}`,
+          color: CHART_COLORS[seriesIdx % CHART_COLORS.length],
+          dash: CHANNEL_DASH[chIdx % CHANNEL_DASH.length] || undefined,
+          channelKey: ch.key,
+        })
+        seriesIdx++
+      })
+    })
+    return out
+  }, [selectedOptions, pmus])
+
+  const seriesKeys = useMemo(() => chartSeries.map((s) => s.dataKey), [chartSeries])
+  const seriesKeySig = seriesKeys.join('\0')
+
+  const activeHidden = useMemo(() => {
+    const next = new Set<string>()
+    for (const k of hidden) {
+      if (seriesKeys.includes(k)) next.add(k)
     }
+    return next
+  }, [hidden, seriesKeySig])
 
-  const activeKey = seriesOptions.some((opt) => opt.key === selected.key)
-    ? selected.key
-    : defaultKey
-  const active = seriesOptions.find((opt) => opt.key === activeKey) ?? selected
-
-  const analogName = active.kind === 'analog' ? active.key.slice('analog:'.length) : ''
-  const seriesSuffix = active.kind === 'analog' ? pmuKey(analogName) : active.key
-
-  // One line per PMU — legend below plot toggles visibility.
-  const chartSeries = pmus.map((pmu, idx) => ({
-    dataKey: `${pmuKey(pmu.name)}__${seriesSuffix}`,
-    name: chartLabel(pmu),
-    color: CHART_COLORS[idx % CHART_COLORS.length],
-  }))
-  const seriesKeys = chartSeries.map((s) => s.dataKey)
-  const { hidden, toggle, isHidden } = useSeriesVisibility(seriesKeys)
+  const isHidden = useCallback((key: string) => activeHidden.has(key), [activeHidden])
 
   const data = useMemo(() => {
     const batches = alignedBatches.slice(-PHASOR_TREND_WINDOW)
     return batches.map((batch) => {
       const row: Record<string, number | undefined> & { ts: number } = { ts: batch.ts }
-      for (const pmu of pmus) {
-        const key = `${pmuKey(pmu.name)}__${seriesSuffix}`
-        const point = batch.points?.[pmu.name]
-        let value: number | undefined
-        if (active.kind === 'analog') {
-          const v = point?.analogs?.[analogName]
-          value = typeof v === 'number' ? v : undefined
-        } else {
-          const v = point?.[active.key as PhaseKey]
-          value = typeof v === 'number' ? v : undefined
+      for (const ch of selectedOptions) {
+        for (const pmu of pmus) {
+          const suffix = ch.analogName ? pmuKey(ch.analogName) : ch.key
+          const key = `${pmuKey(pmu.name)}__${suffix}`
+          const point = batch.points?.[pmu.name]
+          let value: number | undefined
+          if (ch.analogName) {
+            const v = point?.analogs?.[ch.analogName]
+            value = typeof v === 'number' ? v : undefined
+          } else if (ch.field) {
+            const v = point?.[ch.field]
+            value = typeof v === 'number' ? v : undefined
+          }
+          row[key] = value
         }
-        row[key] = value
       }
       return row
     })
-  }, [alignedBatches, pmus, seriesSuffix, active.kind, active.key, analogName])
+  }, [alignedBatches, pmus, selectedOptions])
 
   const hasNumeric = data.some((row) =>
     chartSeries.some((series) => typeof row[series.dataKey] === 'number'),
   )
   const hasSeries = data.length > 0 && chartSeries.length > 0
-  const isAnalog = active.kind === 'analog'
+  const yDomain: [number | 'auto', number | 'auto'] | [number, 'auto'] =
+    activeMetric === 'magnitude' ? [0, 'auto'] : ['auto', 'auto']
+
+  const channelSummary =
+    selectedOptions.length === channelOptions.length
+      ? 'all'
+      : selectedOptions.map((c) => c.label).join(', ') || 'none'
 
   const subtitle = data.length
-    ? isAnalog
-      ? `${active.label} · CFG analog · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'}`
-      : `${active.label} magnitude · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'}`
+    ? `${METRIC_LABEL[activeMetric]} · ${channelSummary} · ${pmus.length} PMU${pmus.length === 1 ? '' : 's'}`
     : `Waiting for aligned ${kind} ticks…`
 
   const valueFmt = (value: unknown) =>
     value == null || Number.isNaN(Number(value))
       ? '—'
-      : `${round(Number(value), isAnalog ? 3 : 2)}${active.unit ? ` ${active.unit}` : ''}`
+      : `${round(Number(value), activeMetric === 'analogs' ? 3 : 2)}${unit ? ` ${unit}` : ''}`
+
+  const onMetricChange = (e: SelectChangeEvent<MetricGroup>) => {
+    setMetric(e.target.value as MetricGroup)
+  }
+
+  const onChannelsChange = (e: SelectChangeEvent<string[]>) => {
+    const value = e.target.value
+    const next = typeof value === 'string' ? value.split(',') : value
+    if (next.length === 0 && allChannelKeys.length > 0) return
+    setSelectedChannels(next)
+    setHidden(new Set())
+  }
+
+  /** Legend only toggles visibility — click again to show (no need to reopen Channels). */
+  const onLegendToggle = (dataKey: string) => {
+    setHidden((prev) => {
+      const next = new Set(prev)
+      if (next.has(dataKey)) {
+        next.delete(dataKey)
+        return next
+      }
+      const visible = seriesKeys.filter((k) => !next.has(k) && k !== dataKey)
+      if (visible.length === 0) return prev
+      next.add(dataKey)
+      return next
+    })
+  }
 
   return (
     <Card variant="outlined" sx={{ height: '100%' }}>
       <CardHeader
-        title={kind === 'voltage' ? 'Voltage Phasors' : 'Current Phasors'}
+        title={kind === 'voltage' ? 'Voltage trends' : 'Current trends'}
         subheader={subtitle}
         action={
-          <FormControl size="small" sx={{ minWidth: 88, mr: 1, mt: 0.5 }}>
-            <InputLabel id={`${kind}-series-label`}>Series</InputLabel>
-            <Select
-              labelId={`${kind}-series-label`}
-              label="Series"
-              value={activeKey}
-              onChange={(e) => setSelectedKey(e.target.value)}
-            >
-              {seriesOptions.map((opt) => (
-                <MenuItem key={opt.key} value={opt.key}>
-                  {opt.label}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ mr: 1, mt: 0.5, flexWrap: 'wrap', justifyContent: 'flex-end' }}
+          >
+            <FormControl size="small" sx={{ minWidth: 120 }}>
+              <InputLabel id={`${kind}-metric-label`}>Metric</InputLabel>
+              <Select
+                labelId={`${kind}-metric-label`}
+                label="Metric"
+                value={activeMetric}
+                onChange={onMetricChange}
+              >
+                {metricGroups.map((g) => (
+                  <MenuItem key={g} value={g}>
+                    {METRIC_LABEL[g]}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: 148, maxWidth: 220 }}>
+              <InputLabel id={`${kind}-channels-label`}>Channels</InputLabel>
+              <Select
+                labelId={`${kind}-channels-label`}
+                multiple
+                value={selectedChannels.filter((k) => allChannelKeys.includes(k))}
+                onChange={onChannelsChange}
+                input={<OutlinedInput label="Channels" />}
+                renderValue={(selected) => {
+                  if (!selected.length) return 'None'
+                  if (selected.length === allChannelKeys.length) return 'All'
+                  return channelOptions
+                    .filter((c) => selected.includes(c.key))
+                    .map((c) => c.label)
+                    .join(', ')
+                }}
+              >
+                {channelOptions.map((opt) => (
+                  <MenuItem key={opt.key} value={opt.key}>
+                    <Checkbox size="small" checked={selectedChannels.includes(opt.key)} />
+                    <ListItemText primary={opt.label} />
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Stack>
         }
         slotProps={{
           title: { variant: 'h6', sx: { fontSize: '1rem' } },
@@ -200,11 +342,15 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
         <Box sx={{ width: '100%', minWidth: 0 }}>
           {!hasSeries ? (
             <Typography sx={{ p: 2, color: 'text.secondary' }}>
-              Waiting for aligned {kind} phasor ticks…
+              Waiting for aligned {kind} ticks…
             </Typography>
-          ) : !hasNumeric && isAnalog ? (
+          ) : !hasNumeric && activeMetric === 'analogs' ? (
             <Typography sx={{ p: 2, color: 'text.secondary' }}>
-              No values yet for CFG analog “{analogName}”. Waiting for aligned ticks…
+              No analog values on aligned ticks yet. Waiting…
+            </Typography>
+          ) : !selectedOptions.length ? (
+            <Typography sx={{ p: 2, color: 'text.secondary' }}>
+              Select at least one channel to plot.
             </Typography>
           ) : (
             <>
@@ -222,7 +368,7 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
                     />
                     <YAxis
                       tick={CHART_AXIS_TICK}
-                      domain={isAnalog ? ['auto', 'auto'] : [0, 'auto']}
+                      domain={yDomain}
                       tickFormatter={(v) => `${round(Number(v), 1)}`}
                       width={52}
                       stroke="#94a3b8"
@@ -244,6 +390,7 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
                           dataKey={series.dataKey}
                           name={series.name}
                           stroke={series.color}
+                          strokeDasharray={series.dash}
                           dot={false}
                           activeDot={{ r: 4, strokeWidth: 2, fill: '#0f172a' }}
                           strokeWidth={2.25}
@@ -257,8 +404,8 @@ export function PhasorMagnitudeChart({ pmus, kind, alignedBatches = [] }: Props)
               </Box>
               <ExternalChartLegend
                 items={chartSeries.map((s) => ({ key: s.dataKey, name: s.name, color: s.color }))}
-                hidden={hidden}
-                onToggle={toggle}
+                hidden={activeHidden}
+                onToggle={onLegendToggle}
               />
             </>
           )}

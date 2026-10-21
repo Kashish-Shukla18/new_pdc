@@ -51,6 +51,7 @@ Thumbs.db
 *.log
 
 # Local planning / architecture notes (keep off remote until ready)
+# Includes docs/SPECIFICATIONS.md and other working specs — never commit.
 docs/
 *.plan.md
 *PLAN*.md
@@ -66,3 +67,6 @@ data/*.md
 data/spool/
 data/profiles/
 
+# Local compiled binaries (no extension)
+/pdc
+/pdc-*

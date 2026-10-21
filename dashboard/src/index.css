@@ -2142,6 +2142,42 @@ tbody td span {
   margin: 0 0 12px;
 }
 
+.device-bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(77, 200, 240, 0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(77, 200, 240, 0.08);
+}
+
+.device-bulk-count {
+  margin-right: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.device-select-col {
+  width: 2.25rem;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.device-select-col input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.device-table tbody tr.device-row-selected {
+  background: rgba(77, 200, 240, 0.1);
+}
+
 .device-empty {
   text-align: left !important;
   color: var(--muted, #64748b);
@@ -2569,6 +2605,77 @@ tbody td span {
   font-size: 11px;
   color: var(--text-3);
   line-height: 1.35;
+}
+
+.skew-reject-card {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+}
+
+.skew-reject-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.skew-reject-card__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.skew-reject-card__value {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  color: var(--text-2);
+}
+
+.skew-reject-card--active .skew-reject-card__value {
+  color: #f0706a;
+}
+
+.skew-reject-card__sub {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+
+.skew-reject-card__sub code {
+  font-size: 11px;
+}
+
+.skew-reject-card__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.skew-reject-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skew-reject-card__list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 2fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.skew-reject-card__reason {
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kpi-card.ok .kpi-value {

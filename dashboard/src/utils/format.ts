@@ -31,10 +31,16 @@ export function formatTSMs(ts: number) {
   return `${base}.${ms}`
 }
 
-export function ageText(iso: string) {
+/** Age of an ISO timestamp. Pass snapshotNowIso so we do not add HTTP/JSON delay. */
+export function ageText(iso: string, snapshotNowIso?: string) {
   if (!iso) return '--'
-  const deltaMs = Date.now() - new Date(iso).getTime()
-  if (deltaMs < 2000) return `${Math.max(1, Math.round(deltaMs))} ms ago`
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return '--'
+  const now = snapshotNowIso ? new Date(snapshotNowIso).getTime() : Date.now()
+  if (!Number.isFinite(now)) return '--'
+  const deltaMs = Math.max(0, now - then)
+  if (deltaMs < 1) return '0 ms ago'
+  if (deltaMs < 2000) return `${Math.round(deltaMs)} ms ago`
   if (deltaMs < 60000) return `${round(deltaMs / 1000, 1)} s ago`
   return `${Math.floor(deltaMs / 60000)} min ago`
 }

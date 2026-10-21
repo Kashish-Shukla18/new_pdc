@@ -30,6 +30,7 @@ import { ageText, round } from '../utils/format'
 import {
   availabilityOf,
   buildOfflinePMU,
+  displayFps,
   endpointIdentity,
   metaForDB,
   packetLossOf,
@@ -239,6 +240,106 @@ export function useDashboard() {
     }
   }, [])
 
+  const handleBulkDisconnectPMU = useCallback(async (names: string[]) => {
+    const unique = [...new Set(names.filter(Boolean))]
+    if (!unique.length) return
+    if (
+      !confirm(
+        `Disconnect ${unique.length} PMU${unique.length === 1 ? '' : 's'}? They stay registered so you can connect again.`,
+      )
+    ) {
+      return
+    }
+    setDeletingPMUName('__bulk__')
+    const failed: string[] = []
+    const results = await Promise.allSettled(
+      unique.map(async (name) => {
+        const res = await fetch(`/api/pmus/${encodeURIComponent(name)}/disconnect`, { method: 'POST' })
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text || `Failed to disconnect ${name}`)
+        }
+        return name
+      }),
+    )
+    const okNames: string[] = []
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') okNames.push(result.value)
+      else failed.push(unique[index])
+    })
+    if (okNames.length) {
+      const okSet = new Set(okNames)
+      setDbConfigs((current) =>
+        current.map((config) => (okSet.has(config.name) ? { ...config, active: false } : config)),
+      )
+      setDeviceInventoryTab('disconnected')
+    }
+    if (failed.length && okNames.length) {
+      setNotice({
+        type: 'error',
+        message: `Disconnected ${okNames.length}; failed: ${failed.join(', ')}`,
+      })
+    } else if (failed.length) {
+      setNotice({ type: 'error', message: `Failed to disconnect: ${failed.join(', ')}` })
+    } else {
+      setNotice({
+        type: 'success',
+        message: `${okNames.length} PMU${okNames.length === 1 ? '' : 's'} disconnected.`,
+      })
+    }
+    setDeletingPMUName('')
+  }, [])
+
+  const handleBulkConnectPMU = useCallback(async (names: string[]) => {
+    const unique = [...new Set(names.filter(Boolean))]
+    if (!unique.length) return
+    setConnectingPMUName('__bulk__')
+    const failed: string[] = []
+    const savedByName = new Map<string, PMUConfig>()
+    const results = await Promise.allSettled(
+      unique.map(async (name) => {
+        const res = await fetch(`/api/pmus/${encodeURIComponent(name)}/connect`, { method: 'POST' })
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text || `Failed to connect ${name}`)
+        }
+        const saved = (await res.json()) as PMUConfig
+        return { name, saved }
+      }),
+    )
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        savedByName.set(result.value.name, result.value.saved)
+      } else {
+        failed.push(unique[index])
+      }
+    })
+    if (savedByName.size) {
+      setDbConfigs((current) =>
+        current.map((config) => {
+          const saved = savedByName.get(config.name)
+          return saved ? { ...config, ...saved, active: true } : config
+        }),
+      )
+      setDeviceInventoryTab('connected')
+    }
+    const okCount = savedByName.size
+    if (failed.length && okCount) {
+      setNotice({
+        type: 'error',
+        message: `Connecting ${okCount}; failed: ${failed.join(', ')}`,
+      })
+    } else if (failed.length) {
+      setNotice({ type: 'error', message: `Failed to connect: ${failed.join(', ')}` })
+    } else {
+      setNotice({
+        type: 'success',
+        message: `${okCount} PMU${okCount === 1 ? '' : 's'} connecting again.`,
+      })
+    }
+    setConnectingPMUName('')
+  }, [])
+
   const handleDeletePMU = handleDisconnectPMU
 
   useEffect(() => {
@@ -397,7 +498,7 @@ export function useDashboard() {
     return { connected, disconnected, totalErrors }
   }, [enabledPmus])
 
-  const frameRate = selectedPMU?.approxFps ?? 0
+  const frameRate = selectedPMU ? displayFps(selectedPMU, selectedPMU.meta.targetFps) : 0
   const systemTone = systemCounts.disconnected >= 2 ? 'bad' : systemCounts.disconnected > 0 ? 'warn' : 'ok'
   const systemMessage =
     systemCounts.disconnected >= 2
@@ -598,6 +699,8 @@ export function useDashboard() {
     handleDeletePMU,
     handleDisconnectPMU,
     handleConnectPMU,
+    handleBulkDisconnectPMU,
+    handleBulkConnectPMU,
     deletingPMUName,
     connectingPMUName,
     deviceInventoryTab,

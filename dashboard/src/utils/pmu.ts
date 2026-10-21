@@ -75,6 +75,27 @@ export function effectiveFps(pmu: LivePMUState): number {
   return approx
 }
 
+function cfgRateOf(pmu: LivePMUState, metaTarget = 0): number {
+  if (typeof pmu.cfg?.dataRate === 'number' && pmu.cfg.dataRate !== 0) {
+    return pmu.cfg.dataRate > 0 ? pmu.cfg.dataRate : 1 / Math.abs(pmu.cfg.dataRate)
+  }
+  return metaTarget > 0 ? metaTarget : 0
+}
+
+/**
+ * FPS shown to operators. Values within ±5% (or ±3 fps) of CFG DATA_RATE are
+ * receive-time jitter, not loss — report the advertised rate so 199/204 is not
+ * painted as a fault.
+ */
+export function displayFps(pmu: LivePMUState, metaTarget = 0): number {
+  const fps = effectiveFps(pmu)
+  const cfg = cfgRateOf(pmu, metaTarget)
+  if (!pmu.connected || !Number.isFinite(fps) || fps <= 0 || cfg <= 0) return fps
+  const tol = Math.max(3, cfg * 0.05)
+  if (Math.abs(fps - cfg) <= tol) return cfg
+  return fps
+}
+
 function snapSynchroRate(live: number): number {
   if (live >= 100) return 120
   if (live >= 45) return 60
@@ -90,12 +111,7 @@ function snapSynchroRate(live: number): number {
  */
 export function resolveTargetFps(pmu: LivePMUState, metaTarget = 0): number {
   const live = effectiveFps(pmu)
-  let cfg = 0
-  if (typeof pmu.cfg?.dataRate === 'number' && pmu.cfg.dataRate !== 0) {
-    cfg = pmu.cfg.dataRate > 0 ? pmu.cfg.dataRate : 1 / Math.abs(pmu.cfg.dataRate)
-  } else if (metaTarget > 0) {
-    cfg = metaTarget
-  }
+  const cfg = cfgRateOf(pmu, metaTarget)
   if (live >= 8 && cfg > 0 && live < cfg * 0.55) {
     return snapSynchroRate(live)
   }
@@ -107,7 +123,7 @@ export function resolveTargetFps(pmu: LivePMUState, metaTarget = 0): number {
 export function availabilityOf(pmu: LivePMUState, targetFps: number) {
   if (!pmu.connected) return 0
   const target = resolveTargetFps(pmu, targetFps)
-  const fps = effectiveFps(pmu)
+  const fps = displayFps(pmu, targetFps)
   if (!Number.isFinite(fps) || fps <= 0) return 100
   const ratio = fps / Math.max(1, target)
   if (ratio >= 0.7) return 100
@@ -274,6 +290,8 @@ export function buildOfflinePMU(name: string, meta: PMUMeta): PMUWithMeta {
     totalFrames: 0,
     approxFps: 0,
     qualityRejects: 0,
+    skewRejects: 0,
+    lastQualityReject: '',
     sinkErrors: 0,
     spoolQueued: 0,
     lastReading: { ts: 0, frequency: 0, frequencyDev: 0, mw: 0, mvar: 0, rocof: 0, statDataError: false },
